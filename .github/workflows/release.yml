@@ -1,0 +1,369 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      actions: read
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      ci_run_id: ${{ steps.version.outputs.ci_run_id }}
+      ci_head_sha: ${{ steps.version.outputs.ci_head_sha }}
+      state_json: ${{ steps.version.outputs.state_json }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      phase: ${{ steps.version.outputs.phase }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Get version state and CI run
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEV_RELEASE_BODY=$(gh release view dev --repo "${{ github.repository }}" --json body --jq '.body // empty' 2>/dev/null || echo "")
+
+          if [ -z "$DEV_RELEASE_BODY" ]; then
+            echo "::error::No dev release found. Run CI first to create a development build."
+            exit 1
+          fi
+
+          STATE_JSON=$(dotnet scripts/version.cs state --body "$DEV_RELEASE_BODY")
+          echo "Current state: $STATE_JSON"
+
+          CI_RUN_ID=$(echo "$DEV_RELEASE_BODY" | grep -o '<!-- CI_RUN_ID: [^>]* -->' | sed 's/<!-- CI_RUN_ID: \(.*\) -->/\1/' || echo "")
+          if [ -z "$CI_RUN_ID" ]; then
+            CI_RUN_ID=$(gh run list --repo "${{ github.repository }}" --workflow=ci.yml --branch=main --status=success --limit=1 --json databaseId --jq '.[0].databaseId // empty')
+          fi
+
+          if [ -z "$CI_RUN_ID" ]; then
+            echo "::error::No successful CI run found."
+            exit 1
+          fi
+
+          CI_HEAD_SHA=$(gh run view "${CI_RUN_ID}" --repo "${{ github.repository }}" --json headSha --jq '.headSha // empty')
+          if [ -z "$CI_HEAD_SHA" ]; then
+            echo "::error::Could not determine the commit SHA for CI run ${CI_RUN_ID}."
+            exit 1
+          fi
+
+          RC_VERSION=$(echo "$DEV_RELEASE_BODY" | grep -o '<!-- RC_VERSION: [^>]* -->' | sed 's/<!-- RC_VERSION: \(.*\) -->/\1/' || echo "")
+          if [ -z "$RC_VERSION" ]; then
+            VERSIONS_JSON=$(dotnet scripts/version.cs calculate --state "$STATE_JSON")
+            RC_VERSION=$(echo "$VERSIONS_JSON" | jq -r '.rcVersion')
+          fi
+
+          PHASE=$(echo "$STATE_JSON" | jq -r '.phase')
+          if [ "$PHASE" = "rtm" ]; then
+            IS_PRERELEASE=false
+          else
+            IS_PRERELEASE=true
+          fi
+
+          STATE_JSON_COMPACT=$(echo "$STATE_JSON" | jq -c '.')
+          echo "version=${RC_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "ci_run_id=${CI_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "ci_head_sha=${CI_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "state_json=${STATE_JSON_COMPACT}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "phase=${PHASE}" >> "$GITHUB_OUTPUT"
+
+          echo "## Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version:** ${RC_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Phase:** ${PHASE}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **CI Run:** ${CI_RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **CI Commit:** ${CI_HEAD_SHA}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate CI run commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORKFLOW_SHA='${{ github.sha }}'
+          CI_HEAD_SHA='${{ steps.version.outputs.ci_head_sha }}'
+
+          if [ "$CI_HEAD_SHA" != "$WORKFLOW_SHA" ]; then
+            echo "::error::RC bundle came from CI run ${{ steps.version.outputs.ci_run_id }} at commit ${CI_HEAD_SHA}, but this release workflow is running for ${WORKFLOW_SHA}. Re-run the release workflow from the matching commit or rerun CI on the intended commit first."
+            exit 1
+          fi
+
+      - name: Download RC bundle from CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ./artifacts
+          gh run download "${{ steps.version.outputs.ci_run_id }}" --repo "${{ github.repository }}" --name native-rc-bundle --dir ./artifacts
+
+      - name: Verify release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_VERSION='${{ steps.version.outputs.version }}'
+          METADATA_FILE='./artifacts/release-metadata.json'
+
+          if [ ! -f "$METADATA_FILE" ]; then
+            echo "::error::Missing release metadata file."
+            exit 1
+          fi
+
+          ACTUAL_VERSION=$(jq -r '.version' "$METADATA_FILE")
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Release metadata version mismatch. Expected '$EXPECTED_VERSION' but found '$ACTUAL_VERSION'."
+            exit 1
+          fi
+
+      - name: Upload unsigned release bundle
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: release-unsigned-bundle
+          path: ./artifacts/*
+          retention-days: 7
+
+  sign-windows:
+    runs-on: windows-2022
+    needs: prepare-release
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Download unsigned release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-unsigned-bundle
+          path: ./artifacts/bundle
+
+      - name: Expand Windows release assets
+        shell: pwsh
+        run: ./scripts/Expand-WindowsReleaseAssets.ps1 -BundleDirectory './artifacts/bundle' -WorkingDirectory './artifacts/windows-assets'
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Azure login
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows executables
+        uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16
+        with:
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\artifacts\windows-assets
+          files-folder-filter: copilotd.exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify signed Windows issuer
+        shell: pwsh
+        run: |
+          $binaryPaths = @(Get-ChildItem -Path './artifacts/windows-assets' -Recurse -Filter 'copilotd.exe' -File)
+          if ($binaryPaths.Count -eq 0) {
+            throw "No signed copilotd.exe files were found under './artifacts/windows-assets'."
+          }
+
+          foreach ($binaryPath in $binaryPaths) {
+            ./scripts/Verify-WindowsBinaryIssuer.ps1 -BinaryPath $binaryPath.FullName -InstallerScriptPath './scripts/install/install-copilotd.ps1'
+          }
+
+      - name: Repack signed Windows assets
+        shell: pwsh
+        run: ./scripts/Compress-WindowsReleaseAssets.ps1 -WorkingDirectory './artifacts/windows-assets' -OutputDirectory './artifacts/signed-windows-assets'
+
+      - name: Upload signed Windows assets
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: release-signed-windows-assets
+          path: ./artifacts/signed-windows-assets/*
+          retention-days: 7
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: [prepare-release, sign-windows]
+
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download unsigned release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-unsigned-bundle
+          path: ./artifacts/release
+
+      - name: Download signed Windows assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-signed-windows-assets
+          path: ./artifacts/signed-windows-assets
+
+      - name: Overlay signed Windows assets
+        shell: pwsh
+        run: Copy-Item './artifacts/signed-windows-assets/*' './artifacts/release' -Force
+
+      - name: Regenerate release metadata
+        shell: pwsh
+        run: ./scripts/Update-ReleaseBundleMetadata.ps1 -BundleDirectory './artifacts/release'
+
+      - name: Verify updated release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_VERSION='${{ needs.prepare-release.outputs.version }}'
+          METADATA_FILE='./artifacts/release/release-metadata.json'
+
+          if [ ! -f "$METADATA_FILE" ]; then
+            echo "::error::Missing release metadata file."
+            exit 1
+          fi
+
+          ACTUAL_VERSION=$(jq -r '.version' "$METADATA_FILE")
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Release metadata version mismatch. Expected '$EXPECTED_VERSION' but found '$ACTUAL_VERSION'."
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        id: create_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION='${{ needs.prepare-release.outputs.version }}'
+          IS_PRERELEASE='${{ needs.prepare-release.outputs.is_prerelease }}'
+          PRERELEASE_FLAG=()
+
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG+=(--prerelease)
+          fi
+
+          if gh release view "v${VERSION}" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Release v${VERSION} already exists; skipping create."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          gh release create "v${VERSION}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            "${PRERELEASE_FLAG[@]}" \
+            --title "v${VERSION}" \
+            --notes "## copilotd ${VERSION}
+
+          Native release assets for Windows, Linux, and macOS.
+
+          - checksums are included in \`checksums.txt\`.
+          - release metadata is included in \`release-metadata.json\`." \
+            ./artifacts/release/*
+
+      - name: Advance version state
+        if: steps.create_release.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE_JSON: ${{ needs.prepare-release.outputs.state_json }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION='${{ needs.prepare-release.outputs.version }}'
+          NEW_STATE_JSON=$(dotnet scripts/version.cs advance --state "$STATE_JSON" --shipped-version "$VERSION")
+          VERSIONS_JSON=$(dotnet scripts/version.cs calculate --state "$NEW_STATE_JSON")
+          NEXT_DEV_VERSION=$(echo "$VERSIONS_JSON" | jq -r '.devVersion')
+          NEXT_RC_VERSION=$(echo "$VERSIONS_JSON" | jq -r '.rcVersion')
+          NEW_BASE=$(echo "$NEW_STATE_JSON" | jq -r '.base')
+          NEW_PHASE=$(echo "$NEW_STATE_JSON" | jq -r '.phase')
+          NEW_PHASE_NUMBER=$(echo "$NEW_STATE_JSON" | jq -r '.phaseNumber')
+          STATE_STRING="${NEW_BASE}|${NEW_PHASE}|${NEW_PHASE_NUMBER}|0|none"
+          NOTES=$(cat <<EOF
+          ## Development Build
+
+          **Last Published Release:** v${VERSION}
+          **Next Dev Version:** ${NEXT_DEV_VERSION}
+          **Next RC Version:** ${NEXT_RC_VERSION}
+          **Commit:** ${{ github.sha }}
+          **Build:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          Release shipped successfully. The next push to main will publish fresh development assets.
+
+          <!-- VERSION_STATE: ${STATE_STRING} -->
+          EOF
+          )
+
+          if gh release view dev --repo "${{ github.repository }}" --json isDraft &>/dev/null; then
+            gh release edit dev \
+              --repo "${{ github.repository }}" \
+              --draft \
+              --prerelease \
+              --title "Development Build" \
+              --notes "$NOTES"
+          else
+            gh release create dev \
+              --repo "${{ github.repository }}" \
+              --target "${{ github.sha }}" \
+              --draft \
+              --prerelease \
+              --title "Development Build" \
+              --notes "$NOTES"
+          fi

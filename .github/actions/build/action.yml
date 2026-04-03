@@ -1,0 +1,65 @@
+name: Build
+description: Setup .NET, restore, build the solution, and optionally validate a NativeAOT publish
+
+inputs:
+  version:
+    description: Semantic version to inject into the build.
+    required: false
+    default: ''
+  validate-native-aot:
+    description: Whether to validate a NativeAOT publish on the current runner.
+    required: false
+    default: 'false'
+  aot-runtime-identifier:
+    description: Runtime identifier to use when validate-native-aot is enabled.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Restore
+      shell: bash
+      run: dotnet restore copilotd.slnx --nologo --tl:off
+
+    - name: Build
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.version }}" ]; then
+          dotnet build copilotd.slnx --configuration Release --no-restore --nologo --tl:off -p:Version=${{ inputs.version }} -p:ContinuousIntegrationBuild=true
+        else
+          dotnet build copilotd.slnx --configuration Release --no-restore --nologo --tl:off -p:ContinuousIntegrationBuild=true
+        fi
+
+    - name: Validate NativeAOT publish
+      if: inputs.validate-native-aot == 'true'
+      shell: pwsh
+      run: |
+        if ('${{ inputs.aot-runtime-identifier }}' -eq '') {
+          throw "The 'aot-runtime-identifier' input is required when validate-native-aot is enabled."
+        }
+
+        $arguments = @(
+          'publish',
+          './src/copilotd/copilotd.csproj',
+          '--configuration', 'Release',
+          '--runtime', '${{ inputs.aot-runtime-identifier }}',
+          '--self-contained', 'true',
+          '--nologo',
+          '--tl:off',
+          '-p:ContinuousIntegrationBuild=true'
+        )
+
+        if ('${{ inputs.version }}' -ne '') {
+          $arguments += "-p:Version=${{ inputs.version }}"
+        }
+
+        & dotnet @arguments
+        if ($LASTEXITCODE -ne 0) {
+          throw "dotnet publish failed for runtime '${{ inputs.aot-runtime-identifier }}'."
+        }

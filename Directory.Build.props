@@ -1,5 +1,12 @@
 <Project>
+
   <PropertyGroup>
-    <ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ContinuousIntegrationBuild Condition="'$(ContinuousIntegrationBuild)' == '' and '$(CI)' != ''">true</ContinuousIntegrationBuild>
+    <Version Condition="'$(Version)' == ''">0.0.1-pre.1.dev.1</Version>
+    <RepositoryUrl>https://github.com/DamianEdwards/copilotd</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
   </PropertyGroup>
+
 </Project>

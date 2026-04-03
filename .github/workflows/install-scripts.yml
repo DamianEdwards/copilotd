@@ -1,0 +1,117 @@
+name: Install Scripts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sign-install-script:
+    runs-on: windows-2022
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Stage install script
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path ./artifacts/install-script -Force | Out-Null
+          Copy-Item ./scripts/install/install-copilotd.ps1 ./artifacts/install-script/install.ps1 -Force
+
+      - name: Azure login
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign install script
+        uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16
+        with:
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\artifacts\install-script
+          files-folder-filter: install.ps1
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Upload signed install script
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: signed-install-script
+          path: ./artifacts/install-script/install.ps1
+          retention-days: 7
+
+  publish-install-script:
+    runs-on: ubuntu-latest
+    needs: sign-install-script
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed install script
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: signed-install-script
+          path: ./artifacts/install-script
+
+      - name: Publish standing install release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG='install-scripts'
+          RELEASE_TITLE='Install Scripts'
+          SCRIPT_PATH='./artifacts/install-script/install.ps1'
+          NOTES='Latest signed installer script for copilotd.'
+
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "::error::Signed installer script was not found at $SCRIPT_PATH."
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" &>/dev/null; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --latest=false \
+              --title "$RELEASE_TITLE" \
+              --notes "$NOTES" \
+              --target "${{ github.sha }}"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --latest=false \
+              --target "${{ github.sha }}" \
+              --title "$RELEASE_TITLE" \
+              --notes "$NOTES"
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            "$SCRIPT_PATH" \
+            --clobber

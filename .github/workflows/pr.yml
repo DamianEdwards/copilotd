@@ -1,0 +1,60 @@
+name: PR
+
+on:
+  pull_request:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  validate-powershell-scripts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Validate PowerShell script syntax
+        shell: pwsh
+        run: ./scripts/Verify-PowerShellSyntax.ps1
+
+  build:
+    needs: [validate-powershell-scripts]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Build
+        uses: ./.github/actions/build
+        with:
+          validate-native-aot: 'true'
+          aot-runtime-identifier: linux-x64
+
+  publish-aot:
+    needs: [build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rid: win-x64
+          - runner: ubuntu-22.04
+            rid: linux-x64
+          - runner: macos-latest
+            rid: osx-arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Build and validate NativeAOT publish
+        uses: ./.github/actions/build
+        with:
+          validate-native-aot: 'true'
+          aot-runtime-identifier: ${{ matrix.rid }}
