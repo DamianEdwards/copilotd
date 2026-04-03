@@ -121,10 +121,11 @@ public static class SessionCommand
                     return 1;
                 }
 
-                var repoPath = Path.Combine(config.RepoHome ?? ".", session.Repo);
-                if (!Directory.Exists(repoPath))
+                // Use worktree path if available, otherwise fall back to main repo
+                var workingDir = session.WorktreePath ?? Path.Combine(config.RepoHome ?? ".", session.Repo);
+                if (!Directory.Exists(workingDir))
                 {
-                    ConsoleOutput.Error($"Repo directory not found: {repoPath}");
+                    ConsoleOutput.Error($"Working directory not found: {workingDir}");
                     return 1;
                 }
 
@@ -147,6 +148,8 @@ public static class SessionCommand
                 stateStore.SaveState(state);
 
                 ConsoleOutput.Success($"Joining session {session.CopilotSessionId} for {issueKey}");
+                if (session.WorktreePath is not null)
+                    ConsoleOutput.Info($"Working directory: {session.WorktreePath}");
                 ConsoleOutput.Info("Press Ctrl+C to exit the interactive session.");
                 Console.WriteLine();
 
@@ -155,7 +158,7 @@ public static class SessionCommand
                 {
                     FileName = "copilot",
                     Arguments = $"--resume={session.CopilotSessionId}",
-                    WorkingDirectory = repoPath,
+                    WorkingDirectory = workingDir,
                     UseShellExecute = false,
                     RedirectStandardInput = false,
                     RedirectStandardOutput = false,
@@ -273,7 +276,9 @@ public static class SessionCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
+                var processManager = services.GetRequiredService<ProcessManager>();
                 var state = stateStore.LoadState();
+                var config = stateStore.LoadConfig();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
 
@@ -289,11 +294,15 @@ public static class SessionCommand
                     return 0;
                 }
 
+                // Clean up old worktree before resetting
+                processManager.CleanupWorktree(session, config);
+
                 session.Status = SessionStatus.Pending;
                 session.CompletedBySession = false;
                 session.CopilotSessionId = Guid.NewGuid().ToString();
                 session.ProcessId = null;
                 session.ProcessStartTime = null;
+                session.WorktreePath = null;
                 session.RetryCount = 0;
                 session.LastFailureAt = null;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -405,6 +414,7 @@ public static class SessionCommand
         table.AddColumn("Status");
         table.AddColumn("PID");
         table.AddColumn("Session ID");
+        table.AddColumn("Worktree");
         table.AddColumn("Created");
         table.AddColumn("Updated");
 
@@ -424,6 +434,7 @@ public static class SessionCommand
             var sessionId = string.IsNullOrEmpty(s.CopilotSessionId)
                 ? "-"
                 : s.CopilotSessionId;
+            var worktree = string.IsNullOrEmpty(s.WorktreePath) ? "-" : s.WorktreePath;
 
             table.AddRow(
                 Markup.Escape(s.IssueKey),
@@ -431,6 +442,7 @@ public static class SessionCommand
                 statusMarkup,
                 Markup.Escape(pid),
                 Markup.Escape(sessionId),
+                Markup.Escape(worktree),
                 FormatTime(s.CreatedAt),
                 FormatTime(s.UpdatedAt)
             );

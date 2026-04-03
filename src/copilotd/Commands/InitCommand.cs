@@ -128,6 +128,7 @@ public static class InitCommand
                 }
 
                 stateStore.SaveConfig(config);
+                stateStore.EnsurePromptFile();
                 ConsoleOutput.Success("Configuration saved successfully!");
                 ConsoleOutput.Info($"Config stored in: {stateStore.ConfigDir}");
 

@@ -14,10 +14,12 @@ public sealed partial class ProcessManager
     private static readonly TimeSpan SignalDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
 
+    private readonly StateStore _stateStore;
     private readonly ILogger<ProcessManager> _logger;
 
-    public ProcessManager(ILogger<ProcessManager> logger)
+    public ProcessManager(StateStore stateStore, ILogger<ProcessManager> logger)
     {
+        _stateStore = stateStore;
         _logger = logger;
     }
 
@@ -27,14 +29,16 @@ public sealed partial class ProcessManager
     /// </summary>
     public DispatchSession? LaunchCopilot(DispatchSession session, CopilotdConfig config, GitHubIssue issue)
     {
-        var repoPath = Path.Combine(config.RepoHome ?? ".", issue.Repo);
+        // Use worktree path if available, otherwise fall back to main repo path
+        var repoPath = session.WorktreePath ?? Path.Combine(config.RepoHome ?? ".", issue.Repo);
         if (!Directory.Exists(repoPath))
         {
-            _logger.LogWarning("Repo directory not found: {Path}", repoPath);
+            _logger.LogWarning("Working directory not found: {Path}", repoPath);
             return null;
         }
 
-        var prompt = BuildPrompt(config, issue, session);
+        var promptTemplate = _stateStore.LoadPromptTemplate(config);
+        var prompt = BuildPrompt(promptTemplate, issue, session, config);
         var args = BuildArguments(session, prompt, config.Rules.GetValueOrDefault(session.RuleName), repoPath);
 
         _logger.LogInformation("Launching copilot for {IssueKey} with session {SessionId}", session.IssueKey, session.CopilotSessionId);
@@ -348,9 +352,9 @@ public sealed partial class ProcessManager
         return true;
     }
 
-    private static string BuildPrompt(CopilotdConfig config, GitHubIssue issue, DispatchSession session)
+    private static string BuildPrompt(string template, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
     {
-        var prompt = config.Prompt
+        var prompt = template
             .Replace("$(issue.repo)", issue.Repo)
             .Replace("$(issue.id)", issue.Number.ToString())
             .Replace("$(issue.type)", issue.Type ?? "issue")
@@ -359,7 +363,7 @@ public sealed partial class ProcessManager
         var rule = config.Rules.GetValueOrDefault(session.RuleName);
         if (!string.IsNullOrWhiteSpace(rule?.ExtraPrompt))
         {
-            prompt += " " + rule.ExtraPrompt;
+            prompt += "\n\n" + rule.ExtraPrompt;
         }
 
         return prompt;
@@ -412,6 +416,161 @@ public sealed partial class ProcessManager
         {
             return null;
         }
+    }
+
+    // ---- Worktree lifecycle ----
+
+    /// <summary>
+    /// Creates a git worktree for the session on a new branch from the latest default branch.
+    /// Layout: &lt;repo_home&gt;/org/repo_sessions/issue-N/
+    /// </summary>
+    public bool PrepareWorktree(DispatchSession session, CopilotdConfig config)
+    {
+        var mainRepoPath = Path.Combine(config.RepoHome ?? ".", session.Repo);
+        if (!Directory.Exists(mainRepoPath))
+        {
+            _logger.LogWarning("Main repo directory not found: {Path}", mainRepoPath);
+            return false;
+        }
+
+        // Session dir: <repo_home>/org/repo_sessions/issue-N/
+        var sessionsDir = mainRepoPath + "_sessions";
+        var worktreePath = Path.Combine(sessionsDir, $"issue-{session.IssueNumber}");
+        var branchName = $"copilotd/issue-{session.IssueNumber}";
+
+        // If the worktree already exists from a prior run, remove it first
+        if (Directory.Exists(worktreePath))
+        {
+            _logger.LogDebug("Removing existing worktree at {Path}", worktreePath);
+            RunGit(mainRepoPath, $"worktree remove \"{worktreePath}\" --force");
+            // Also delete the branch if it exists from a prior run
+            RunGit(mainRepoPath, $"branch -D {branchName}");
+        }
+
+        Directory.CreateDirectory(sessionsDir);
+
+        // Fetch latest from origin
+        _logger.LogDebug("Fetching latest from origin for {Repo}", session.Repo);
+        if (!RunGit(mainRepoPath, "fetch origin"))
+        {
+            _logger.LogWarning("Failed to fetch origin for {Repo}", session.Repo);
+            return false;
+        }
+
+        // Determine default branch (origin/HEAD → origin/main or origin/master)
+        var defaultBranch = GetDefaultBranch(mainRepoPath);
+        if (defaultBranch is null)
+        {
+            _logger.LogWarning("Could not determine default branch for {Repo}", session.Repo);
+            return false;
+        }
+
+        // Create worktree on a new branch from origin's default branch
+        _logger.LogInformation("Creating worktree for {Key} at {Path} from {Branch}",
+            session.IssueKey, worktreePath, defaultBranch);
+
+        if (!RunGit(mainRepoPath, $"worktree add \"{worktreePath}\" -b {branchName} {defaultBranch}"))
+        {
+            _logger.LogWarning("Failed to create worktree for {Key}", session.IssueKey);
+            return false;
+        }
+
+        session.WorktreePath = worktreePath;
+        _logger.LogInformation("Worktree ready for {Key} at {Path}", session.IssueKey, worktreePath);
+        return true;
+    }
+
+    /// <summary>
+    /// Removes the git worktree and branch associated with a session.
+    /// </summary>
+    public void CleanupWorktree(DispatchSession session, CopilotdConfig config)
+    {
+        if (string.IsNullOrEmpty(session.WorktreePath))
+            return;
+
+        var mainRepoPath = Path.Combine(config.RepoHome ?? ".", session.Repo);
+        var branchName = $"copilotd/issue-{session.IssueNumber}";
+
+        _logger.LogDebug("Cleaning up worktree for {Key} at {Path}", session.IssueKey, session.WorktreePath);
+
+        if (Directory.Exists(session.WorktreePath))
+        {
+            RunGit(mainRepoPath, $"worktree remove \"{session.WorktreePath}\" --force");
+        }
+
+        // Delete the local branch (it was only used for this session)
+        RunGit(mainRepoPath, $"branch -D {branchName}");
+
+        session.WorktreePath = null;
+    }
+
+    private static string? GetDefaultBranch(string repoPath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "rev-parse --abbrev-ref origin/HEAD",
+                WorkingDirectory = repoPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null) return null;
+
+            var output = process.StandardOutput.ReadToEnd().Trim();
+            process.WaitForExit(TimeSpan.FromSeconds(10));
+
+            if (process.ExitCode == 0 && !string.IsNullOrEmpty(output) && output != "origin/HEAD")
+                return output;
+
+            // Fallback: try origin/main then origin/master
+            return RunGitCheck(repoPath, "rev-parse --verify origin/main") ? "origin/main"
+                : RunGitCheck(repoPath, "rev-parse --verify origin/master") ? "origin/master"
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool RunGit(string workingDir, string arguments)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = arguments,
+                WorkingDirectory = workingDir,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null) return false;
+
+            process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit(TimeSpan.FromSeconds(30));
+            return process.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool RunGitCheck(string workingDir, string arguments)
+    {
+        return RunGit(workingDir, arguments);
     }
 
     #region Platform Interop

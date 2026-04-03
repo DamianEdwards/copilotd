@@ -78,6 +78,13 @@ public sealed class ReconciliationEngine
 
         foreach (var key in toRemove)
         {
+            var session = state.Sessions[key];
+            // Clean up any lingering worktree
+            if (!string.IsNullOrEmpty(session.WorktreePath))
+            {
+                var config = _stateStore.LoadConfig();
+                _processManager.CleanupWorktree(session, config);
+            }
             state.Sessions.Remove(key);
             _logger.LogDebug("Pruned terminal session {Key}", key);
         }
@@ -258,6 +265,7 @@ public sealed class ReconciliationEngine
             {
                 session.Status = SessionStatus.Completed;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
+                _processManager.CleanupWorktree(session, config);
             }
         }
 
@@ -278,11 +286,13 @@ public sealed class ReconciliationEngine
                     case SessionStatus.Orphaned when existing.CanRetry:
                         _logger.LogInformation("Re-dispatching orphaned session {Key} (retry {N}/{Max})",
                             issueKey, existing.RetryCount + 1, DispatchSession.MaxRetries);
+                        _processManager.CleanupWorktree(existing, config);
                         existing.Status = SessionStatus.Pending;
                         existing.RetryCount++;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.WorktreePath = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         existing.LastFailureAt = DateTimeOffset.UtcNow;
                         continue;
@@ -307,10 +317,12 @@ public sealed class ReconciliationEngine
                         }
                         // Issue re-appeared after completion — re-dispatch with a fresh session
                         _logger.LogInformation("Issue {Key} re-matched after completion, re-dispatching", issueKey);
+                        _processManager.CleanupWorktree(existing, config);
                         existing.Status = SessionStatus.Pending;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.WorktreePath = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         continue;
                 }
@@ -363,6 +375,18 @@ public sealed class ReconciliationEngine
             session.Status = SessionStatus.Dispatching;
             session.UpdatedAt = DateTimeOffset.UtcNow;
 
+            // Create worktree for isolated working directory
+            if (!_processManager.PrepareWorktree(session, config))
+            {
+                _logger.LogWarning("Failed to prepare worktree for {Key}", session.IssueKey);
+                session.Status = SessionStatus.Failed;
+                session.RetryCount++;
+                session.LastFailureAt = DateTimeOffset.UtcNow;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+                _stateStore.SaveState(state);
+                continue;
+            }
+
             // We need the issue data for prompt building
             var issue = new GitHubIssue
             {
@@ -378,6 +402,8 @@ public sealed class ReconciliationEngine
                 session.RetryCount++;
                 session.LastFailureAt = DateTimeOffset.UtcNow;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
+                // Clean up the worktree we just created
+                _processManager.CleanupWorktree(session, config);
             }
             // else: session was updated in-place by LaunchCopilot
 

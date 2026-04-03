@@ -37,11 +37,16 @@ public sealed class CopilotdConfig
     public const string DefaultRuleName = "Default";
 
     public const string DefaultPrompt =
-        "You are working on issue #$(issue.id) in the $(issue.repo) repository. " +
-        "Read the issue details carefully and implement the requested changes. " +
-        "Follow the project's coding conventions and ensure all tests pass. " +
-        "When you have completed all the work for this issue, run " +
-        "`copilotd session complete $(issue.repo)#$(issue.id)` to mark the session as done.";
+        """
+        You are working on issue #$(issue.id) in the $(issue.repo) repository.
+        Read the issue details carefully and implement the requested changes.
+        Follow the project's coding conventions and ensure all tests pass.
+
+        Git workflow:
+        - You are already on a new branch created for this issue. Commit your changes here.
+        - When your work is complete, push the branch and create a pull request that references the issue (e.g., "Closes #$(issue.id)").
+        - After the pull request is created, run `copilotd session complete $(issue.repo)#$(issue.id)` to mark this session as done.
+        """;
 }
 
 /// <summary>

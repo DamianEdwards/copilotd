@@ -95,6 +95,11 @@ public sealed class DispatchSession
     /// </summary>
     public bool CompletedBySession { get; set; }
 
+    /// <summary>
+    /// Path to the git worktree directory for this session. Null if using the main repo checkout.
+    /// </summary>
+    public string? WorktreePath { get; set; }
+
     /// <summary>Maximum retries before giving up (0 = unlimited).</summary>
     public const int MaxRetries = 3;
 

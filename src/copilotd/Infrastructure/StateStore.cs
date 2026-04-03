@@ -19,6 +19,8 @@ public sealed class StateStore
 
     public string ConfigDir => _configDir;
 
+    private string PromptPath => Path.Combine(_configDir, "prompt.md");
+
     public StateStore(ILogger<StateStore> logger)
     {
         _logger = logger;
@@ -90,6 +92,53 @@ public sealed class StateStore
         var json = JsonSerializer.Serialize(state, CopilotdJsonContext.Default.DaemonState);
         AtomicWrite(_statePath, json);
         _logger.LogDebug("State saved to {Path}", _statePath);
+    }
+
+    // --- Prompt ---
+
+    /// <summary>
+    /// Loads the prompt template from ~/.copilotd/prompt.md if it exists,
+    /// falling back to the config's inline Prompt property.
+    /// </summary>
+    public string LoadPromptTemplate(CopilotdConfig config)
+    {
+        if (File.Exists(PromptPath))
+        {
+            try
+            {
+                var content = File.ReadAllText(PromptPath).Trim();
+                if (!string.IsNullOrEmpty(content))
+                {
+                    _logger.LogDebug("Loaded prompt template from {Path}", PromptPath);
+                    return content;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read prompt.md, falling back to config prompt");
+            }
+        }
+
+        return config.Prompt;
+    }
+
+    /// <summary>
+    /// Writes the default prompt template to ~/.copilotd/prompt.md if it doesn't exist.
+    /// </summary>
+    public void EnsurePromptFile()
+    {
+        if (File.Exists(PromptPath))
+            return;
+
+        try
+        {
+            File.WriteAllText(PromptPath, CopilotdConfig.DefaultPrompt);
+            _logger.LogDebug("Created default prompt file at {Path}", PromptPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to create prompt.md");
+        }
     }
 
     // --- Single-instance guard ---

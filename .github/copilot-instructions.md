@@ -66,6 +66,16 @@ Reflection-based serialization is disabled. Adding a new persisted model require
 - State is saved immediately after each process launch to prevent ghost processes on crash
 - Corrupt/missing files are treated as empty (self-healing) with a logged warning
 - Single-instance guard via exclusive `FileStream` on `~/.copilotd/.lock`
+- Prompt template loaded from `~/.copilotd/prompt.md` (falls back to `config.Prompt`)
+
+### Worktree Isolation
+
+Each dispatched session works in its own git worktree:
+- Layout: `<repo_home>/org/repo_sessions/issue-N/` (sibling to main checkout)
+- Created via `git -C <main-repo> worktree add <path> -b copilotd/issue-N origin/<default-branch>`
+- Cleaned up via `git worktree remove` on completion, reset, or pruning
+- `WorktreePath` is tracked on `DispatchSession` and used as working directory + `--add-dir` target
+- `PrepareWorktree` fetches origin first to ensure latest default branch HEAD
 
 ### Console Output
 

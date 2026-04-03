@@ -210,8 +210,34 @@ Log files are written to `$TEMP/copilotd/logs/` with daily rollover.
 - **Spectre.Console** for interactive prompts and formatted output
 - **Native AOT** compatible (source-generated JSON serialization)
 - Dispatched `copilot` processes are fully independent (not child processes)
+- Each session gets its own **git worktree** for isolation — multiple sessions on the same repo work in parallel without conflicts
 - State reconciliation uses three truth sources: persisted state → live process status → current GitHub issue matches
 - Graceful process shutdown via platform-specific signals (Ctrl+Break/Ctrl+C on Windows via helper process, SIGINT/SIGKILL on Unix)
+
+### Worktree isolation
+
+Each dispatched session works in its own git worktree on a new branch, ensuring:
+- **No conflicts** between concurrent sessions on the same repo
+- **Clean starting state** from the latest default branch HEAD
+- **Isolated branches** — each session creates `copilotd/issue-<N>`
+
+Directory layout:
+
+```
+<repo_home>/org/repo/                    ← main checkout (fetch-only base)
+<repo_home>/org/repo_sessions/issue-1/   ← worktree for issue #1
+<repo_home>/org/repo_sessions/issue-5/   ← worktree for issue #5
+```
+
+Worktrees are created before dispatch (`git fetch` + `git worktree add`) and cleaned up
+when sessions complete, are reset, or are pruned.
+
+### Prompt customization
+
+The prompt template is stored at `~/.copilotd/prompt.md` (created during `copilotd init`).
+Edit this file to customize the instructions given to dispatched copilot sessions. Token
+replacement is applied at dispatch time. Per-rule extra prompts are appended after the base
+prompt.
 
 ## License
 
