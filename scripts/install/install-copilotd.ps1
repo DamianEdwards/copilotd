@@ -85,23 +85,39 @@ function Ensure-PathContains
     return $true
 }
 
-function Get-HttpStatusCode
+function Assert-GitHubCliAvailable
 {
-    param([Parameter(Mandatory)][System.Exception]$Exception)
-
-    $responseProperty = $Exception.PSObject.Properties['Response']
-    if ($null -eq $responseProperty -or $null -eq $Exception.Response)
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue))
     {
-        return $null
+        Write-Host ''
+        Write-Host 'Error: GitHub CLI (gh) is required but was not found on PATH.' -ForegroundColor Red
+        Write-Host ''
+        Write-Host 'Install it from: https://cli.github.com/' -ForegroundColor Yellow
+        Write-Host 'Then authenticate:  gh auth login' -ForegroundColor Yellow
+        Write-Host ''
+        exit 1
     }
 
+    $prevEAP = $ErrorActionPreference
     try
     {
-        return [int]$Exception.Response.StatusCode
+        $ErrorActionPreference = 'Continue'
+        $null = & gh auth status 2>&1
+        $authExitCode = $LASTEXITCODE
     }
-    catch
+    finally
     {
-        return $null
+        $ErrorActionPreference = $prevEAP
+    }
+
+    if ($authExitCode -ne 0)
+    {
+        Write-Host ''
+        Write-Host 'Error: GitHub CLI (gh) is not authenticated.' -ForegroundColor Red
+        Write-Host ''
+        Write-Host 'Run the following to authenticate:  gh auth login' -ForegroundColor Yellow
+        Write-Host ''
+        exit 1
     }
 }
 
@@ -109,60 +125,82 @@ function Invoke-GitHubApi
 {
     param([Parameter(Mandatory)][string]$Uri)
 
-    $token = if (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN))
+    $prevEAP = $ErrorActionPreference
+    try
     {
-        $env:GH_TOKEN
+        $ErrorActionPreference = 'Continue'
+        $allOutput = @(& gh api $Uri 2>&1)
+        $exitCode = $LASTEXITCODE
     }
-    elseif (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN))
+    finally
     {
-        $env:GITHUB_TOKEN
-    }
-    else
-    {
-        $null
+        $ErrorActionPreference = $prevEAP
     }
 
-    $headers = @{
-        Accept       = 'application/vnd.github+json'
-        'User-Agent' = 'copilotd-install-script'
-    }
-    if ($token)
+    $outputText = ($allOutput | ForEach-Object { if ($_ -is [string]) { $_ } else { $_.ToString() } }) -join "`n"
+
+    if ($exitCode -ne 0)
     {
-        $headers.Authorization = "Bearer $token"
+        $statusCode = $null
+
+        $httpMatch = [regex]::Match($outputText, 'HTTP (\d{3})')
+        if ($httpMatch.Success)
+        {
+            $statusCode = [int]$httpMatch.Groups[1].Value
+        }
+
+        if ($null -eq $statusCode)
+        {
+            try
+            {
+                $parsed = $outputText | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($null -ne $parsed -and $null -ne $parsed.PSObject.Properties['status'])
+                {
+                    $statusCode = [int]$parsed.status
+                }
+            }
+            catch {}
+        }
+
+        $ex = [System.Exception]::new("GitHub API request failed for '$Uri': $outputText")
+        $ex.Data['StatusCode'] = $statusCode
+        throw $ex
     }
 
-    Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers
+    if ([string]::IsNullOrWhiteSpace($outputText))
+    {
+        return $null
+    }
+
+    return $outputText | ConvertFrom-Json
 }
 
 function Invoke-GitHubAssetDownload
 {
     param(
-        [Parameter(Mandatory)][string]$Uri,
-        [Parameter(Mandatory)][string]$OutFile
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$AssetName,
+        [Parameter(Mandatory)][string]$DestinationDirectory
     )
 
-    $token = if (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN))
+    $prevEAP = $ErrorActionPreference
+    try
     {
-        $env:GH_TOKEN
+        $ErrorActionPreference = 'Continue'
+        $allOutput = @(& gh release download $Tag -R $Repo -p $AssetName -D $DestinationDirectory --clobber 2>&1)
+        $exitCode = $LASTEXITCODE
     }
-    elseif (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN))
+    finally
     {
-        $env:GITHUB_TOKEN
-    }
-    else
-    {
-        $null
+        $ErrorActionPreference = $prevEAP
     }
 
-    $headers = @{
-        'User-Agent' = 'copilotd-install-script'
-    }
-    if ($token)
+    if ($exitCode -ne 0)
     {
-        $headers.Authorization = "Bearer $token"
+        $errorMessage = ($allOutput | ForEach-Object { if ($_ -is [string]) { $_ } else { $_.ToString() } }) -join "`n"
+        throw "Failed to download asset '$AssetName' from release '$Tag' in repository '$Repo': $errorMessage"
     }
-
-    Invoke-WebRequest -Uri $Uri -Headers $headers -OutFile $OutFile
 }
 
 function Get-ReleaseByTag
@@ -179,7 +217,7 @@ function Get-ReleaseByTag
     }
     catch
     {
-        if ((Get-HttpStatusCode -Exception $_.Exception) -eq 404)
+        if ($_.Exception.Data['StatusCode'] -eq 404)
         {
             return $null
         }
@@ -992,6 +1030,8 @@ function Compare-SemanticVersion
 
 function Invoke-CopilotdInstall
 {
+    Assert-GitHubCliAvailable
+
     $architecture = Get-WindowsArchitecture
     $assetName = "copilotd-win-$architecture.zip"
     Write-Verbose "Selecting release asset '$assetName' for quality '$Quality' from '$Repository'."
@@ -1026,8 +1066,8 @@ function Invoke-CopilotdInstall
         New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 
         Invoke-StatusStep -Message "Downloading $releaseStatusLabel" -Action {
-            Write-Verbose "Downloading release asset from '$($asset.browser_download_url)' to '$downloadPath'."
-            Invoke-GitHubAssetDownload -Uri $asset.browser_download_url -OutFile $downloadPath
+            Write-Verbose "Downloading release asset '$assetName' from release '$($release.tag_name)' to '$tempRoot'."
+            Invoke-GitHubAssetDownload -Repo $Repository -Tag $release.tag_name -AssetName $assetName -DestinationDirectory $tempRoot
         }
 
         if ($Quality -ne 'Dev')
@@ -1039,16 +1079,16 @@ function Invoke-CopilotdInstall
             }
 
             $checksumsPath = Join-Path $tempRoot 'checksums.txt'
-            Write-Verbose "Downloading checksums from '$($checksumsAsset.browser_download_url)' to '$checksumsPath'."
-            Invoke-GitHubAssetDownload -Uri $checksumsAsset.browser_download_url -OutFile $checksumsPath
+            Write-Verbose "Downloading checksums from release '$($release.tag_name)' to '$checksumsPath'."
+            Invoke-GitHubAssetDownload -Repo $Repository -Tag $release.tag_name -AssetName 'checksums.txt' -DestinationDirectory $tempRoot
 
             $releaseMetadataPath = $null
             $releaseMetadataAsset = Get-ReleaseAsset -Release $release -AssetName 'release-metadata.json'
             if ($null -ne $releaseMetadataAsset)
             {
                 $releaseMetadataPath = Join-Path $tempRoot 'release-metadata.json'
-                Write-Verbose "Downloading release metadata from '$($releaseMetadataAsset.browser_download_url)' to '$releaseMetadataPath'."
-                Invoke-GitHubAssetDownload -Uri $releaseMetadataAsset.browser_download_url -OutFile $releaseMetadataPath
+                Write-Verbose "Downloading release metadata from release '$($release.tag_name)' to '$releaseMetadataPath'."
+                Invoke-GitHubAssetDownload -Repo $Repository -Tag $release.tag_name -AssetName 'release-metadata.json' -DestinationDirectory $tempRoot
             }
 
             Invoke-StatusStep -Message 'Verifying asset checksums' -Action {

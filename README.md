@@ -18,7 +18,7 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 In a PowerShell terminal:
 
 ```PowerShell
-irm https://github.com/DamianEdwards/copilotd/releases/download/install-scripts/install.ps1 | iex
+iex (gh release download install-scripts -R DamianEdwards/copilotd -p install.ps1 -O - | Out-String)
 ```
 
 ## Install on macOS or Linux
