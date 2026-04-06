@@ -241,6 +241,7 @@ function Get-ReleaseForQuality
     }
 
     $allReleases = @(Invoke-GitHubApi -Uri "https://api.github.com/repos/$Repo/releases?per_page=100" | ForEach-Object { $_ })
+    $candidateReleases = @()
     foreach ($release in $allReleases)
     {
         if ($release.draft)
@@ -253,18 +254,27 @@ function Get-ReleaseForQuality
             continue
         }
 
-        if ($SelectedQuality -eq 'Stable' -and $release.prerelease)
-        {
-            continue
-        }
-
         $asset = Get-ReleaseAsset -Release $release -AssetName $AssetName
         if ($null -eq $asset)
         {
             continue
         }
 
+        if ($SelectedQuality -eq 'Stable' -and $release.prerelease)
+        {
+            # Track as fallback candidate but keep looking for a stable release
+            $candidateReleases += $release
+            continue
+        }
+
         return $release
+    }
+
+    # When looking for Stable and none found, fall back to the latest prerelease
+    if ($SelectedQuality -eq 'Stable' -and $candidateReleases.Count -gt 0)
+    {
+        Write-Warning "No stable release containing '$AssetName' was found. Falling back to latest prerelease."
+        return $candidateReleases[0]
     }
 
     throw "No '$SelectedQuality' release containing '$AssetName' was found in '$Repo'."
@@ -469,7 +479,10 @@ function Get-ReleaseStatusLabel
     $releaseLabel =
         switch ($SelectedQuality)
         {
-            'Stable' { 'latest stable release' }
+            'Stable' {
+                if ($Release.prerelease) { 'latest prerelease (no stable release available)' }
+                else { 'latest stable release' }
+            }
             'PreRelease' { 'latest prerelease' }
             'Dev' { 'latest development build' }
             default { 'release' }
