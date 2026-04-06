@@ -13,6 +13,13 @@ public sealed class CopilotdConfig
     public string? RepoHome { get; set; }
 
     /// <summary>
+    /// Returns the normalized local filesystem path for a given repo slug (e.g., "org/repo").
+    /// Ensures consistent path separators for the current platform.
+    /// </summary>
+    public string GetRepoPath(string repo)
+        => Path.GetFullPath(Path.Combine(RepoHome ?? ".", repo));
+
+    /// <summary>
     /// Base prompt template for dispatched copilot sessions.
     /// Supports tokens: $(issue.repo), $(issue.id), $(issue.type), $(issue.milestone).
     /// </summary>

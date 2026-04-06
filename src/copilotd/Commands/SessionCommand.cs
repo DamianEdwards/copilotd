@@ -122,7 +122,7 @@ public static class SessionCommand
                 }
 
                 // Use worktree path if available, otherwise fall back to main repo
-                var workingDir = session.WorktreePath ?? Path.Combine(config.RepoHome ?? ".", session.Repo);
+                var workingDir = session.WorktreePath ?? config.GetRepoPath(session.Repo);
                 if (!Directory.Exists(workingDir))
                 {
                     ConsoleOutput.Error($"Working directory not found: {workingDir}");
@@ -149,7 +149,7 @@ public static class SessionCommand
 
                 ConsoleOutput.Success($"Joining session {session.CopilotSessionId} for {issueKey}");
                 if (session.WorktreePath is not null)
-                    ConsoleOutput.Info($"Working directory: {session.WorktreePath}");
+                    ConsoleOutput.Info($"Working directory: {session.WorktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)}");
                 ConsoleOutput.Info("Press Ctrl+C to exit the interactive session.");
                 Console.WriteLine();
 
@@ -434,7 +434,9 @@ public static class SessionCommand
             var sessionId = string.IsNullOrEmpty(s.CopilotSessionId)
                 ? "-"
                 : s.CopilotSessionId;
-            var worktree = string.IsNullOrEmpty(s.WorktreePath) ? "-" : s.WorktreePath;
+            var worktree = string.IsNullOrEmpty(s.WorktreePath)
+                ? "-"
+                : s.WorktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
 
             table.AddRow(
                 Markup.Escape(s.IssueKey),

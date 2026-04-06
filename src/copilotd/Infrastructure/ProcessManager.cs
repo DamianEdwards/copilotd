@@ -30,7 +30,7 @@ public sealed partial class ProcessManager
     public DispatchSession? LaunchCopilot(DispatchSession session, CopilotdConfig config, GitHubIssue issue)
     {
         // Use worktree path if available, otherwise fall back to main repo path
-        var repoPath = session.WorktreePath ?? Path.Combine(config.RepoHome ?? ".", issue.Repo);
+        var repoPath = session.WorktreePath ?? config.GetRepoPath(issue.Repo);
         if (!Directory.Exists(repoPath))
         {
             _logger.LogWarning("Working directory not found: {Path}", repoPath);
@@ -426,7 +426,7 @@ public sealed partial class ProcessManager
     /// </summary>
     public bool PrepareWorktree(DispatchSession session, CopilotdConfig config)
     {
-        var mainRepoPath = Path.Combine(config.RepoHome ?? ".", session.Repo);
+        var mainRepoPath = config.GetRepoPath(session.Repo);
         if (!Directory.Exists(mainRepoPath))
         {
             _logger.LogWarning("Main repo directory not found: {Path}", mainRepoPath);
@@ -488,7 +488,7 @@ public sealed partial class ProcessManager
         if (string.IsNullOrEmpty(session.WorktreePath))
             return;
 
-        var mainRepoPath = Path.Combine(config.RepoHome ?? ".", session.Repo);
+        var mainRepoPath = config.GetRepoPath(session.Repo);
         var branchName = $"copilotd/issue-{session.IssueNumber}";
 
         _logger.LogDebug("Cleaning up worktree for {Key} at {Path}", session.IssueKey, session.WorktreePath);
