@@ -4,13 +4,55 @@ using System.Text.Json.Serialization;
 namespace Copilotd.Models;
 
 /// <summary>
+/// AOT-compatible JSON converter for <see cref="SessionStatus"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="SessionStatus.Pending"/>.
+/// This prevents older binaries from losing all persisted state when encountering
+/// new enum values added in later versions.
+/// </summary>
+public sealed class TolerantSessionStatusConverter : JsonConverter<SessionStatus>
+{
+    public override SessionStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<SessionStatus>(value, ignoreCase: true, out var status))
+                return status;
+
+            // Unknown enum value from a newer version. Falling back to Pending means
+            // the reconciliation engine may re-dispatch the session prematurely, but
+            // that is recoverable. The alternatives (Completed = session lost, throwing
+            // = entire state file rejected) are worse. The newer binary will correct the
+            // status on its next run.
+            return SessionStatus.Pending;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(SessionStatus), intValue))
+                return (SessionStatus)intValue;
+
+            return SessionStatus.Pending;
+        }
+
+        return SessionStatus.Pending;
+    }
+
+    public override void Write(Utf8JsonWriter writer, SessionStatus value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
 /// AOT-safe JSON serialization metadata for all persisted models.
 /// </summary>
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(JsonStringEnumConverter<SessionStatus>)])]
+    Converters = [typeof(TolerantSessionStatusConverter)])]
 [JsonSerializable(typeof(CopilotdConfig))]
 [JsonSerializable(typeof(DaemonState))]
 [JsonSerializable(typeof(DispatchRule))]

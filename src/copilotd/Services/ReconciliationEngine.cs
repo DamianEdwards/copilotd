@@ -59,9 +59,10 @@ public sealed class ReconciliationEngine
         state.LastPollTime = DateTimeOffset.UtcNow;
         _stateStore.SaveState(state);
 
-        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {Terminal} terminal sessions",
+        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {Waiting} waiting, {Terminal} terminal sessions",
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Running),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Pending),
+            state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForFeedback),
             state.Sessions.Values.Count(s => s.IsTerminal));
     }
 
@@ -104,6 +105,10 @@ public sealed class ReconciliationEngine
                 continue;
 
             if (session.Status is SessionStatus.Pending)
+                continue;
+
+            // WaitingForFeedback sessions have no running process — skip liveness check
+            if (session.Status is SessionStatus.WaitingForFeedback)
                 continue;
 
             // For Joined sessions, check if the interactive process is still alive.
@@ -240,11 +245,22 @@ public sealed class ReconciliationEngine
 
             if (!desired.ContainsKey(key))
             {
-                // Only terminate if the session's repo was successfully queried.
+                // Only act if the session's repo was successfully queried.
                 // If the repo query failed, we don't know if the issue still matches.
                 if (!queriedRepos.Contains(session.Repo))
                 {
                     _logger.LogDebug("Repo {Repo} query failed, preserving session {Key}", session.Repo, key);
+                    continue;
+                }
+
+                // WaitingForFeedback sessions have no process to terminate
+                if (session.Status is SessionStatus.WaitingForFeedback)
+                {
+                    _logger.LogInformation("Issue {Key} no longer matches rules, completing waiting session", key);
+                    session.Status = SessionStatus.Completed;
+                    session.WaitingSince = null;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    _processManager.CleanupWorktree(session, config);
                     continue;
                 }
 
@@ -281,6 +297,25 @@ public sealed class ReconciliationEngine
                     case SessionStatus.Pending:
                     case SessionStatus.Joined:
                         // Already active or user-controlled, nothing to do
+                        continue;
+
+                    case SessionStatus.WaitingForFeedback:
+                        // Check for new comments since the session started waiting
+                        if (existing.WaitingSince is not null
+                            && _ghCli.HasNewCommentsSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value))
+                        {
+                            _logger.LogInformation("New comment detected on {Key}, re-dispatching waiting session", issueKey);
+                            // Keep same CopilotSessionId so --resume preserves context
+                            existing.Status = SessionStatus.Pending;
+                            existing.WaitingSince = null;
+                            existing.ProcessId = null;
+                            existing.ProcessStartTime = null;
+                            existing.UpdatedAt = DateTimeOffset.UtcNow;
+                        }
+                        else
+                        {
+                            _logger.LogDebug("Session {Key} still waiting for feedback", issueKey);
+                        }
                         continue;
 
                     case SessionStatus.Orphaned when existing.CanRetry:

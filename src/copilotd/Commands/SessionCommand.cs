@@ -3,6 +3,7 @@ using System.CommandLine.Parsing;
 using System.Diagnostics;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
+using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
@@ -17,6 +18,7 @@ public static class SessionCommand
 
         command.Subcommands.Add(CreateListCommand(services));
         command.Subcommands.Add(CreateJoinCommand(services));
+        command.Subcommands.Add(CreateCommentCommand(services));
         command.Subcommands.Add(CreateCompleteCommand(services));
         command.Subcommands.Add(CreateResetCommand(services));
 
@@ -208,6 +210,71 @@ public static class SessionCommand
                     RequeueSession(stateStore, issueKey);
                 }
 
+                return 0;
+            }, logger);
+        });
+
+        return command;
+    }
+
+    // ---- comment subcommand ----
+
+    private static Command CreateCommentCommand(IServiceProvider services)
+    {
+        var command = new Command("comment", "Post a comment on the issue and wait for feedback (can be called from within a copilot session)");
+
+        var issueArg = new Argument<string>("issue") { Description = "Issue key (e.g., owner/repo#123)" };
+        command.Arguments.Add(issueArg);
+
+        var messageOption = new Option<string>("--message")
+        {
+            Description = "The comment message to post on the issue",
+            Required = true,
+        };
+        command.Options.Add(messageOption);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            return await ConsoleOutput.RunWithErrorHandling(async () =>
+            {
+                var stateStore = services.GetRequiredService<StateStore>();
+                var ghCli = services.GetRequiredService<GhCliService>();
+                var state = stateStore.LoadState();
+
+                var issueKey = parseResult.GetValue(issueArg)!;
+                var message = parseResult.GetValue(messageOption)!;
+
+                if (!state.Sessions.TryGetValue(issueKey, out var session))
+                {
+                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
+                    return 1;
+                }
+
+                if (session.IsTerminal)
+                {
+                    ConsoleOutput.Error($"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.");
+                    return 1;
+                }
+
+                // Post the comment to the issue
+                if (!ghCli.PostIssueComment(session.Repo, session.IssueNumber, message))
+                {
+                    ConsoleOutput.Error($"Failed to post comment on {issueKey}.");
+                    return 1;
+                }
+
+                // Transition to WaitingForFeedback. The calling copilot process is
+                // expected to exit on its own after this command returns. We clear the
+                // PID so the reconciler doesn't try to verify a dead process.
+                session.Status = SessionStatus.WaitingForFeedback;
+                session.WaitingSince = DateTimeOffset.UtcNow;
+                session.ProcessId = null;
+                session.ProcessStartTime = null;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+                stateStore.SaveState(state);
+
+                ConsoleOutput.Success($"Comment posted on {issueKey}. Session is now waiting for feedback.");
                 return 0;
             }, logger);
         });
@@ -424,6 +491,7 @@ public static class SessionCommand
             {
                 SessionStatus.Running => $"[green]{s.Status}[/]",
                 SessionStatus.Joined => $"[blue]{s.Status}[/]",
+                SessionStatus.WaitingForFeedback => $"[cyan]{s.Status}[/]",
                 SessionStatus.Pending or SessionStatus.Dispatching => $"[yellow]{s.Status}[/]",
                 SessionStatus.Failed or SessionStatus.Orphaned => $"[red]{s.Status}[/]",
                 SessionStatus.Completed => $"[grey]{s.Status}[/]",

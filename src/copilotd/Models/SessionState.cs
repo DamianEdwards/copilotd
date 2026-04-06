@@ -41,7 +41,13 @@ public enum SessionStatus
     Orphaned,
 
     /// <summary>User has taken over this session interactively via 'copilotd join'.</summary>
-    Joined
+    Joined,
+
+    /// <summary>
+    /// Session posted a comment on the issue and is waiting for a response.
+    /// No process is running; the reconciler monitors for new comments.
+    /// </summary>
+    WaitingForFeedback
 }
 
 /// <summary>
@@ -94,6 +100,12 @@ public sealed class DispatchSession
     /// still matches rules.
     /// </summary>
     public bool CompletedBySession { get; set; }
+
+    /// <summary>
+    /// When the session entered <see cref="SessionStatus.WaitingForFeedback"/> state.
+    /// Used to detect new comments on the issue since the session started waiting.
+    /// </summary>
+    public DateTimeOffset? WaitingSince { get; set; }
 
     /// <summary>
     /// Path to the git worktree directory for this session. Null if using the main repo checkout.

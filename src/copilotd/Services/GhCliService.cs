@@ -196,6 +196,119 @@ public sealed class GhCliService
         return issues;
     }
 
+    /// <summary>
+    /// Marker appended to comments posted by copilotd, used to distinguish
+    /// bot-posted comments from human replies when checking for new feedback.
+    /// Invisible on GitHub (HTML comment).
+    /// </summary>
+    internal const string CommentMarker = "<!-- posted by copilotd -->";
+
+    /// <summary>
+    /// Posts a comment on a GitHub issue. Appends a hidden marker so copilotd
+    /// can distinguish its own comments from human replies.
+    /// </summary>
+    public bool PostIssueComment(string repo, int issueNumber, string message)
+    {
+        var body = message + "\n\n" + CommentMarker;
+
+        // Use --body-file - to pipe via stdin, avoiding all shell escaping issues
+        var args = $"issue comment {issueNumber} --repo {repo} --body-file -";
+
+        _logger.LogDebug("Running: gh {Args}", args);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "gh",
+            Arguments = args,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        using var process = Process.Start(psi)!;
+        process.StandardInput.Write(body);
+        process.StandardInput.Close();
+
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEnd();
+
+        if (!process.WaitForExit(GhTimeout))
+        {
+            _logger.LogWarning("gh command timed out posting comment on {Repo}#{Issue}", repo, issueNumber);
+            process.Kill();
+            return false;
+        }
+
+        if (process.ExitCode != 0)
+        {
+            var stderr = stderrTask.Result;
+            var output = string.IsNullOrEmpty(stdout) ? stderr : stdout;
+            _logger.LogWarning("Failed to post comment on {Repo}#{Issue}: {Output}", repo, issueNumber, output);
+            return false;
+        }
+
+        _logger.LogInformation("Posted comment on {Repo}#{Issue}", repo, issueNumber);
+        return true;
+    }
+
+    /// <summary>
+    /// Checks whether there are new comments on an issue since the given timestamp,
+    /// excluding comments posted by copilotd itself (identified by <see cref="CommentMarker"/>).
+    /// </summary>
+    public bool HasNewCommentsSince(string repo, int issueNumber, DateTimeOffset since)
+    {
+        var args = $"issue view {issueNumber} --repo {repo} --json comments";
+        var (exitCode, output) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query comments on {Repo}#{Issue}: {Output}", repo, issueNumber, output);
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (!doc.RootElement.TryGetProperty("comments", out var comments))
+                return false;
+
+            foreach (var comment in comments.EnumerateArray())
+            {
+                if (!comment.TryGetProperty("createdAt", out var createdAtEl))
+                    continue;
+
+                var createdAtStr = createdAtEl.GetString();
+                if (createdAtStr is null || !DateTimeOffset.TryParse(createdAtStr, out var createdAt))
+                    continue;
+
+                if (createdAt <= since)
+                    continue;
+
+                // Skip comments posted by copilotd (identified by hidden marker)
+                if (comment.TryGetProperty("body", out var bodyEl))
+                {
+                    var body = bodyEl.GetString();
+                    if (body is not null && body.Contains(CommentMarker, StringComparison.Ordinal))
+                        continue;
+                }
+
+                // Found at least one new comment not posted by copilotd
+                _logger.LogDebug("Found new comment on {Repo}#{Issue} from {Author}",
+                    repo, issueNumber,
+                    comment.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l) ? l.GetString() : "unknown");
+                return true;
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse comments JSON for {Repo}#{Issue}", repo, issueNumber);
+            return false;
+        }
+    }
+
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);
 
     private (int ExitCode, string Output) RunGh(string arguments)
