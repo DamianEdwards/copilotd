@@ -27,7 +27,7 @@ State converges through this loop — every inconsistency (crashed process, stal
 
 **Three truth sources** are reconciled each cycle: persisted state (`~/.copilotd/state.json`) → live OS process status → current GitHub issue matches.
 
-**Session lifecycle states:** Pending → Dispatching → Running → Completed/Failed/Orphaned, plus Joined (user-controlled interactive takeover). `CompletedBySession` flag distinguishes explicit copilot completion from automatic (issue unmatched) completion.
+**Session lifecycle states:** Pending → Dispatching → Running → Completed/Failed/Orphaned, plus Joined (user-controlled interactive takeover) and WaitingForFeedback (session paused, waiting for new issue comments). `CompletedBySession` flag distinguishes explicit copilot completion from automatic (issue unmatched) completion.
 
 ## Key Conventions
 
@@ -52,6 +52,8 @@ JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.TypeName);
 ```
 
 Reflection-based serialization is disabled. Adding a new persisted model requires adding a `[JsonSerializable]` attribute to `CopilotdJsonContext`.
+
+`SessionStatus` uses a custom `TolerantSessionStatusConverter` (not `JsonStringEnumConverter`) that falls back to `Pending` for unknown enum values. This ensures version resilience — older binaries won't lose all state when encountering new status values. New enum values on persisted types should follow this pattern.
 
 ### Process Management (Platform-Specific)
 

@@ -7,7 +7,7 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 - **Issue watching** — polls GitHub repos for issues matching configurable rules (assigned user, labels, milestone, issue type)
 - **Automatic dispatch** — launches `copilot --remote` sessions with templated prompts derived from issue metadata
 - **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, extra prompts, repo assignments)
-- **Session lifecycle** — full state machine with retry, backoff, orphan recovery, and explicit completion signaling
+- **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, and explicit completion signaling
 - **Self-healing state** — reconciles persisted state, live process status, and GitHub issue matches on every poll cycle and at startup
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
 - **Interactive takeover** — join any orchestrated session interactively with `copilotd session join`, then hand it back automatically
@@ -60,6 +60,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 | `copilotd session` | List dispatched sessions (alias for `session list`) |
 | `copilotd session list` | List dispatched sessions with optional filtering |
 | `copilotd session join <issue>` | Take over a session interactively |
+| `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
@@ -79,7 +80,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 ### Status & session options
 
 ```
---filter <status>   Filter by status (pending, running, joined, completed, failed, orphaned)
+--filter <status>   Filter by status (pending, running, joined, waitingforfeedback, completed, failed, orphaned)
 --all               Include ended (completed/failed) sessions
 ```
 
@@ -135,6 +136,15 @@ Each dispatched copilot session follows a state machine:
                  │◄──── Completed ◄────────┴─────────────────────┘
                  │      (auto)                   (explicit)
                  │
+                 │                   copilot calls
+                 │                   session comment
+                 │◄── WaitingForFeedback ◄───────────────────────┘
+                      │          ▲
+          new comment │          │ no new comments
+          detected    │          │ (keeps waiting)
+                      ▼          │
+                    Pending ─────┘
+                 │
           re-opened / re-matched
           (only if not explicitly completed)
 ```
@@ -148,12 +158,15 @@ Each dispatched copilot session follows a state machine:
 | **Dispatching** | **Running** | Process successfully started, PID tracked |
 | **Dispatching** | **Failed** | Process launch failed (increments retry count) |
 | **Running** | **Completed** | Issue no longer matches rules (closed, relabeled, etc.) — process gracefully terminated |
+| **Running** | **WaitingForFeedback** | Copilot calls `copilotd session comment` — process exits, session waits for new issue comments |
 | **Running** | **Orphaned** | Process died unexpectedly (PID gone or reused) |
 | **Running** | **Joined** | User runs `copilotd session join` — process terminated, user takes over |
 | **Orphaned** | **Pending** | Retry eligible (retry count < 3) — exponential backoff: 2^n minutes, capped at 30m |
 | **Orphaned** | **Failed** | Max retries (3) exceeded |
 | **Failed** | **Pending** | Issue still matches and retry count < 3 |
 | **Joined** | **Pending** | User exits interactive session — automatically re-queued for dispatch |
+| **WaitingForFeedback** | **Pending** | New comment detected on the issue (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity |
+| **WaitingForFeedback** | **Completed** | Issue no longer matches rules while waiting |
 | **Completed** | **Pending** | Issue re-matches rules (e.g., reopened) — only if not explicitly completed by copilot |
 | Any non-terminal | **Completed** | Copilot calls `copilotd session complete` — sets `CompletedBySession` flag, prevents re-dispatch |
 
@@ -167,7 +180,18 @@ Sessions can reach the **Completed** state in two ways:
 
 3. **Manual reset** — use `copilotd session reset <issue>` to force a completed or failed session back to pending with a fresh session ID, regardless of the `CompletedBySession` flag.
 
-The default prompt instructs copilot sessions to call `copilotd session complete` when they finish their work.
+### Investigation & clarification
+
+When a copilot session encounters an issue that needs more information before work can begin, it can post a comment and pause:
+
+1. The session calls `copilotd session comment <issue> --message "question or findings"`
+2. The comment is posted to the GitHub issue (with a hidden `<!-- posted by copilotd -->` marker)
+3. The session transitions to **WaitingForFeedback** — the copilot process exits, no instance slot is consumed
+4. On each poll cycle, the reconciler checks for new comments on the issue (ignoring copilotd-posted comments)
+5. When a new comment is detected, the session is re-dispatched with `--resume` to preserve the full conversation context
+6. The model can then decide to start coding or ask further questions (multiple rounds supported)
+
+The default prompt instructs copilot sessions to use this flow when they need clarification.
 
 ### Interactive takeover
 
@@ -181,6 +205,7 @@ Use `copilotd session join <issue>` to take over any tracked session:
 ### Terminal states and pruning
 
 - **Completed** and **Failed** are terminal states
+- **WaitingForFeedback** is *not* terminal — the session is paused, not finished
 - Terminal sessions are automatically pruned from state after 7 days
 - All running sessions are gracefully terminated when the daemon shuts down
 
