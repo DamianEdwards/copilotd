@@ -57,21 +57,38 @@ public class Program
 
     private static LogLevel? ParseLogLevel(string[] args)
     {
-        for (var i = 0; i < args.Length - 1; i++)
+        for (var i = 0; i < args.Length; i++)
         {
-            if (string.Equals(args[i], "--log-level", StringComparison.OrdinalIgnoreCase))
+            // Handle --log-level value
+            if (string.Equals(args[i], "--log-level", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
             {
-                return args[i + 1].ToLowerInvariant() switch
-                {
-                    "debug" or "trace" => LogLevel.Debug,
-                    "info" or "information" => LogLevel.Information,
-                    "warn" or "warning" => LogLevel.Warning,
-                    "error" => LogLevel.Error,
-                    _ => LogLevel.Information,
-                };
+                return ParseLogLevelValue(args[i + 1]);
             }
+
+            // Handle --log-level=value
+            if (args[i].StartsWith("--log-level=", StringComparison.OrdinalIgnoreCase))
+            {
+                return ParseLogLevelValue(args[i]["--log-level=".Length..]);
+            }
+        }
+
+        // Default to Information level for the 'run' command so users can see
+        // poll cycle activity and session status changes without needing --log-level
+        var command = args.FirstOrDefault(a => !a.StartsWith('-'));
+        if (string.Equals(command, "run", StringComparison.OrdinalIgnoreCase))
+        {
+            return LogLevel.Information;
         }
 
         return null;
     }
+
+    private static LogLevel ParseLogLevelValue(string value) => value.ToLowerInvariant() switch
+    {
+        "debug" or "trace" => LogLevel.Debug,
+        "info" or "information" => LogLevel.Information,
+        "warn" or "warning" => LogLevel.Warning,
+        "error" => LogLevel.Error,
+        _ => LogLevel.Information,
+    };
 }

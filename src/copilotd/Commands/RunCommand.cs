@@ -13,7 +13,7 @@ public static class RunCommand
     {
         var command = new Command("run", "Start the copilotd daemon");
         var intervalOption = new Option<int>("--interval") { Description = "Polling interval in seconds", DefaultValueFactory = _ => 60 };
-        var logLevelOption = new Option<string?>("--log-level") { Description = "Enable console logging at the specified level (debug, info, warning, error)" };
+        var logLevelOption = new Option<string?>("--log-level") { Description = "Set console logging level (default: info). Use 'debug' for more detail or 'error' for less." };
 
         command.Options.Add(intervalOption);
         command.Options.Add(logLevelOption);
