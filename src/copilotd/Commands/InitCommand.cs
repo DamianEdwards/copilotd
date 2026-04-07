@@ -61,7 +61,7 @@ public static class InitCommand
 
                 // Prompt for repo home directory
                 var examplePath = OperatingSystem.IsWindows() ? @"C:\source" : "~/repos";
-                var prompt = $"Enter the directory where repos are cloned (e.g., {examplePath}):";
+                var prompt = $"Enter the directory where your repos are cloned (e.g., {examplePath}):";
                 var repoHome = config.RepoHome is not null
                     ? AnsiConsole.Ask(prompt, config.RepoHome)
                     : AnsiConsole.Ask<string>(prompt);
@@ -92,13 +92,40 @@ public static class InitCommand
                 }
                 else
                 {
+                    // Check which repos are cloned locally under RepoHome
+                    var repoResolver = services.GetRequiredService<RepoPathResolver>();
+                    var dummyState = new DaemonState();
+                    var cloneStatus = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var repo in repos)
+                    {
+                        cloneStatus[repo] = repoResolver.ResolveRepoPath(repo, config, dummyState) is not null;
+                    }
+
+                    var clonedCount = cloneStatus.Values.Count(v => v);
+                    AnsiConsole.MarkupLine($"[grey]Found {clonedCount} of {repos.Count} repos cloned under {Markup.Escape(config.RepoHome)}[/]");
+                    AnsiConsole.MarkupLine("[grey]Only cloned repos can be dispatched — repos are not auto-cloned.[/]");
+                    AnsiConsole.WriteLine();
+
                     var selected = AnsiConsole.Prompt(
                         new MultiSelectionPrompt<string>()
-                            .Title("Select repositories to watch:")
+                            .Title("Select repositories to watch ([green]cloned[/] repos will dispatch, [red]not cloned[/] repos will be skipped until cloned):")
                             .PageSize(15)
                             .MoreChoicesText("[grey](Move up/down, space to select, enter to confirm)[/]")
                             .InstructionsText("[grey](Press space to toggle, enter to accept)[/]")
+                            .UseConverter(r => cloneStatus.GetValueOrDefault(r)
+                                ? $"{Markup.Escape(r)} [green](cloned)[/]"
+                                : $"{Markup.Escape(r)} [red](not cloned)[/]")
                             .AddChoices(repos));
+
+                    var notClonedSelected = selected.Where(r => !cloneStatus.GetValueOrDefault(r)).ToList();
+                    if (notClonedSelected.Count > 0)
+                    {
+                        AnsiConsole.WriteLine();
+                        ConsoleOutput.Warning($"{notClonedSelected.Count} selected repo(s) are not cloned yet and will be skipped during dispatch:");
+                        foreach (var repo in notClonedSelected)
+                            AnsiConsole.MarkupLine($"  [yellow]• {Markup.Escape(repo)}[/]");
+                        AnsiConsole.MarkupLine($"[grey]Clone them under {Markup.Escape(config.RepoHome)} to enable dispatching.[/]");
+                    }
 
                     if (selected.Count == 0)
                     {
