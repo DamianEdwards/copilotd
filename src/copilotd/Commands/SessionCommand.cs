@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.CommandLine.Help;
 using System.CommandLine.Parsing;
 using System.Diagnostics;
 using Copilotd.Infrastructure;
@@ -40,6 +41,9 @@ public static class SessionCommand
             var logger = services.GetRequiredService<ILogger<Program>>();
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
+                new HelpAction().Invoke(parseResult);
+                Console.WriteLine();
+
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
 

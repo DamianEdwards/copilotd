@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.CommandLine.Help;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,6 +17,31 @@ public static class RulesCommand
         command.Subcommands.Add(CreateAdd(services));
         command.Subcommands.Add(CreateUpdate(services));
         command.Subcommands.Add(CreateDelete(services));
+
+        // Default to list behavior when no subcommand is specified
+        var repoOption = new Option<string?>("--repo") { Description = "Filter rules by repository" };
+        var userOption = new Option<string?>("--user") { Description = "Filter rules by user condition", Arity = ArgumentArity.ZeroOrOne };
+        command.Options.Add(repoOption);
+        command.Options.Add(userOption);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            return await ConsoleOutput.RunWithErrorHandling(async () =>
+            {
+                new HelpAction().Invoke(parseResult);
+                Console.WriteLine();
+
+                var stateStore = services.GetRequiredService<StateStore>();
+                var config = stateStore.LoadConfig();
+                var repoFilter = parseResult.GetValue(repoOption);
+                var userFilter = parseResult.GetValue(userOption);
+                var userFlagPresent = parseResult.GetResult(userOption) is not null;
+
+                return RenderRulesList(config, repoFilter, userFilter, userFlagPresent);
+            }, logger);
+        });
+
         return command;
     }
 
@@ -38,52 +64,57 @@ public static class RulesCommand
                 var userFilter = parseResult.GetValue(userOption);
                 var userFlagPresent = parseResult.GetResult(userOption) is not null;
 
-                var rules = config.Rules.AsEnumerable();
-
-                if (repoFilter is not null)
-                    rules = rules.Where(r => r.Value.Repos.Contains(repoFilter, StringComparer.OrdinalIgnoreCase));
-
-                if (userFlagPresent)
-                {
-                    if (userFilter is not null)
-                        rules = rules.Where(r => string.Equals(r.Value.User, userFilter, StringComparison.OrdinalIgnoreCase));
-                    else
-                        rules = rules.Where(r => r.Value.User is not null);
-                }
-
-                var table = new Table();
-                table.AddColumn("Name");
-                table.AddColumn("User");
-                table.AddColumn("Labels");
-                table.AddColumn("Milestone");
-                table.AddColumn("Type");
-                table.AddColumn("Repos");
-                table.AddColumn("Yolo");
-                table.AddColumn("Tools");
-                table.AddColumn("URLs");
-
-                foreach (var kvp in rules)
-                {
-                    var name = kvp.Key;
-                    var rule = kvp.Value;
-                    table.AddRow(
-                        Markup.Escape(name),
-                        Markup.Escape(rule.User ?? "*"),
-                        Markup.Escape(string.Join(", ", rule.Labels)),
-                        Markup.Escape(rule.Milestone ?? "*"),
-                        Markup.Escape(rule.Type ?? "*"),
-                        Markup.Escape(string.Join(", ", rule.Repos)),
-                        rule.Yolo ? "yes" : "no",
-                        rule.Yolo || rule.AllowAllTools ? "yes" : "no",
-                        rule.Yolo || rule.AllowAllUrls ? "yes" : "no");
-                }
-
-                AnsiConsole.Write(table);
-                return 0;
+                return RenderRulesList(config, repoFilter, userFilter, userFlagPresent);
             }, logger);
         });
 
         return command;
+    }
+
+    private static int RenderRulesList(CopilotdConfig config, string? repoFilter, string? userFilter, bool userFlagPresent)
+    {
+        var rules = config.Rules.AsEnumerable();
+
+        if (repoFilter is not null)
+            rules = rules.Where(r => r.Value.Repos.Contains(repoFilter, StringComparer.OrdinalIgnoreCase));
+
+        if (userFlagPresent)
+        {
+            if (userFilter is not null)
+                rules = rules.Where(r => string.Equals(r.Value.User, userFilter, StringComparison.OrdinalIgnoreCase));
+            else
+                rules = rules.Where(r => r.Value.User is not null);
+        }
+
+        var table = new Table();
+        table.AddColumn("Name");
+        table.AddColumn("User");
+        table.AddColumn("Labels");
+        table.AddColumn("Milestone");
+        table.AddColumn("Type");
+        table.AddColumn("Repos");
+        table.AddColumn("Yolo");
+        table.AddColumn("Tools");
+        table.AddColumn("URLs");
+
+        foreach (var kvp in rules)
+        {
+            var name = kvp.Key;
+            var rule = kvp.Value;
+            table.AddRow(
+                Markup.Escape(name),
+                Markup.Escape(rule.User ?? "*"),
+                Markup.Escape(string.Join(", ", rule.Labels)),
+                Markup.Escape(rule.Milestone ?? "*"),
+                Markup.Escape(rule.Type ?? "*"),
+                Markup.Escape(string.Join(", ", rule.Repos)),
+                rule.Yolo ? "yes" : "no",
+                rule.Yolo || rule.AllowAllTools ? "yes" : "no",
+                rule.Yolo || rule.AllowAllUrls ? "yes" : "no");
+        }
+
+        AnsiConsole.Write(table);
+        return 0;
     }
 
     private static Command CreateAdd(IServiceProvider services)
