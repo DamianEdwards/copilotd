@@ -202,8 +202,10 @@ public sealed class RepoPathResolver
 
         // Check candidates in parallel — each check shells out to git which is ~50-100ms,
         // so parallelism helps when RepoHome contains many repositories
+        var maxParallelism = Math.Min(Environment.ProcessorCount / 2, 8);
+        maxParallelism = Math.Max(maxParallelism, 1);
         string? match = null;
-        Parallel.ForEach(candidates, new ParallelOptions { MaxDegreeOfParallelism = 8 }, (candidate, loopState) =>
+        Parallel.ForEach(candidates, new ParallelOptions { MaxDegreeOfParallelism = maxParallelism }, (candidate, loopState) =>
         {
             if (MatchesRemote(candidate, expectedSlug))
             {
