@@ -29,6 +29,7 @@ public static class ConfigCommand
                     var config = stateStore.LoadConfig();
                     var table = new Table();
                     table.Border(TableBorder.Rounded);
+                    table.ShowRowSeparators = true;
                     table.AddColumn(new TableColumn("[bold]Key[/]").NoWrap());
                     table.AddColumn(new TableColumn("[bold]Value[/]"));
 
