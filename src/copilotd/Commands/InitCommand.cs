@@ -92,14 +92,9 @@ public static class InitCommand
                 }
                 else
                 {
-                    // Check which repos are cloned locally under RepoHome
+                    // Check which repos are cloned locally under RepoHome (single scan, not per-repo)
                     var repoResolver = services.GetRequiredService<RepoPathResolver>();
-                    var dummyState = new DaemonState();
-                    var cloneStatus = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var repo in repos)
-                    {
-                        cloneStatus[repo] = repoResolver.ResolveRepoPath(repo, config, dummyState) is not null;
-                    }
+                    var cloneStatus = repoResolver.BuildCloneStatusMap(repos, config);
 
                     var clonedCount = cloneStatus.Values.Count(v => v);
                     AnsiConsole.MarkupLine($"[grey]Found {clonedCount} of {repos.Count} repos cloned under {Markup.Escape(config.RepoHome)}[/]");

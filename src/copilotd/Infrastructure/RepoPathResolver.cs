@@ -105,6 +105,111 @@ public sealed class RepoPathResolver
         state.ResolvedRepoPaths.Remove(repoSlug);
     }
 
+    /// <summary>
+    /// Efficiently checks clone status for many repos at once by scanning RepoHome once
+    /// and building a complete slug→path map, then looking up each repo.
+    /// Much faster than calling ResolveRepoPath per-repo when many repos aren't cloned
+    /// (avoids repeated full scans).
+    /// </summary>
+    public Dictionary<string, bool> BuildCloneStatusMap(IReadOnlyList<string> repoSlugs, CopilotdConfig config)
+    {
+        var repoHome = config.RepoHome;
+        var result = new Dictionary<string, bool>(repoSlugs.Count, StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrEmpty(repoHome))
+        {
+            foreach (var slug in repoSlugs)
+                result[slug] = false;
+            return result;
+        }
+
+        // Scan once to build a map of all local repos: slug → path
+        var localRepos = ScanAllRepos(repoHome);
+
+        foreach (var slug in repoSlugs)
+            result[slug] = localRepos.ContainsKey(slug);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Scans RepoHome up to 2 levels deep and resolves the origin remote for every git repo found.
+    /// Returns a dictionary mapping normalized repo slugs to their local paths.
+    /// </summary>
+    private Dictionary<string, string> ScanAllRepos(string repoHome)
+    {
+        _logger.LogDebug("Scanning all repos under {RepoHome}", repoHome);
+
+        var candidates = FindGitRepoDirs(repoHome);
+
+        _logger.LogDebug("Found {Count} git repositories to index under {RepoHome}", candidates.Count, repoHome);
+
+        // Resolve remotes in parallel
+        var maxParallelism = Math.Max(Math.Min(Environment.ProcessorCount / 2, 8), 1);
+        var result = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        Parallel.ForEach(candidates, new ParallelOptions { MaxDegreeOfParallelism = maxParallelism }, candidate =>
+        {
+            try
+            {
+                var originUrl = GetGitRemoteUrl(candidate, "origin");
+                if (originUrl is null) return;
+
+                var slug = NormalizeRemoteUrl(originUrl);
+                if (slug is not null)
+                    result.TryAdd(slug, candidate);
+            }
+            catch
+            {
+                // Skip repos we can't read
+            }
+        });
+
+        _logger.LogDebug("Indexed {Count} repos with valid origins under {RepoHome}", result.Count, repoHome);
+        return new Dictionary<string, string>(result, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Finds all directories containing a .git folder/file up to 2 levels under repoHome.
+    /// Excludes daemon-managed worktree directories.
+    /// </summary>
+    private List<string> FindGitRepoDirs(string repoHome)
+    {
+        var candidates = new List<string>();
+
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(repoHome))
+            {
+                var dirName = Path.GetFileName(dir);
+                if (IsDaemonWorktreeDir(dirName))
+                    continue;
+
+                if (IsValidRepoDir(dir))
+                    candidates.Add(dir);
+
+                try
+                {
+                    foreach (var subDir in Directory.EnumerateDirectories(dir))
+                    {
+                        var subDirName = Path.GetFileName(subDir);
+                        if (IsDaemonWorktreeDir(subDirName))
+                            continue;
+
+                        if (IsValidRepoDir(subDir))
+                            candidates.Add(subDir);
+                    }
+                }
+                catch (UnauthorizedAccessException) { }
+                catch (DirectoryNotFoundException) { }
+            }
+        }
+        catch (UnauthorizedAccessException) { }
+        catch (DirectoryNotFoundException) { }
+
+        return candidates;
+    }
+
     private void CachePath(string repoSlug, string path, DaemonState state)
     {
         _memoryCache[repoSlug] = path;
@@ -156,47 +261,14 @@ public sealed class RepoPathResolver
     }
 
     /// <summary>
-    /// Scans RepoHome up to 2 levels deep for directories containing a .git folder/file,
-    /// then checks each one's remote URL against the expected repo slug.
+    /// Scans RepoHome up to 2 levels deep for a matching git remote.
     /// Excludes daemon-managed worktree directories.
     /// </summary>
     private string? ScanForRepo(string repoHome, string expectedSlug)
     {
         _logger.LogDebug("Scanning {RepoHome} for clone of {Slug}", repoHome, expectedSlug);
 
-        var candidates = new List<string>();
-
-        try
-        {
-            // Level 1: immediate children
-            foreach (var dir in Directory.EnumerateDirectories(repoHome))
-            {
-                var dirName = Path.GetFileName(dir);
-                if (IsDaemonWorktreeDir(dirName))
-                    continue;
-
-                if (IsValidRepoDir(dir))
-                    candidates.Add(dir);
-
-                // Level 2: grandchildren (org/repo layout variations)
-                try
-                {
-                    foreach (var subDir in Directory.EnumerateDirectories(dir))
-                    {
-                        var subDirName = Path.GetFileName(subDir);
-                        if (IsDaemonWorktreeDir(subDirName))
-                            continue;
-
-                        if (IsValidRepoDir(subDir))
-                            candidates.Add(subDir);
-                    }
-                }
-                catch (UnauthorizedAccessException) { }
-                catch (DirectoryNotFoundException) { }
-            }
-        }
-        catch (UnauthorizedAccessException) { }
-        catch (DirectoryNotFoundException) { }
+        var candidates = FindGitRepoDirs(repoHome);
 
         _logger.LogDebug("Found {Count} git repositories to check under {RepoHome}", candidates.Count, repoHome);
 
