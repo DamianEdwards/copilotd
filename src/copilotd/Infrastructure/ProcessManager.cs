@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Copilotd.Models;
 using Microsoft.Extensions.Logging;
+using static Copilotd.Infrastructure.NativeInterop;
 
 namespace Copilotd.Infrastructure;
 
@@ -622,71 +623,6 @@ public sealed partial class ProcessManager
     {
         return RunGit(workingDir, arguments);
     }
-
-    #region Platform Interop
-
-    // Windows process creation API (for launching copilot with its own console)
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool CreateProcessW(
-        string? lpApplicationName,
-        string lpCommandLine,
-        IntPtr lpProcessAttributes,
-        IntPtr lpThreadAttributes,
-        bool bInheritHandles,
-        uint dwCreationFlags,
-        IntPtr lpEnvironment,
-        string? lpCurrentDirectory,
-        ref STARTUPINFO lpStartupInfo,
-        out PROCESS_INFORMATION lpProcessInformation);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr hObject);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct STARTUPINFO
-    {
-        public int cb;
-        public IntPtr lpReserved;
-        public IntPtr lpDesktop;
-        public IntPtr lpTitle;
-        public int dwX;
-        public int dwY;
-        public int dwXSize;
-        public int dwYSize;
-        public int dwXCountChars;
-        public int dwYCountChars;
-        public int dwFillAttribute;
-        public int dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
-        public IntPtr lpReserved2;
-        public IntPtr hStdInput;
-        public IntPtr hStdOutput;
-        public IntPtr hStdError;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PROCESS_INFORMATION
-    {
-        public IntPtr hProcess;
-        public IntPtr hThread;
-        public int dwProcessId;
-        public int dwThreadId;
-    }
-
-    private const uint CREATE_NEW_CONSOLE = 0x00000010;
-    private const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
-    private const int STARTF_USESHOWWINDOW = 0x00000001;
-    private const short SW_HIDE = 0;
-
-    // Unix signal APIs
-    [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
-    private static extern int sys_kill(int pid, int sig);
-
-    private const int SIGINT = 2;
-    private const int SIGKILL = 9;
-
-    #endregion
 }
 
 public enum ProcessLivenessResult

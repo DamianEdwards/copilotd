@@ -22,6 +22,8 @@ public class Program
             rootCommand.Subcommands.Add(ConfigCommand.Create(services));
             rootCommand.Subcommands.Add(RulesCommand.Create(services));
             rootCommand.Subcommands.Add(RunCommand.Create(services));
+            rootCommand.Subcommands.Add(StartCommand.Create(services));
+            rootCommand.Subcommands.Add(StopCommand.Create(services));
             rootCommand.Subcommands.Add(StatusCommand.Create(services));
             rootCommand.Subcommands.Add(SessionCommand.Create(services));
             rootCommand.Subcommands.Add(ShutdownInstanceCommand.Create());
@@ -72,10 +74,11 @@ public class Program
             }
         }
 
-        // Default to Information level for the 'run' command so users can see
+        // Default to Information level for the 'run' and 'start' commands so users can see
         // poll cycle activity and session status changes without needing --log-level
         var command = args.FirstOrDefault(a => !a.StartsWith('-'));
-        if (string.Equals(command, "run", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(command, "run", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(command, "start", StringComparison.OrdinalIgnoreCase))
         {
             return LogLevel.Information;
         }

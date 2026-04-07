@@ -32,30 +32,9 @@ public static class RunCommand
                 var interval = parseResult.GetValue(intervalOption);
 
                 // Pre-flight checks
-                if (!ghCli.IsAvailable())
-                {
-                    ConsoleOutput.Error("gh CLI is not available. Install from: https://cli.github.com/");
-                    return 1;
-                }
-
-                if (!copilotCli.IsAvailable())
-                {
-                    ConsoleOutput.Error("copilot CLI is not available. Install from: https://docs.github.com/copilot/how-tos/copilot-cli");
-                    return 1;
-                }
-
-                var authResult = ghCli.CheckAuth();
-                if (!authResult.IsLoggedIn)
-                {
-                    ConsoleOutput.Error("gh CLI is not authenticated. Run 'gh auth login' first.");
-                    return 1;
-                }
-
-                if (!stateStore.ConfigExists())
-                {
-                    ConsoleOutput.Error("copilotd is not configured. Run 'copilotd init' first.");
-                    return 1;
-                }
+                var preflightResult = PreflightChecks.Run(ghCli, copilotCli, stateStore);
+                if (preflightResult != 0)
+                    return preflightResult;
 
                 // Single-instance guard
                 if (!stateStore.TryAcquireLock())

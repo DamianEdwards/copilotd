@@ -15,6 +15,7 @@ public sealed class StateStore
     private readonly string _configPath;
     private readonly string _statePath;
     private readonly string _lockPath;
+    private readonly string _pidPath;
     private readonly ILogger<StateStore> _logger;
 
     public string ConfigDir => _configDir;
@@ -29,6 +30,7 @@ public sealed class StateStore
         _configPath = Path.Combine(_configDir, "config.json");
         _statePath = Path.Combine(_configDir, "state.json");
         _lockPath = Path.Combine(_configDir, ".lock");
+        _pidPath = Path.Combine(_configDir, ".pid");
         Directory.CreateDirectory(_configDir);
     }
 
@@ -147,12 +149,14 @@ public sealed class StateStore
 
     /// <summary>
     /// Attempts to acquire an exclusive lock. Returns false if another instance holds it.
+    /// Writes daemon PID and start time to a .pid file for the stop command.
     /// </summary>
     public bool TryAcquireLock()
     {
         try
         {
             _lockStream = new FileStream(_lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            WriteDaemonPid();
             return true;
         }
         catch (IOException)
@@ -163,6 +167,9 @@ public sealed class StateStore
 
     public void ReleaseLock()
     {
+        // Clear PID file BEFORE releasing lock to prevent a new daemon from
+        // writing its PID and then having it deleted by the old daemon
+        ClearDaemonPid();
         _lockStream?.Dispose();
         _lockStream = null;
         try { File.Delete(_lockPath); } catch { /* best effort */ }
@@ -188,6 +195,59 @@ public sealed class StateStore
             // Another process holds the lock
             return true;
         }
+    }
+
+    // --- Daemon PID tracking ---
+
+    /// <summary>
+    /// Writes the current process ID and start time to ~/.copilotd/.pid.
+    /// Used by the stop command to locate and verify the daemon process.
+    /// </summary>
+    private void WriteDaemonPid()
+    {
+        try
+        {
+            var startTime = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime();
+            var content = $"{Environment.ProcessId}\n{startTime:O}";
+            File.WriteAllText(_pidPath, content);
+            _logger.LogDebug("Wrote daemon PID {Pid} to {Path}", Environment.ProcessId, _pidPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to write daemon PID file");
+        }
+    }
+
+    /// <summary>
+    /// Reads the daemon PID and start time from the .pid file.
+    /// Returns null if the file is missing, corrupt, or unreadable.
+    /// </summary>
+    public (int Pid, DateTimeOffset StartTime)? ReadDaemonPid()
+    {
+        if (!File.Exists(_pidPath))
+            return null;
+
+        try
+        {
+            var lines = File.ReadAllLines(_pidPath);
+            if (lines.Length >= 2
+                && int.TryParse(lines[0].Trim(), out var pid)
+                && DateTimeOffset.TryParse(lines[1].Trim(), out var startTime))
+            {
+                return (pid, startTime);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to read daemon PID file");
+        }
+
+        return null;
+    }
+
+    private void ClearDaemonPid()
+    {
+        try { File.Delete(_pidPath); } catch { /* best effort */ }
     }
 
     // --- Helpers ---
