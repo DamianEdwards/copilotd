@@ -2,6 +2,7 @@ using System.CommandLine;
 using Copilotd.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Spectre.Console;
 
 namespace Copilotd.Commands;
 
@@ -24,13 +25,44 @@ public static class ConfigCommand
 
                 if (string.IsNullOrWhiteSpace(setValue))
                 {
-                    // Display current config
+                    // Display current config as a table
                     var config = stateStore.LoadConfig();
-                    ConsoleOutput.Info($"repo_home = {config.RepoHome ?? "(not set)"}");
-                    ConsoleOutput.Info($"prompt = {config.Prompt}");
-                    ConsoleOutput.Info($"current_user = {config.CurrentUser ?? "(not set)"}");
-                    ConsoleOutput.Info($"max_instances = {config.MaxInstances}");
-                    ConsoleOutput.Info($"rules = {config.Rules.Count} rule(s)");
+                    var table = new Table();
+                    table.Border(TableBorder.Rounded);
+                    table.AddColumn(new TableColumn("[bold]Key[/]").NoWrap());
+                    table.AddColumn(new TableColumn("[bold]Value[/]"));
+
+                    table.AddRow("repo_home", Markup.Escape(config.RepoHome ?? "(not set)"));
+                    table.AddRow("prompt", Markup.Escape(config.Prompt));
+                    table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
+                    table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
+                    table.AddRow("rules", Markup.Escape($"{config.Rules.Count} rule(s)"));
+
+                    if (config.Rules.Count > 0)
+                    {
+                        foreach (var (name, rule) in config.Rules)
+                        {
+                            var details = new List<string>();
+                            if (rule.User is not null) details.Add($"user={rule.User}");
+                            if (rule.Labels.Count > 0) details.Add($"labels={string.Join(",", rule.Labels)}");
+                            if (rule.Milestone is not null) details.Add($"milestone={rule.Milestone}");
+                            if (rule.Type is not null) details.Add($"type={rule.Type}");
+                            if (rule.Repos.Count > 0) details.Add($"repos={string.Join(",", rule.Repos)}");
+                            if (rule.Yolo) details.Add("yolo=true");
+                            else
+                            {
+                                if (rule.AllowAllTools) details.Add("allow_all_tools=true");
+                                if (rule.AllowAllUrls) details.Add("allow_all_urls=true");
+                            }
+                            if (rule.ExtraPrompt is not null) details.Add($"extra_prompt={rule.ExtraPrompt}");
+
+                            table.AddRow(
+                                Markup.Escape($"  rule[{name}]"),
+                                Markup.Escape(details.Count > 0 ? string.Join(", ", details) : "(no conditions)"));
+                        }
+                    }
+
+                    AnsiConsole.Write(table);
                     return 0;
                 }
 
