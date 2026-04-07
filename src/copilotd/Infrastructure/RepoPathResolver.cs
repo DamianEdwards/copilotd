@@ -200,14 +200,19 @@ public sealed class RepoPathResolver
 
         _logger.LogDebug("Found {Count} git repositories to check under {RepoHome}", candidates.Count, repoHome);
 
-        // Check candidates sequentially — the candidate set is small and bounded
-        foreach (var candidate in candidates)
+        // Check candidates in parallel — each check shells out to git which is ~50-100ms,
+        // so parallelism helps when RepoHome contains many repositories
+        string? match = null;
+        Parallel.ForEach(candidates, new ParallelOptions { MaxDegreeOfParallelism = 8 }, (candidate, loopState) =>
         {
             if (MatchesRemote(candidate, expectedSlug))
-                return candidate;
-        }
+            {
+                Interlocked.CompareExchange(ref match, candidate, null);
+                loopState.Stop();
+            }
+        });
 
-        return null;
+        return match;
     }
 
     /// <summary>
