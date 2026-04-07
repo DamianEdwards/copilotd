@@ -80,8 +80,8 @@ public sealed class ReconciliationEngine
         foreach (var key in toRemove)
         {
             var session = state.Sessions[key];
-            // Clean up any lingering worktree
-            if (!string.IsNullOrEmpty(session.WorktreePath))
+            // Clean up any lingering worktree or branch
+            if (!string.IsNullOrEmpty(session.WorktreePath) || !string.IsNullOrEmpty(session.BranchName))
             {
                 var config = _stateStore.LoadConfig();
                 _processManager.CleanupWorktree(session, config);
@@ -327,7 +327,6 @@ public sealed class ReconciliationEngine
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
-                        existing.WorktreePath = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         existing.LastFailureAt = DateTimeOffset.UtcNow;
                         continue;
@@ -357,7 +356,6 @@ public sealed class ReconciliationEngine
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
-                        existing.WorktreePath = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         continue;
                 }

@@ -436,15 +436,28 @@ public sealed partial class ProcessManager
         // Session dir: <repo_home>/org/repo_sessions/issue-N/
         var sessionsDir = mainRepoPath + "_sessions";
         var worktreePath = Path.Combine(sessionsDir, $"issue-{session.IssueNumber}");
-        var branchName = $"copilotd/issue-{session.IssueNumber}";
 
-        // If the worktree already exists from a prior run, remove it first
+        // If the worktree directory already exists from a prior run, remove it
         if (Directory.Exists(worktreePath))
         {
             _logger.LogDebug("Removing existing worktree at {Path}", worktreePath);
             RunGit(mainRepoPath, $"worktree remove \"{worktreePath}\" --force");
-            // Also delete the branch if it exists from a prior run
-            RunGit(mainRepoPath, $"branch -D {branchName}");
+        }
+
+        // Prune stale worktree tracking entries (handles crash scenarios where
+        // the directory was deleted but git still tracks the worktree internally)
+        RunGit(mainRepoPath, "worktree prune");
+
+        // Clean up stale branch from a previous failed attempt (tracked in state).
+        // Done AFTER worktree remove + prune so the branch is no longer checked
+        // out in any worktree (git refuses to delete checked-out branches).
+        if (!string.IsNullOrEmpty(session.BranchName))
+        {
+            _logger.LogDebug("Cleaning up stale branch {Branch} from previous attempt", session.BranchName);
+            if (RunGit(mainRepoPath, $"branch -D {session.BranchName}"))
+            {
+                session.BranchName = null;
+            }
         }
 
         Directory.CreateDirectory(sessionsDir);
@@ -465,9 +478,18 @@ public sealed partial class ProcessManager
             return false;
         }
 
+        // Generate a unique branch name with random suffix to avoid conflicts
+        // with user branches and stale branches from non-atomic git worktree add
+        var suffix = Guid.NewGuid().ToString("N")[..4];
+        var branchName = $"copilotd/issue-{session.IssueNumber}-{suffix}";
+
+        // Track branch name BEFORE the git command so it's persisted even if
+        // worktree add fails partway (git creates the branch before the worktree)
+        session.BranchName = branchName;
+
         // Create worktree on a new branch from origin's default branch
-        _logger.LogInformation("Creating worktree for {Key} at {Path} from {Branch}",
-            session.IssueKey, worktreePath, defaultBranch);
+        _logger.LogInformation("Creating worktree for {Key} at {Path} from {Branch} (branch: {BranchName})",
+            session.IssueKey, worktreePath, defaultBranch, branchName);
 
         if (!RunGit(mainRepoPath, $"worktree add \"{worktreePath}\" -b {branchName} {defaultBranch}"))
         {
@@ -482,29 +504,36 @@ public sealed partial class ProcessManager
 
     /// <summary>
     /// Removes the git worktree and branch associated with a session.
+    /// Safe to call even when WorktreePath is null (e.g., after a failed PrepareWorktree).
     /// </summary>
     public void CleanupWorktree(DispatchSession session, CopilotdConfig config)
     {
-        if (string.IsNullOrEmpty(session.WorktreePath))
-            return;
-
         var mainRepoPath = config.GetRepoPath(session.Repo);
-        var branchName = $"copilotd/issue-{session.IssueNumber}";
 
-        _logger.LogDebug("Cleaning up worktree for {Key} at {Path}", session.IssueKey, session.WorktreePath);
-
-        if (Directory.Exists(session.WorktreePath))
+        // Remove the worktree directory if it exists
+        if (!string.IsNullOrEmpty(session.WorktreePath))
         {
-            RunGit(mainRepoPath, $"worktree remove \"{session.WorktreePath}\" --force");
+            _logger.LogDebug("Cleaning up worktree for {Key} at {Path}", session.IssueKey, session.WorktreePath);
+
+            if (Directory.Exists(session.WorktreePath))
+            {
+                RunGit(mainRepoPath, $"worktree remove \"{session.WorktreePath}\" --force");
+            }
+
+            session.WorktreePath = null;
         }
 
-        // Delete the local branch (it was only used for this session)
-        RunGit(mainRepoPath, $"branch -D {branchName}");
-
-        session.WorktreePath = null;
+        // Delete the branch — use the stored name, falling back to the legacy
+        // naming scheme for sessions created before BranchName tracking was added.
+        // Only clear BranchName on success so a future cleanup can retry.
+        var branchName = session.BranchName ?? $"copilotd/issue-{session.IssueNumber}";
+        if (RunGit(mainRepoPath, $"branch -D {branchName}"))
+        {
+            session.BranchName = null;
+        }
     }
 
-    private static string? GetDefaultBranch(string repoPath)
+    private string? GetDefaultBranch(string repoPath)
     {
         try
         {
@@ -529,8 +558,8 @@ public sealed partial class ProcessManager
                 return output;
 
             // Fallback: try origin/main then origin/master
-            return RunGitCheck(repoPath, "rev-parse --verify origin/main") ? "origin/main"
-                : RunGitCheck(repoPath, "rev-parse --verify origin/master") ? "origin/master"
+            return RunGit(repoPath, "rev-parse --verify origin/main") ? "origin/main"
+                : RunGit(repoPath, "rev-parse --verify origin/master") ? "origin/master"
                 : null;
         }
         catch
@@ -539,10 +568,12 @@ public sealed partial class ProcessManager
         }
     }
 
-    private static bool RunGit(string workingDir, string arguments)
+    private bool RunGit(string workingDir, string arguments)
     {
         try
         {
+            _logger.LogDebug("Running: git {Arguments} (in {Dir})", arguments, workingDir);
+
             var psi = new ProcessStartInfo
             {
                 FileName = "git",
@@ -555,20 +586,39 @@ public sealed partial class ProcessManager
             };
 
             using var process = Process.Start(psi);
-            if (process is null) return false;
+            if (process is null)
+            {
+                _logger.LogWarning("Failed to start git process for: git {Arguments}", arguments);
+                return false;
+            }
 
-            process.StandardOutput.ReadToEnd();
-            process.StandardError.ReadToEnd();
+            // Read stderr asynchronously to avoid deadlock when stdout/stderr
+            // buffers fill in different orders
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            var stdout = process.StandardOutput.ReadToEnd();
+            var stderr = stderrTask.GetAwaiter().GetResult();
             process.WaitForExit(TimeSpan.FromSeconds(30));
-            return process.ExitCode == 0;
+
+            if (process.ExitCode != 0)
+            {
+                _logger.LogWarning("git {Arguments} failed (exit {ExitCode}): {StdErr}",
+                    arguments, process.ExitCode, stderr.Trim());
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(stderr))
+                _logger.LogDebug("git {Arguments} stderr: {StdErr}", arguments, stderr.Trim());
+
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Exception running: git {Arguments}", arguments);
             return false;
         }
     }
 
-    private static bool RunGitCheck(string workingDir, string arguments)
+    private bool RunGitCheck(string workingDir, string arguments)
     {
         return RunGit(workingDir, arguments);
     }

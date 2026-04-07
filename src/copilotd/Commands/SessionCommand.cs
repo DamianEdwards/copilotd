@@ -369,7 +369,6 @@ public static class SessionCommand
                 session.CopilotSessionId = Guid.NewGuid().ToString();
                 session.ProcessId = null;
                 session.ProcessStartTime = null;
-                session.WorktreePath = null;
                 session.RetryCount = 0;
                 session.LastFailureAt = null;
                 session.UpdatedAt = DateTimeOffset.UtcNow;

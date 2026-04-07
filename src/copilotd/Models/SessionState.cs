@@ -112,6 +112,12 @@ public sealed class DispatchSession
     /// </summary>
     public string? WorktreePath { get; set; }
 
+    /// <summary>
+    /// Name of the git branch created for this session's worktree (e.g., "copilotd/issue-42-a3f7").
+    /// Tracked so cleanup can delete the correct branch even if worktree creation failed partway.
+    /// </summary>
+    public string? BranchName { get; set; }
+
     /// <summary>Maximum retries before giving up (0 = unlimited).</summary>
     public const int MaxRetries = 3;
 
