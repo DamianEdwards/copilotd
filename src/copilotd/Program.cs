@@ -26,6 +26,7 @@ public class Program
             rootCommand.Subcommands.Add(StopCommand.Create(services));
             rootCommand.Subcommands.Add(StatusCommand.Create(services));
             rootCommand.Subcommands.Add(SessionCommand.Create(services));
+            rootCommand.Subcommands.Add(UpdateCommand.Create(services));
             rootCommand.Subcommands.Add(ShutdownInstanceCommand.Create());
 
             var parseResult = rootCommand.Parse(args, new ParserConfiguration());
@@ -54,6 +55,9 @@ public class Program
         serviceCollection.AddSingleton<GhCliService>();
         serviceCollection.AddSingleton<CopilotCliService>();
         serviceCollection.AddSingleton<ReconciliationEngine>();
+        serviceCollection.AddSingleton<GitHubReleaseService>();
+        serviceCollection.AddSingleton<ProvenanceVerifier>();
+        serviceCollection.AddSingleton<UpdateService>();
 
         return serviceCollection.BuildServiceProvider();
     }

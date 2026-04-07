@@ -36,6 +36,10 @@ public static class RunCommand
                 if (preflightResult != 0)
                     return preflightResult;
 
+                // Clean up old binary from previous update
+                var updateService = services.GetRequiredService<UpdateService>();
+                updateService.CleanupOldBinary();
+
                 // Single-instance guard
                 if (!stateStore.TryAcquireLock())
                 {
@@ -81,6 +85,46 @@ public static class RunCommand
                             state = stateStore.LoadState();
 
                             reconciliation.Reconcile(config, state);
+
+                            // Self-update: check for staged update or fire background check
+                            if (OperatingSystem.IsWindows())
+                            {
+                                var updateState = stateStore.LoadUpdateState();
+                                if (updateState.Status == UpdateStatus.Staged
+                                    && !string.IsNullOrEmpty(updateState.StagedPath)
+                                    && File.Exists(updateState.StagedPath))
+                                {
+                                    // Staged update ready — spawn install process and exit daemon
+                                    ConsoleOutput.Info($"Staged update {updateState.StagedVersion} detected, initiating install...");
+                                    logger.LogInformation("Spawning update installer for staged version {Version}", updateState.StagedVersion);
+                                    if (SpawnUpdateInstaller(logger))
+                                    {
+                                        cts.Cancel();
+                                        break;
+                                    }
+                                    else
+                                    {
+                                        ConsoleOutput.Warning("Failed to spawn update installer, will retry next cycle.");
+                                    }
+                                }
+
+                                // Fire non-blocking update check/stage (runs in background, result picked up next cycle)
+                                _ = Task.Run(async () =>
+                                {
+                                    try
+                                    {
+                                        await updateService.CheckAndStageAsync(
+                                            allowPreRelease: false,
+                                            skipProvenance: false,
+                                            cts.Token);
+                                    }
+                                    catch (OperationCanceledException) { }
+                                    catch (Exception ex)
+                                    {
+                                        logger.LogDebug(ex, "Background update check failed");
+                                    }
+                                }, cts.Token);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -118,5 +162,54 @@ public static class RunCommand
         });
 
         return command;
+    }
+
+    /// <summary>
+    /// Spawns a detached <c>copilotd update --install-staged</c> process
+    /// that will wait for this daemon to exit, then perform the binary replacement.
+    /// Uses CreateProcessW on Windows for proper console isolation.
+    /// Returns true if the process was successfully spawned.
+    /// </summary>
+    private static bool SpawnUpdateInstaller(ILogger logger)
+    {
+        var exePath = Environment.ProcessPath;
+        if (exePath is null)
+        {
+            logger.LogError("Cannot determine executable path for update installer");
+            return false;
+        }
+
+        var commandLine = $"\"{exePath}\" update --install-staged";
+        logger.LogDebug("Spawning update installer: {CommandLine}", commandLine);
+
+        if (!OperatingSystem.IsWindows())
+            return false;
+
+        var si = new NativeInterop.STARTUPINFO { cb = System.Runtime.InteropServices.Marshal.SizeOf<NativeInterop.STARTUPINFO>() };
+        si.dwFlags = NativeInterop.STARTF_USESHOWWINDOW;
+        si.wShowWindow = NativeInterop.SW_HIDE;
+
+        var success = NativeInterop.CreateProcessW(
+            null,
+            commandLine,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            false,
+            NativeInterop.CREATE_NEW_CONSOLE | NativeInterop.CREATE_NEW_PROCESS_GROUP,
+            IntPtr.Zero,
+            null,
+            ref si,
+            out var pi);
+
+        if (success)
+        {
+            NativeInterop.CloseHandle(pi.hProcess);
+            NativeInterop.CloseHandle(pi.hThread);
+            logger.LogInformation("Update installer spawned (PID {Pid})", pi.dwProcessId);
+            return true;
+        }
+
+        logger.LogError("Failed to spawn update installer via CreateProcessW");
+        return false;
     }
 }

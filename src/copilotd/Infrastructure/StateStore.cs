@@ -14,7 +14,9 @@ public sealed class StateStore
     private readonly string _configDir;
     private readonly string _configPath;
     private readonly string _statePath;
+    private readonly string _updateStatePath;
     private readonly string _lockPath;
+    private readonly string _updateLockPath;
     private readonly string _pidPath;
     private readonly ILogger<StateStore> _logger;
 
@@ -29,7 +31,9 @@ public sealed class StateStore
         _configDir = Path.Combine(home, ".copilotd");
         _configPath = Path.Combine(_configDir, "config.json");
         _statePath = Path.Combine(_configDir, "state.json");
+        _updateStatePath = Path.Combine(_configDir, "update-state.json");
         _lockPath = Path.Combine(_configDir, ".lock");
+        _updateLockPath = Path.Combine(_configDir, ".update-lock");
         _pidPath = Path.Combine(_configDir, ".pid");
         Directory.CreateDirectory(_configDir);
     }
@@ -258,5 +262,69 @@ public sealed class StateStore
         var tmp = Path.Combine(dir, $".{Path.GetFileName(path)}.tmp");
         File.WriteAllText(tmp, content);
         File.Move(tmp, path, overwrite: true);
+    }
+
+    // --- Update state ---
+
+    public UpdateState LoadUpdateState()
+    {
+        if (!File.Exists(_updateStatePath))
+        {
+            _logger.LogDebug("No update state file found, returning defaults");
+            return new UpdateState();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(_updateStatePath);
+            return JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.UpdateState)
+                   ?? new UpdateState();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Update state file is corrupt or unreadable, returning defaults");
+            return new UpdateState();
+        }
+    }
+
+    public void SaveUpdateState(UpdateState state)
+    {
+        var json = JsonSerializer.Serialize(state, CopilotdJsonContext.Default.UpdateState);
+        AtomicWrite(_updateStatePath, json);
+        _logger.LogDebug("Update state saved to {Path}", _updateStatePath);
+    }
+
+    public void ClearUpdateState()
+    {
+        try { File.Delete(_updateStatePath); } catch { /* best effort */ }
+        _logger.LogDebug("Update state cleared");
+    }
+
+    // --- Update lock (separate from daemon lock) ---
+
+    private FileStream? _updateLockStream;
+
+    /// <summary>
+    /// Acquires an exclusive lock for update operations. Prevents concurrent
+    /// updates from the daemon and manual <c>copilotd update</c> invocations.
+    /// </summary>
+    public bool TryAcquireUpdateLock()
+    {
+        try
+        {
+            _updateLockStream = new FileStream(_updateLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    public void ReleaseUpdateLock()
+    {
+        _updateLockStream?.Dispose();
+        _updateLockStream = null;
+        try { File.Delete(_updateLockPath); } catch { /* best effort */ }
     }
 }

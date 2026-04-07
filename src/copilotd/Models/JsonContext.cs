@@ -46,13 +46,46 @@ public sealed class TolerantSessionStatusConverter : JsonConverter<SessionStatus
 }
 
 /// <summary>
+/// AOT-compatible JSON converter for <see cref="UpdateStatus"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="UpdateStatus.None"/>.
+/// </summary>
+public sealed class TolerantUpdateStatusConverter : JsonConverter<UpdateStatus>
+{
+    public override UpdateStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<UpdateStatus>(value, ignoreCase: true, out var status))
+                return status;
+            return UpdateStatus.None;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(UpdateStatus), intValue))
+                return (UpdateStatus)intValue;
+            return UpdateStatus.None;
+        }
+
+        return UpdateStatus.None;
+    }
+
+    public override void Write(Utf8JsonWriter writer, UpdateStatus value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
 /// AOT-safe JSON serialization metadata for all persisted models.
 /// </summary>
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(TolerantSessionStatusConverter)])]
+    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter)])]
 [JsonSerializable(typeof(CopilotdConfig))]
 [JsonSerializable(typeof(DaemonState))]
 [JsonSerializable(typeof(DispatchRule))]
@@ -61,6 +94,7 @@ public sealed class TolerantSessionStatusConverter : JsonConverter<SessionStatus
 [JsonSerializable(typeof(List<GitHubIssue>))]
 [JsonSerializable(typeof(List<GhRepo>))]
 [JsonSerializable(typeof(GhAuthStatus))]
+[JsonSerializable(typeof(UpdateState))]
 public partial class CopilotdJsonContext : JsonSerializerContext;
 
 /// <summary>
