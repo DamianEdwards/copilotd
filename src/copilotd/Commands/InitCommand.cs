@@ -60,9 +60,11 @@ public static class InitCommand
                 config.CurrentUser = username;
 
                 // Prompt for repo home directory
-                var repoHome = AnsiConsole.Ask(
-                    "Enter the directory where repos are cloned (e.g., ~/repos):",
-                    config.RepoHome ?? "");
+                var examplePath = OperatingSystem.IsWindows() ? @"C:\source" : "~/repos";
+                var prompt = $"Enter the directory where repos are cloned (e.g., {examplePath}):";
+                var repoHome = config.RepoHome is not null
+                    ? AnsiConsole.Ask(prompt, config.RepoHome)
+                    : AnsiConsole.Ask<string>(prompt);
 
                 if (string.IsNullOrWhiteSpace(repoHome))
                 {
