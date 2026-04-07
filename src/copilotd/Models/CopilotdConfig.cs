@@ -8,7 +8,8 @@ public sealed class CopilotdConfig
     public int SchemaVersion { get; set; } = 1;
 
     /// <summary>
-    /// Root directory where repos are cloned, expecting &lt;org&gt;/&lt;repo_name&gt; sub-folders.
+    /// Root directory where repos are cloned. Supports both flat (&lt;repo_name&gt;) and
+    /// nested (&lt;org&gt;/&lt;repo_name&gt;) layouts. The resolver will scan to find clones.
     /// </summary>
     public string? RepoHome { get; set; }
 
@@ -16,6 +17,8 @@ public sealed class CopilotdConfig
     /// Returns the normalized local filesystem path for a given repo slug (e.g., "org/repo").
     /// Ensures consistent path separators for the current platform.
     /// </summary>
+    [Obsolete("Use RepoPathResolver.ResolveRepoPath() for flexible repo layout support. " +
+              "This method assumes <RepoHome>/<org>/<repo> which doesn't work for all users.")]
     public string GetRepoPath(string repo)
         => Path.GetFullPath(Path.Combine(RepoHome ?? ".", repo));
 

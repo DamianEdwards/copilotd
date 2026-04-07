@@ -16,11 +16,13 @@ public sealed partial class ProcessManager
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
 
     private readonly StateStore _stateStore;
+    private readonly RepoPathResolver _repoResolver;
     private readonly ILogger<ProcessManager> _logger;
 
-    public ProcessManager(StateStore stateStore, ILogger<ProcessManager> logger)
+    public ProcessManager(StateStore stateStore, RepoPathResolver repoResolver, ILogger<ProcessManager> logger)
     {
         _stateStore = stateStore;
+        _repoResolver = repoResolver;
         _logger = logger;
     }
 
@@ -28,13 +30,13 @@ public sealed partial class ProcessManager
     /// Launches a copilot process detached from this daemon so it survives daemon crashes.
     /// Returns the populated session on success, or null on failure.
     /// </summary>
-    public DispatchSession? LaunchCopilot(DispatchSession session, CopilotdConfig config, GitHubIssue issue)
+    public DispatchSession? LaunchCopilot(DispatchSession session, CopilotdConfig config, GitHubIssue issue, DaemonState state)
     {
-        // Use worktree path if available, otherwise fall back to main repo path
-        var repoPath = session.WorktreePath ?? config.GetRepoPath(issue.Repo);
-        if (!Directory.Exists(repoPath))
+        // Use worktree path if available, otherwise resolve the main repo path
+        var repoPath = session.WorktreePath ?? _repoResolver.ResolveRepoPath(issue.Repo, config, state);
+        if (repoPath is null || !Directory.Exists(repoPath))
         {
-            _logger.LogWarning("Working directory not found: {Path}", repoPath);
+            _logger.LogWarning("Working directory not found for {Repo}", issue.Repo);
             return null;
         }
 
@@ -425,12 +427,12 @@ public sealed partial class ProcessManager
     /// Creates a git worktree for the session on a new branch from the latest default branch.
     /// Layout: &lt;repo_home&gt;/org/repo_sessions/issue-N/
     /// </summary>
-    public bool PrepareWorktree(DispatchSession session, CopilotdConfig config)
+    public bool PrepareWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
     {
-        var mainRepoPath = config.GetRepoPath(session.Repo);
-        if (!Directory.Exists(mainRepoPath))
+        var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
+        if (mainRepoPath is null || !Directory.Exists(mainRepoPath))
         {
-            _logger.LogWarning("Main repo directory not found: {Path}", mainRepoPath);
+            _logger.LogWarning("Main repo directory not found for {Repo}", session.Repo);
             return false;
         }
 
@@ -507,9 +509,9 @@ public sealed partial class ProcessManager
     /// Removes the git worktree and branch associated with a session.
     /// Safe to call even when WorktreePath is null (e.g., after a failed PrepareWorktree).
     /// </summary>
-    public void CleanupWorktree(DispatchSession session, CopilotdConfig config)
+    public void CleanupWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
     {
-        var mainRepoPath = config.GetRepoPath(session.Repo);
+        var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
 
         // Remove the worktree directory if it exists
         if (!string.IsNullOrEmpty(session.WorktreePath))
@@ -518,7 +520,10 @@ public sealed partial class ProcessManager
 
             if (Directory.Exists(session.WorktreePath))
             {
-                RunGit(mainRepoPath, $"worktree remove \"{session.WorktreePath}\" --force");
+                if (mainRepoPath is not null)
+                    RunGit(mainRepoPath, $"worktree remove \"{session.WorktreePath}\" --force");
+                else
+                    _logger.LogWarning("Cannot run 'git worktree remove' for {Key}: main repo path not found", session.IssueKey);
             }
 
             session.WorktreePath = null;
@@ -527,10 +532,17 @@ public sealed partial class ProcessManager
         // Delete the branch — use the stored name, falling back to the legacy
         // naming scheme for sessions created before BranchName tracking was added.
         // Only clear BranchName on success so a future cleanup can retry.
-        var branchName = session.BranchName ?? $"copilotd/issue-{session.IssueNumber}";
-        if (RunGit(mainRepoPath, $"branch -D {branchName}"))
+        if (mainRepoPath is not null)
         {
-            session.BranchName = null;
+            var branchName = session.BranchName ?? $"copilotd/issue-{session.IssueNumber}";
+            if (RunGit(mainRepoPath, $"branch -D {branchName}"))
+            {
+                session.BranchName = null;
+            }
+        }
+        else
+        {
+            _logger.LogWarning("Cannot clean up branch for {Key}: main repo path not found", session.IssueKey);
         }
     }
 

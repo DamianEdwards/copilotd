@@ -127,11 +127,12 @@ public static class SessionCommand
                     return 1;
                 }
 
-                // Use worktree path if available, otherwise fall back to main repo
-                var workingDir = session.WorktreePath ?? config.GetRepoPath(session.Repo);
-                if (!Directory.Exists(workingDir))
+                // Use worktree path if available, otherwise resolve the main repo
+                var repoResolver = services.GetRequiredService<RepoPathResolver>();
+                var workingDir = session.WorktreePath ?? repoResolver.ResolveRepoPath(session.Repo, config, state);
+                if (workingDir is null || !Directory.Exists(workingDir))
                 {
-                    ConsoleOutput.Error($"Working directory not found: {workingDir}");
+                    ConsoleOutput.Error($"Working directory not found for {session.Repo}. Ensure the repository is cloned under the configured RepoHome directory.");
                     return 1;
                 }
 
@@ -366,7 +367,7 @@ public static class SessionCommand
                 }
 
                 // Clean up old worktree before resetting
-                processManager.CleanupWorktree(session, config);
+                processManager.CleanupWorktree(session, config, state);
 
                 session.Status = SessionStatus.Pending;
                 session.CompletedBySession = false;

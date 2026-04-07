@@ -49,6 +49,7 @@ public class Program
         });
 
         serviceCollection.AddSingleton<StateStore>();
+        serviceCollection.AddSingleton<RepoPathResolver>();
         serviceCollection.AddSingleton<ProcessManager>();
         serviceCollection.AddSingleton<GhCliService>();
         serviceCollection.AddSingleton<CopilotCliService>();
