@@ -8,25 +8,24 @@ namespace Copilotd.Infrastructure;
 
 /// <summary>
 /// Verifies provenance (Authenticode signature + certificate chain) of downloaded binaries
-/// by extracting and invoking an embedded PowerShell verification script.
+/// by writing the embedded PowerShell verification script to a temp file and executing it.
+/// The temp file uses a random name and is deleted immediately after use.
 /// Also handles SHA256 checksum and release-metadata.json validation.
 /// Windows-only; no-ops on other platforms.
 /// </summary>
 public sealed class ProvenanceVerifier
 {
-    private readonly StateStore _stateStore;
     private readonly ILogger<ProvenanceVerifier> _logger;
     private static readonly TimeSpan VerifyTimeout = TimeSpan.FromSeconds(60);
 
-    public ProvenanceVerifier(StateStore stateStore, ILogger<ProvenanceVerifier> logger)
+    public ProvenanceVerifier(ILogger<ProvenanceVerifier> logger)
     {
-        _stateStore = stateStore;
         _logger = logger;
     }
 
     /// <summary>
     /// Verifies the Authenticode signature and certificate chain of a binary
-    /// using the embedded verify-provenance.ps1 script.
+    /// by writing the embedded verify-provenance.ps1 to a temp file and executing it.
     /// </summary>
     /// <returns>True if verification passed, false if it failed.</returns>
     public async Task<(bool Success, string? Error)> VerifyBinaryTrustAsync(string binaryPath, CancellationToken ct)
@@ -37,69 +36,83 @@ public sealed class ProvenanceVerifier
             return (true, null);
         }
 
-        var scriptPath = ExtractVerificationScript();
-        if (scriptPath is null)
-            return (false, "Failed to extract verification script");
+        var scriptContent = GetEmbeddedScript();
+        if (scriptContent is null)
+            return (false, "Failed to load embedded verification script");
 
         _logger.LogInformation("Verifying provenance of '{BinaryPath}'", binaryPath);
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "powershell.exe",
-            Arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{scriptPath}\" -BinaryPath \"{binaryPath}\"",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(VerifyTimeout);
-
-        using var process = Process.Start(psi)!;
-        var stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
-
+        // Write the embedded script to a temp file for execution. We use a temp file
+        // because -EncodedCommand exceeds the 32K command-line limit and -Command -
+        // (stdin) can't reliably parse complex multi-line scripts with Add-Type.
+        var scriptPath = Path.Combine(Path.GetTempPath(), $"copilotd-verify-{Guid.NewGuid():N}.ps1");
         try
         {
-            await process.WaitForExitAsync(timeoutCts.Token);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogWarning("Provenance verification timed out after {Timeout}s", VerifyTimeout.TotalSeconds);
-            process.Kill();
-            return (false, "Provenance verification timed out");
-        }
+            await File.WriteAllTextAsync(scriptPath, scriptContent, ct);
 
-        var stdout = await stdoutTask;
-
-        if (process.ExitCode == 0)
-        {
-            _logger.LogInformation("Provenance verification passed for '{BinaryPath}'", binaryPath);
-            return (true, null);
-        }
-
-        // Try to parse JSON error from stdout
-        var error = "Provenance verification failed";
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(stdout))
+            var psi = new ProcessStartInfo
             {
-                using var doc = JsonDocument.Parse(stdout);
-                if (doc.RootElement.TryGetProperty("error", out var errorEl) && errorEl.ValueKind == JsonValueKind.String)
-                    error = errorEl.GetString() ?? error;
-            }
-        }
-        catch
-        {
-            // Fall back to stderr
-            var stderr = await stderrTask;
-            if (!string.IsNullOrWhiteSpace(stderr))
-                error = stderr.Trim();
-        }
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{scriptPath}\" -BinaryPath \"{binaryPath}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
 
-        _logger.LogWarning("Provenance verification failed for '{BinaryPath}': {Error}", binaryPath, error);
-        return (false, error);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(VerifyTimeout);
+
+            using var process = Process.Start(psi)!;
+            var stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
+
+        try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogWarning("Provenance verification timed out after {Timeout}s", VerifyTimeout.TotalSeconds);
+                process.Kill();
+                return (false, "Provenance verification timed out");
+            }
+
+            var stdout = await stdoutTask;
+
+            if (process.ExitCode == 0)
+            {
+                _logger.LogInformation("Provenance verification passed for '{BinaryPath}'", binaryPath);
+                return (true, null);
+            }
+
+            // Try to parse JSON error from stdout
+            var error = "Provenance verification failed";
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(stdout))
+                {
+                    using var doc = JsonDocument.Parse(stdout);
+                    if (doc.RootElement.TryGetProperty("error", out var errorEl) && errorEl.ValueKind == JsonValueKind.String)
+                        error = errorEl.GetString() ?? error;
+                }
+            }
+            catch
+            {
+                // Fall back to stderr
+                var stderr = await stderrTask;
+                if (!string.IsNullOrWhiteSpace(stderr))
+                    error = stderr.Trim();
+            }
+
+            _logger.LogWarning("Provenance verification failed for '{BinaryPath}': {Error}", binaryPath, error);
+            return (false, error);
+        }
+        finally
+        {
+            try { File.Delete(scriptPath); }
+            catch { /* best-effort cleanup */ }
+        }
     }
 
     /// <summary>
@@ -184,13 +197,10 @@ public sealed class ProvenanceVerifier
     }
 
     /// <summary>
-    /// Extracts the embedded verify-provenance.ps1 to the config directory,
-    /// always overwriting to prevent tampering with the extracted copy.
+    /// Reads the embedded verify-provenance.ps1 resource and returns its content as a string.
     /// </summary>
-    private string? ExtractVerificationScript()
+    private string? GetEmbeddedScript()
     {
-        var targetPath = Path.Combine(_stateStore.ConfigDir, "verify-provenance.ps1");
-
         try
         {
             var assembly = Assembly.GetExecutingAssembly();
@@ -204,15 +214,12 @@ public sealed class ProvenanceVerifier
             }
 
             using var stream = assembly.GetManifestResourceStream(resourceName)!;
-            using var fs = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            stream.CopyTo(fs);
-
-            _logger.LogDebug("Extracted verify-provenance.ps1 to '{Path}'", targetPath);
-            return targetPath;
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to extract verify-provenance.ps1");
+            _logger.LogError(ex, "Failed to read embedded verification script");
             return null;
         }
     }
