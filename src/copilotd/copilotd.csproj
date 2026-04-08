@@ -21,11 +21,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="..\..\scripts\verify-provenance.ps1" LogicalName="verify-provenance.ps1" />
+    <EmbeddedResource Include="$(IntermediateOutputPath)verify-provenance.ps1" LogicalName="verify-provenance.ps1" />
   </ItemGroup>
 
   <Target Name="GenerateVerifyProvenance" BeforeTargets="PrepareForBuild" Condition="$([MSBuild]::IsOSPlatform('Windows'))">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\Generate-VerifyProvenance.ps1&quot; -OutputPath &quot;$(MSBuildProjectDirectory)\..\..\scripts\verify-provenance.ps1&quot;" />
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\Generate-VerifyProvenance.ps1&quot; -OutputPath &quot;$(IntermediateOutputPath)verify-provenance.ps1&quot;" />
   </Target>
 
 </Project>
