@@ -139,8 +139,8 @@ jobs:
           set -euo pipefail
           sudo dpkg --add-architecture arm64
           sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
           EOF'
           sudo sed -i -e 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
@@ -149,7 +149,7 @@ jobs:
 
       - name: Publish native asset
         shell: pwsh
-        run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.version }}' -ArtifactsDirectory './artifacts/dev'
+        run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.version }}'-ArtifactsDirectory './artifacts/dev'
 
       - name: Upload dev artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
@@ -195,8 +195,8 @@ jobs:
           set -euo pipefail
           sudo dpkg --add-architecture arm64
           sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
           EOF'
           sudo sed -i -e 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
@@ -205,7 +205,7 @@ jobs:
 
       - name: Publish native asset
         shell: pwsh
-        run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.rc_version }}' -ArtifactsDirectory './artifacts/rc'
+        run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.rc_version }}'-ArtifactsDirectory './artifacts/rc'
 
       - name: Upload RC artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
