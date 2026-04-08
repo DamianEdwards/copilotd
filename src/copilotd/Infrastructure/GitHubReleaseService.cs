@@ -17,6 +17,7 @@ public sealed record ReleaseInfo(
 /// <summary>
 /// Queries GitHub Releases and downloads assets using the gh CLI.
 /// Mirrors the release selection logic from install-copilotd.ps1.
+/// When <c>COPILOTD_UPDATE_SOURCE</c> is set, reads assets from a local directory instead.
 /// </summary>
 public sealed class GitHubReleaseService
 {
@@ -26,9 +27,17 @@ public sealed class GitHubReleaseService
 
     public const string Repository = "DamianEdwards/copilotd";
 
+    /// <summary>
+    /// Optional local directory path to use instead of GitHub Releases.
+    /// Set via the <c>COPILOTD_UPDATE_SOURCE</c> environment variable.
+    /// The directory should contain the release ZIP, checksums.txt, and release-metadata.json.
+    /// </summary>
+    public string? LocalSource { get; set; }
+
     public GitHubReleaseService(ILogger<GitHubReleaseService> logger)
     {
         _logger = logger;
+        LocalSource = Environment.GetEnvironmentVariable("COPILOTD_UPDATE_SOURCE");
     }
 
     /// <summary>
@@ -39,6 +48,10 @@ public sealed class GitHubReleaseService
     /// <param name="assetName">Required asset name (e.g. "copilotd-win-x64.zip").</param>
     public ReleaseInfo? GetLatestRelease(string quality, string assetName)
     {
+        // When using a local source, build ReleaseInfo from release-metadata.json
+        if (!string.IsNullOrEmpty(LocalSource))
+            return GetLocalRelease(assetName);
+
         if (string.Equals(quality, "Dev", StringComparison.OrdinalIgnoreCase))
         {
             return GetDevRelease(assetName);
@@ -124,11 +137,60 @@ public sealed class GitHubReleaseService
     }
 
     /// <summary>
+    /// Builds a <see cref="ReleaseInfo"/> from a local directory's release-metadata.json.
+    /// </summary>
+    private ReleaseInfo? GetLocalRelease(string assetName)
+    {
+        var assetPath = Path.Combine(LocalSource!, assetName);
+        if (!File.Exists(assetPath))
+        {
+            _logger.LogWarning("Local source '{Path}' does not contain '{Asset}'", LocalSource, assetName);
+            return null;
+        }
+
+        var metadataPath = Path.Combine(LocalSource!, "release-metadata.json");
+        if (!File.Exists(metadataPath))
+        {
+            _logger.LogWarning("Local source '{Path}' does not contain release-metadata.json", LocalSource);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(metadataPath));
+            var version = doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() ?? "local" : "local";
+            var isPrerelease = doc.RootElement.TryGetProperty("prerelease", out var p) && p.GetBoolean();
+
+            _logger.LogInformation("Using local release: version={Version}, asset={Asset}", version, assetName);
+            return new ReleaseInfo(version, $"Local build ({version})", isPrerelease, false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read local release-metadata.json");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Fetches the version string from the release-metadata.json asset of a release.
     /// Used for dev builds where the tag ("dev") doesn't carry a parseable version.
     /// </summary>
     public string? GetDevReleaseVersion(string tag)
     {
+        // When using a local source, read directly from local release-metadata.json
+        if (!string.IsNullOrEmpty(LocalSource))
+        {
+            var localMeta = Path.Combine(LocalSource, "release-metadata.json");
+            if (!File.Exists(localMeta)) return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(localMeta));
+                return doc.RootElement.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.String
+                    ? v.GetString() : null;
+            }
+            catch { return null; }
+        }
+
         _logger.LogDebug("Fetching release-metadata.json for version from release '{Tag}'", tag);
 
         var tempDir = Path.Combine(Path.GetTempPath(), $"copilotd-meta-{Guid.NewGuid():N}");
@@ -164,6 +226,22 @@ public sealed class GitHubReleaseService
     /// </summary>
     public bool DownloadReleaseAsset(string tag, string assetName, string destinationDir)
     {
+        // When using a local source, copy from the local directory
+        if (!string.IsNullOrEmpty(LocalSource))
+        {
+            var localPath = Path.Combine(LocalSource, assetName);
+            if (!File.Exists(localPath))
+            {
+                _logger.LogWarning("Local asset '{AssetName}' not found at '{Path}'", assetName, localPath);
+                return false;
+            }
+
+            Directory.CreateDirectory(destinationDir);
+            File.Copy(localPath, Path.Combine(destinationDir, assetName), overwrite: true);
+            _logger.LogDebug("Copied local asset '{AssetName}' from '{Source}'", assetName, localPath);
+            return true;
+        }
+
         _logger.LogDebug("Downloading asset '{AssetName}' from release '{Tag}'", assetName, tag);
 
         Directory.CreateDirectory(destinationDir);

@@ -70,6 +70,11 @@ public static class UpdateCommand
                 var localSource = Environment.GetEnvironmentVariable(UpdateSourceEnvVar);
                 if (!string.IsNullOrEmpty(localSource))
                 {
+                    if (!Directory.Exists(localSource))
+                    {
+                        ConsoleOutput.Error($"{UpdateSourceEnvVar} directory not found: {localSource}");
+                        return 1;
+                    }
                     ConsoleOutput.Info($"Using local update source: {localSource}");
                 }
 
