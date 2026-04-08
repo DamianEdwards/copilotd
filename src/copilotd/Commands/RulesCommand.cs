@@ -129,6 +129,8 @@ public static class RulesCommand
         var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Pass --allow-all-tools to copilot (default: true)" };
         var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Pass --allow-all-urls to copilot (default: false)" };
         var promptOption = new Option<string?>("--prompt") { Description = "Extra prompt for this rule" };
+        var customPromptOption = new Option<string?>("--custom-prompt") { Description = "Per-rule custom prompt (appended to or overrides global custom prompt)" };
+        var customPromptModeOption = new Option<string?>("--custom-prompt-mode") { Description = "How rule custom prompt interacts with global: 'append' (default) or 'override'" };
         var repoOption = new Option<string[]>("--repo") { Description = "Repository to add (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
 
         command.Arguments.Add(nameArg);
@@ -140,6 +142,8 @@ public static class RulesCommand
         command.Options.Add(allowAllToolsOption);
         command.Options.Add(allowAllUrlsOption);
         command.Options.Add(promptOption);
+        command.Options.Add(customPromptOption);
+        command.Options.Add(customPromptModeOption);
         command.Options.Add(repoOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
@@ -168,8 +172,20 @@ public static class RulesCommand
                     AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true,
                     AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false,
                     ExtraPrompt = parseResult.GetValue(promptOption),
+                    CustomPrompt = parseResult.GetValue(customPromptOption),
                     Repos = [.. parseResult.GetValue(repoOption) ?? []],
                 };
+
+                var modeValue = parseResult.GetValue(customPromptModeOption);
+                if (modeValue is not null)
+                {
+                    if (!TryParsePromptMode(modeValue, out var mode))
+                    {
+                        ConsoleOutput.Error("Invalid --custom-prompt-mode. Use 'append' or 'override'.");
+                        return 1;
+                    }
+                    rule.CustomPromptMode = mode;
+                }
 
                 config.Rules[name] = rule;
                 stateStore.SaveConfig(config);
@@ -194,6 +210,8 @@ public static class RulesCommand
         var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Update allow-all-tools setting" };
         var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Update allow-all-urls setting" };
         var promptOption = new Option<string?>("--prompt") { Description = "Update extra prompt" };
+        var customPromptOption = new Option<string?>("--custom-prompt") { Description = "Update per-rule custom prompt" };
+        var customPromptModeOption = new Option<string?>("--custom-prompt-mode") { Description = "Update custom prompt mode: 'append' or 'override'" };
         var addRepoOption = new Option<string[]>("--add-repo") { Description = "Add a repository", AllowMultipleArgumentsPerToken = true };
         var deleteRepoOption = new Option<string[]>("--delete-repo") { Description = "Remove a repository", AllowMultipleArgumentsPerToken = true };
 
@@ -207,6 +225,8 @@ public static class RulesCommand
         command.Options.Add(allowAllToolsOption);
         command.Options.Add(allowAllUrlsOption);
         command.Options.Add(promptOption);
+        command.Options.Add(customPromptOption);
+        command.Options.Add(customPromptModeOption);
         command.Options.Add(addRepoOption);
         command.Options.Add(deleteRepoOption);
 
@@ -256,6 +276,20 @@ public static class RulesCommand
 
                 if (parseResult.GetResult(promptOption) is not null)
                     rule.ExtraPrompt = parseResult.GetValue(promptOption);
+
+                if (parseResult.GetResult(customPromptOption) is not null)
+                    rule.CustomPrompt = parseResult.GetValue(customPromptOption);
+
+                if (parseResult.GetResult(customPromptModeOption) is not null)
+                {
+                    var modeValue = parseResult.GetValue(customPromptModeOption);
+                    if (!TryParsePromptMode(modeValue, out var mode))
+                    {
+                        ConsoleOutput.Error("Invalid --custom-prompt-mode. Use 'append' or 'override'.");
+                        return 1;
+                    }
+                    rule.CustomPromptMode = mode;
+                }
 
                 var addRepos = parseResult.GetValue(addRepoOption) ?? [];
                 var deleteRepos = parseResult.GetValue(deleteRepoOption) ?? [];
@@ -311,5 +345,26 @@ public static class RulesCommand
         });
 
         return command;
+    }
+
+    private static bool TryParsePromptMode(string? value, out PromptMode mode)
+    {
+        mode = PromptMode.Append;
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        if (string.Equals(value, "append", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = PromptMode.Append;
+            return true;
+        }
+
+        if (string.Equals(value, "override", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = PromptMode.Override;
+            return true;
+        }
+
+        return false;
     }
 }

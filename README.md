@@ -86,11 +86,14 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 
 ### Rules options
 
-Rules support conditions (`--user`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--prompt`, `--repo`). All conditions are logical AND.
+Rules support conditions (`--user`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). All conditions are logical AND.
 
 ```bash
 # Add a rule
 copilotd rules add "Dashboard issues" --label area-dashboard --yolo --repo "org/repo"
+
+# Add a rule with a per-rule custom prompt that overrides the global custom prompt
+copilotd rules add "Backend" --label area-backend --custom-prompt "Focus on API design" --custom-prompt-mode override
 
 # Update labels on a rule
 copilotd rules update Default --delete-label copilotd --add-label dispatch
@@ -111,8 +114,9 @@ The built-in prompt supports token replacement:
 | `$(issue.milestone)` | Milestone title |
 
 Custom prompt text (configured via `custom_prompt` or `~/.copilotd/prompt.md`) is appended after
-the built-in prompt with a trailer. Tokens are replaced in both the built-in and custom prompt
-text. Per-rule extra prompts are appended last.
+the built-in prompt with a trailer. Rules can also specify a `custom_prompt` that either appends
+to or overrides the global custom prompt (controlled by `custom_prompt_mode`). Tokens are replaced
+in both the built-in and custom prompt text. Per-rule extra prompts are appended last.
 
 ## Session lifecycle
 
@@ -240,6 +244,8 @@ Stored in `~/.copilotd/`:
 | `allow_all_tools` | `true` | Pass `--allow-all-tools` to copilot |
 | `allow_all_urls` | `false` | Pass `--allow-all-urls` to copilot |
 | `extra_prompt` | *(none)* | Additional prompt text appended when this rule triggers |
+| `custom_prompt` | *(none)* | Per-rule custom prompt text (appended to or overrides global custom prompt) |
+| `custom_prompt_mode` | `append` | How rule custom prompt interacts with global: `append` or `override` |
 
 Log files are written to `$TEMP/copilotd/logs/` with daily rollover.
 
@@ -273,10 +279,16 @@ when sessions complete, are reset, or are pruned.
 
 ### Prompt customization
 
-Custom prompt text can be provided via `~/.copilotd/prompt.md` or the `prompt` config property.
-This text is **appended** to the built-in copilotd prompt (not a replacement) with a trailer:
-"The user has supplied the following additional context:". Token replacement is applied to both
-the built-in and custom prompt at dispatch time. Per-rule extra prompts are appended last.
+Custom prompt text can be provided at two levels:
+
+- **Global**: via `~/.copilotd/prompt.md` or the `prompt` config property
+- **Per-rule**: via the `custom_prompt` rule setting (set with `--custom-prompt`)
+
+Global custom text is **appended** to the built-in copilotd prompt (not a replacement) with a
+trailer: "The user has supplied the following additional context:". Per-rule custom prompts can
+either append to the global custom prompt (`--custom-prompt-mode append`, the default) or
+override it entirely (`--custom-prompt-mode override`). Token replacement is applied to the
+full combined prompt at dispatch time. Per-rule extra prompts (`--prompt`) are appended last.
 
 ## License
 

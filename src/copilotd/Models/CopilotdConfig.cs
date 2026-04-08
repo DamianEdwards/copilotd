@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Copilotd.Models;
 
 /// <summary>
@@ -98,6 +100,20 @@ public sealed class DispatchRule
     public string? ExtraPrompt { get; set; }
 
     /// <summary>
+    /// Per-rule custom prompt text. When set, this is used as the custom prompt
+    /// for sessions matching this rule. See <see cref="CustomPromptMode"/> for
+    /// how it interacts with the global custom prompt.
+    /// </summary>
+    public string? CustomPrompt { get; set; }
+
+    /// <summary>
+    /// Controls how <see cref="CustomPrompt"/> interacts with the global custom prompt.
+    /// <see cref="PromptMode.Append"/>: rule prompt is appended after the global custom prompt (default).
+    /// <see cref="PromptMode.Override"/>: rule prompt replaces the global custom prompt entirely.
+    /// </summary>
+    public PromptMode CustomPromptMode { get; set; } = PromptMode.Append;
+
+    /// <summary>
     /// Returns true if the given issue matches all conditions on this rule.
     /// All conditions are logical AND.
     /// </summary>
@@ -117,4 +133,17 @@ public sealed class DispatchRule
 
         return true;
     }
+}
+
+/// <summary>
+/// Controls how a rule's custom prompt interacts with the global custom prompt.
+/// </summary>
+[JsonConverter(typeof(TolerantPromptModeConverter))]
+public enum PromptMode
+{
+    /// <summary>Rule prompt is appended after the global custom prompt.</summary>
+    Append,
+
+    /// <summary>Rule prompt replaces the global custom prompt entirely.</summary>
+    Override,
 }

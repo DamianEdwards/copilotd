@@ -355,16 +355,20 @@ public sealed partial class ProcessManager
         return true;
     }
 
-    private static string BuildPrompt(string customPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
+    private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
     {
         var prompt = CopilotdConfig.DefaultPrompt;
 
-        if (!string.IsNullOrWhiteSpace(customPrompt))
+        var rule = config.Rules.GetValueOrDefault(session.RuleName);
+
+        // Resolve the effective custom prompt based on rule settings
+        var effectiveCustomPrompt = ResolveCustomPrompt(globalCustomPrompt, rule);
+
+        if (!string.IsNullOrWhiteSpace(effectiveCustomPrompt))
         {
-            prompt += "\n\nThe user has supplied the following additional context:\n\n" + customPrompt;
+            prompt += "\n\nThe user has supplied the following additional context:\n\n" + effectiveCustomPrompt;
         }
 
-        var rule = config.Rules.GetValueOrDefault(session.RuleName);
         if (!string.IsNullOrWhiteSpace(rule?.ExtraPrompt))
         {
             prompt += "\n\n" + rule.ExtraPrompt;
@@ -378,6 +382,29 @@ public sealed partial class ProcessManager
             .Replace("$(issue.milestone)", issue.Milestone ?? "none");
 
         return prompt;
+    }
+
+    /// <summary>
+    /// Resolves the effective custom prompt by combining the global custom prompt
+    /// with the rule's custom prompt based on the rule's <see cref="PromptMode"/>.
+    /// </summary>
+    private static string ResolveCustomPrompt(string globalCustomPrompt, DispatchRule? rule)
+    {
+        var ruleCustomPrompt = rule?.CustomPrompt;
+
+        if (string.IsNullOrWhiteSpace(ruleCustomPrompt))
+        {
+            return globalCustomPrompt;
+        }
+
+        return rule!.CustomPromptMode switch
+        {
+            PromptMode.Override => ruleCustomPrompt,
+            // Append (default): combine global + rule custom prompts
+            _ => string.IsNullOrWhiteSpace(globalCustomPrompt)
+                ? ruleCustomPrompt
+                : globalCustomPrompt + "\n\n" + ruleCustomPrompt,
+        };
     }
 
     private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule, string repoPath)

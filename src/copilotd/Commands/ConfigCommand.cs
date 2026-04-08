@@ -56,6 +56,8 @@ public static class ConfigCommand
                                 if (rule.AllowAllUrls) details.Add("allow_all_urls=true");
                             }
                             if (rule.ExtraPrompt is not null) details.Add($"extra_prompt={rule.ExtraPrompt}");
+                            if (rule.CustomPrompt is not null) details.Add($"custom_prompt={rule.CustomPrompt}");
+                            if (rule.CustomPrompt is not null) details.Add($"custom_prompt_mode={rule.CustomPromptMode.ToString().ToLowerInvariant()}");
 
                             table.AddRow(
                                 Markup.Escape($"  rule[{name}]"),

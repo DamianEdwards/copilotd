@@ -4,6 +4,43 @@ using System.Text.Json.Serialization;
 namespace Copilotd.Models;
 
 /// <summary>
+/// AOT-compatible JSON converter for <see cref="PromptMode"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="PromptMode.Append"/>.
+/// This prevents a typo or future enum value in config.json from discarding
+/// the entire configuration.
+/// </summary>
+public sealed class TolerantPromptModeConverter : JsonConverter<PromptMode>
+{
+    public override PromptMode Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<PromptMode>(value, ignoreCase: true, out var mode))
+                return mode;
+
+            return PromptMode.Append;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(PromptMode), intValue))
+                return (PromptMode)intValue;
+
+            return PromptMode.Append;
+        }
+
+        return PromptMode.Append;
+    }
+
+    public override void Write(Utf8JsonWriter writer, PromptMode value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
 /// AOT-compatible JSON converter for <see cref="SessionStatus"/> that gracefully handles
 /// unknown enum values by falling back to <see cref="SessionStatus.Pending"/>.
 /// This prevents older binaries from losing all persisted state when encountering
@@ -85,7 +122,7 @@ public sealed class TolerantUpdateStatusConverter : JsonConverter<UpdateStatus>
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter)])]
+    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter)])]
 [JsonSerializable(typeof(CopilotdConfig))]
 [JsonSerializable(typeof(DaemonState))]
 [JsonSerializable(typeof(DispatchRule))]
