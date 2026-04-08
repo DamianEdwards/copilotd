@@ -1,0 +1,230 @@
+<#
+.SYNOPSIS
+    Generates verify-provenance.ps1 by extracting shared provenance functions
+    from install-copilotd.ps1.
+
+.DESCRIPTION
+    This script reads the install-copilotd.ps1 file, extracts the trust
+    configuration constants and the functions between #region SharedProvenanceFunctions
+    and #endregion SharedProvenanceFunctions, then wraps them with a standalone
+    entry point that accepts a -BinaryPath parameter and outputs JSON results.
+
+    This ensures verify-provenance.ps1 is always derived from the single source
+    of truth (install-copilotd.ps1) and the two scripts cannot drift apart.
+
+.PARAMETER OutputPath
+    Path where the generated verify-provenance.ps1 will be written.
+    Defaults to scripts/verify-provenance.ps1 relative to the repo root.
+#>
+[CmdletBinding()]
+param(
+    [string]$OutputPath
+)
+
+$ErrorActionPreference = 'Stop'
+
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not $repoRoot) { $repoRoot = Split-Path -Parent $PSScriptRoot }
+$installerPath = Join-Path $PSScriptRoot 'install\install-copilotd.ps1'
+if (-not (Test-Path $installerPath))
+{
+    # Try relative to script location
+    $installerPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\install\install-copilotd.ps1'
+}
+
+if (-not (Test-Path $installerPath))
+{
+    throw "Cannot find install-copilotd.ps1 at '$installerPath'"
+}
+
+if (-not $OutputPath)
+{
+    $OutputPath = Join-Path $PSScriptRoot 'verify-provenance.ps1'
+}
+
+Write-Verbose "Reading installer from '$installerPath'"
+$installerContent = Get-Content -Path $installerPath -Raw
+$installerLines = Get-Content -Path $installerPath
+
+# Extract trust configuration constants from the installer header
+$trustConstants = @()
+$inTrustConfig = $false
+foreach ($line in $installerLines)
+{
+    # Match the trust constant declarations
+    if ($line -match '^\$ExpectedSigner')
+    {
+        $inTrustConfig = $true
+    }
+
+    if ($inTrustConfig)
+    {
+        $trustConstants += $line
+        if ($line -match '^\)' -or ($line -notmatch '@\(' -and $line -notmatch '^\s+''' -and $line -match '^\$' -and $trustConstants.Count -gt 0 -and $line -notmatch '^\$Expected'))
+        {
+            # Check if we're done with multi-line arrays
+        }
+    }
+
+    # Stop after all trust constants are captured (they end before the $runningOnWindows line)
+    if ($inTrustConfig -and $line -match '^\$runningOnWindows')
+    {
+        $inTrustConfig = $false
+        break
+    }
+}
+
+# More robust extraction: find the exact lines
+$trustLines = @()
+$i = 0
+while ($i -lt $installerLines.Count)
+{
+    $line = $installerLines[$i]
+    if ($line -match '^\$ExpectedSignerIssuerSha512Thumbprints\s*=')
+    {
+        # Multi-line array
+        while ($i -lt $installerLines.Count)
+        {
+            $trustLines += $installerLines[$i]
+            if ($installerLines[$i] -match '^\)')
+            {
+                $i++
+                break
+            }
+            $i++
+        }
+        continue
+    }
+    elseif ($line -match '^\$ExpectedSignerParentIssuerSha512Thumbprints\s*=')
+    {
+        while ($i -lt $installerLines.Count)
+        {
+            $trustLines += $installerLines[$i]
+            if ($installerLines[$i] -match '^\)')
+            {
+                $i++
+                break
+            }
+            $i++
+        }
+        continue
+    }
+    else
+    {
+        $i++
+    }
+}
+
+# Extract the shared provenance functions region
+$regionStart = $null
+$regionEnd = $null
+for ($i = 0; $i -lt $installerLines.Count; $i++)
+{
+    if ($installerLines[$i] -match '^#region SharedProvenanceFunctions')
+    {
+        $regionStart = $i + 1  # Line after the marker
+    }
+    if ($installerLines[$i] -match '^#endregion SharedProvenanceFunctions')
+    {
+        $regionEnd = $i - 1  # Line before the marker
+    }
+}
+
+if ($null -eq $regionStart -or $null -eq $regionEnd)
+{
+    throw "Could not find #region SharedProvenanceFunctions / #endregion SharedProvenanceFunctions markers in install-copilotd.ps1"
+}
+
+$sharedFunctions = ($installerLines[$regionStart..$regionEnd]) -join "`n"
+
+# Also need the ExpectedSignerSubject from the param block
+# It's defined as a parameter default in the installer, extract it
+$signerSubject = $null
+foreach ($line in $installerLines)
+{
+    if ($line -match "\[string\]\\\$ExpectedSignerSubject\s*=\s*'([^']+)'")
+    {
+        $signerSubject = $Matches[1]
+        break
+    }
+}
+if (-not $signerSubject)
+{
+    # Try a broader match
+    foreach ($line in $installerLines)
+    {
+        if ($line -match "ExpectedSignerSubject\s*=\s*'([^']+)'")
+        {
+            $signerSubject = $Matches[1]
+            break
+        }
+    }
+}
+if (-not $signerSubject)
+{
+    throw "Could not extract ExpectedSignerSubject from install-copilotd.ps1"
+}
+
+# Build the generated script
+$header = @"
+<#
+.SYNOPSIS
+    Verifies Authenticode provenance of a copilotd binary.
+
+.DESCRIPTION
+    AUTO-GENERATED from install-copilotd.ps1 by Generate-VerifyProvenance.ps1.
+    DO NOT EDIT THIS FILE DIRECTLY — edit install-copilotd.ps1 instead.
+
+    This script is embedded as a resource in the copilotd binary and extracted
+    at runtime for self-update provenance checks.
+
+.PARAMETER BinaryPath
+    Full path to the binary to verify.
+
+.OUTPUTS
+    JSON object with verification result on stdout.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)]
+    [string]`$BinaryPath
+)
+
+`$ErrorActionPreference = 'Stop'
+
+# Trust configuration — extracted from install-copilotd.ps1 (single source of truth)
+`$ExpectedSignerSubject = '$signerSubject'
+"@
+
+$footer = @'
+
+# --- Entry point ---
+
+try
+{
+    $null = Assert-WindowsBinaryTrust `
+        -BinaryPath $BinaryPath `
+        -ExpectedSubject $ExpectedSignerSubject `
+        -ExpectedIssuerSha512Thumbprints $ExpectedSignerIssuerSha512Thumbprints `
+        -ExpectedParentIssuerSha512Thumbprints $ExpectedSignerParentIssuerSha512Thumbprints
+
+    @{ success = $true; error = $null } | ConvertTo-Json -Compress
+}
+catch
+{
+    @{ success = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+    exit 1
+}
+'@
+
+$trustBlock = ($trustLines -join "`n")
+$output = "$header`n$trustBlock`n`n# --- Trust/cert functions (extracted from install-copilotd.ps1) ---`n`n$sharedFunctions`n$footer`n"
+
+$outputDir = Split-Path -Parent $OutputPath
+if (-not (Test-Path $outputDir))
+{
+    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+}
+
+Set-Content -Path $OutputPath -Value $output -NoNewline
+Write-Host "Generated verify-provenance.ps1 at '$OutputPath'"

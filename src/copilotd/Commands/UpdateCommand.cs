@@ -8,6 +8,13 @@ namespace Copilotd.Commands;
 
 public static class UpdateCommand
 {
+    /// <summary>
+    /// Environment variable to override the update source with a local path
+    /// for testing the update flow without a real release.
+    /// Set to a directory containing the release assets (ZIP, checksums.txt, release-metadata.json).
+    /// </summary>
+    public const string UpdateSourceEnvVar = "COPILOTD_UPDATE_SOURCE";
+
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("update", "Check for and install updates (Windows only)");
@@ -24,6 +31,10 @@ public static class UpdateCommand
         {
             Description = "Disable Authenticode signature verification"
         };
+        var dryRunOption = new Option<bool>("--dry-run")
+        {
+            Description = "Show what would happen without making any changes"
+        };
         var installStagedOption = new Option<bool>("--install-staged")
         {
             Description = "Install a previously staged update binary",
@@ -33,6 +44,7 @@ public static class UpdateCommand
         command.Options.Add(checkOption);
         command.Options.Add(preReleaseOption);
         command.Options.Add(skipProvenanceOption);
+        command.Options.Add(dryRunOption);
         command.Options.Add(installStagedOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
@@ -52,10 +64,22 @@ public static class UpdateCommand
                 var check = parseResult.GetValue(checkOption);
                 var preRelease = parseResult.GetValue(preReleaseOption);
                 var skipProvenance = parseResult.GetValue(skipProvenanceOption);
+                var dryRun = parseResult.GetValue(dryRunOption);
                 var installStaged = parseResult.GetValue(installStagedOption);
+
+                var localSource = Environment.GetEnvironmentVariable(UpdateSourceEnvVar);
+                if (!string.IsNullOrEmpty(localSource))
+                {
+                    ConsoleOutput.Info($"Using local update source: {localSource}");
+                }
 
                 if (installStaged)
                 {
+                    if (dryRun)
+                    {
+                        ConsoleOutput.Info("[dry-run] Would install staged update.");
+                        return 0;
+                    }
                     return await HandleInstallStaged(updateService, stateStore, skipProvenance, ct);
                 }
 
@@ -64,7 +88,7 @@ public static class UpdateCommand
                     return HandleCheckOnly(updateService, preRelease);
                 }
 
-                return await HandleFullUpdate(updateService, stateStore, preRelease, skipProvenance, ct);
+                return await HandleFullUpdate(updateService, stateStore, preRelease, skipProvenance, dryRun, ct);
             }, logger);
         });
 
@@ -102,7 +126,7 @@ public static class UpdateCommand
         return 0;
     }
 
-    private static async Task<int> HandleFullUpdate(UpdateService updateService, StateStore stateStore, bool preRelease, bool skipProvenance, CancellationToken ct)
+    private static async Task<int> HandleFullUpdate(UpdateService updateService, StateStore stateStore, bool preRelease, bool skipProvenance, bool dryRun, CancellationToken ct)
     {
         // Check
         ConsoleOutput.Info("Checking for updates...");
@@ -114,6 +138,15 @@ public static class UpdateCommand
         }
 
         ConsoleOutput.Info($"Update available: {update.CurrentVersion} → {update.AvailableVersion}");
+
+        if (dryRun)
+        {
+            ConsoleOutput.Info("[dry-run] Would download, verify, and install this update.");
+            ConsoleOutput.Info($"[dry-run] Release tag: {update.ReleaseTag}, Dev build: {update.IsDevBuild}");
+            ConsoleOutput.Info($"[dry-run] Authenticode verification: {(update.IsDevBuild || skipProvenance ? "skipped" : "enabled")}");
+            ConsoleOutput.Info($"[dry-run] Checksum verification: enabled");
+            return 0;
+        }
 
         // Acquire update lock for download/stage phase
         if (!stateStore.TryAcquireUpdateLock())

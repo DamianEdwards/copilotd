@@ -349,6 +349,8 @@ function Get-CopilotdInstallerTrustConfiguration
     }
 }
 
+#region SharedProvenanceFunctions
+
 function Get-CertificateSha512Thumbprint
 {
     param([Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
@@ -874,6 +876,8 @@ function Assert-WindowsBinaryTrust
     Write-Verbose "Windows binary trust verification succeeded for '$($evidence.BinaryPath)'."
     return $evidence
 }
+
+#endregion SharedProvenanceFunctions
 
 function Get-CopilotdVersionString
 {

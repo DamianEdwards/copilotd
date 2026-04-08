@@ -1,6 +1,7 @@
 using Copilotd.Infrastructure;
 using Copilotd.Models;
 using Microsoft.Extensions.Logging;
+using NuGet.Versioning;
 
 namespace Copilotd.Services;
 
@@ -79,11 +80,25 @@ public sealed class UpdateService
         var candidateVersionStr = release.TagName;
 
         // Dev releases use the tag "dev", so we can't compare version from tag alone.
-        // For dev builds, any dev release is a candidate (we always update).
+        // Fetch the actual version from release-metadata.json.
         if (VersionHelper.IsDevBuild(currentVersion) && string.Equals(release.TagName, "dev", StringComparison.OrdinalIgnoreCase))
         {
-            // For dev channel, always treat as update candidate since the tag doesn't carry a version
-            _logger.LogInformation("Dev build detected, treating dev release as update candidate");
+            var metadataVersion = _releaseService.GetDevReleaseVersion(release.TagName);
+            if (metadataVersion is not null && VersionHelper.TryParse(metadataVersion, out var devCandidate))
+            {
+                if (devCandidate.CompareTo(currentVersion) <= 0)
+                {
+                    _logger.LogDebug("Dev release version '{Version}' is not newer than current '{Current}'",
+                        metadataVersion, currentVersionStr);
+                    return null;
+                }
+
+                _logger.LogInformation("Dev update available: {Current} → {Available}", currentVersionStr, metadataVersion);
+                return new UpdateCheckResult(currentVersionStr, metadataVersion, release.TagName, true);
+            }
+
+            // Fallback: if we can't get version from metadata, treat as candidate
+            _logger.LogInformation("Dev build detected, treating dev release as update candidate (metadata unavailable)");
             return new UpdateCheckResult(currentVersionStr, "dev", release.TagName, true);
         }
 
@@ -133,38 +148,33 @@ public sealed class UpdateService
             var archivePath = Path.Combine(tempRoot, assetName);
             var extractPath = Path.Combine(tempRoot, "extract");
 
-            // For non-dev builds with provenance enabled, verify checksums
-            if (!update.IsDevBuild && !skipProvenance)
+            // Always verify checksums — they protect against download corruption
+            if (!_releaseService.DownloadReleaseAsset(update.ReleaseTag, "checksums.txt", tempRoot))
             {
-                // Download checksums.txt
-                if (!_releaseService.DownloadReleaseAsset(update.ReleaseTag, "checksums.txt", tempRoot))
-                {
-                    RecordFailure(state, "Failed to download checksums.txt");
-                    return false;
-                }
+                RecordFailure(state, "Failed to download checksums.txt");
+                return false;
+            }
 
-                var checksumsPath = Path.Combine(tempRoot, "checksums.txt");
-                var (checksumOk, checksumErr) = _provenanceVerifier.VerifyChecksum(archivePath, checksumsPath, assetName);
-                if (!checksumOk)
-                {
-                    RecordFailure(state, checksumErr ?? "Checksum verification failed");
-                    return false;
-                }
+            var checksumsPath = Path.Combine(tempRoot, "checksums.txt");
+            var (checksumOk, checksumErr) = _provenanceVerifier.VerifyChecksum(archivePath, checksumsPath, assetName);
+            if (!checksumOk)
+            {
+                RecordFailure(state, checksumErr ?? "Checksum verification failed");
+                return false;
+            }
 
-                // Download and validate release-metadata.json if available
-                if (_releaseService.DownloadReleaseAsset(update.ReleaseTag, "release-metadata.json", tempRoot))
+            // Download and validate release-metadata.json if available
+            if (_releaseService.DownloadReleaseAsset(update.ReleaseTag, "release-metadata.json", tempRoot))
+            {
+                var metadataPath = Path.Combine(tempRoot, "release-metadata.json");
+                var expectedHash = GetExpectedHash(checksumsPath, assetName);
+                if (expectedHash is not null)
                 {
-                    var metadataPath = Path.Combine(tempRoot, "release-metadata.json");
-                    // Read expected hash from checksums for cross-validation
-                    var expectedHash = GetExpectedHash(checksumsPath, assetName);
-                    if (expectedHash is not null)
+                    var (metaOk, metaErr) = _provenanceVerifier.ValidateReleaseMetadata(metadataPath, assetName, expectedHash);
+                    if (!metaOk)
                     {
-                        var (metaOk, metaErr) = _provenanceVerifier.ValidateReleaseMetadata(metadataPath, assetName, expectedHash);
-                        if (!metaOk)
-                        {
-                            RecordFailure(state, metaErr ?? "Release metadata validation failed");
-                            return false;
-                        }
+                        RecordFailure(state, metaErr ?? "Release metadata validation failed");
+                        return false;
                     }
                 }
             }
@@ -172,7 +182,7 @@ public sealed class UpdateService
             // Extract archive
             var extractedBinary = GitHubReleaseService.ExtractReleaseArchive(archivePath, extractPath);
 
-            // Verify Authenticode provenance of extracted binary
+            // Verify Authenticode provenance of extracted binary (skip for dev builds)
             if (!update.IsDevBuild && !skipProvenance)
             {
                 var (trustOk, trustErr) = await _provenanceVerifier.VerifyBinaryTrustAsync(extractedBinary, ct);
@@ -279,16 +289,22 @@ public sealed class UpdateService
             _logger.LogInformation("Waiting for daemon (PID {Pid}) to exit...", daemonPid.Value.Pid);
             if (!await WaitForProcessExitAsync(daemonPid.Value.Pid, daemonPid.Value.StartTime, DaemonExitTimeout, ct))
             {
-                _logger.LogWarning("Daemon did not exit within timeout, attempting to terminate");
-                try
+                // Try graceful shutdown first via shutdown-instance helper
+                _logger.LogWarning("Daemon did not exit within timeout, attempting graceful shutdown");
+                if (!TryGracefulShutdown(daemonPid.Value.Pid))
                 {
-                    var proc = System.Diagnostics.Process.GetProcessById(daemonPid.Value.Pid);
-                    proc.Kill(entireProcessTree: true);
-                    proc.WaitForExit(5000);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "Failed to terminate daemon process");
+                    // Final fallback: force kill
+                    _logger.LogWarning("Graceful shutdown failed, force-killing daemon");
+                    try
+                    {
+                        var proc = System.Diagnostics.Process.GetProcessById(daemonPid.Value.Pid);
+                        proc.Kill(entireProcessTree: true);
+                        proc.WaitForExit(5000);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Failed to terminate daemon process");
+                    }
                 }
             }
         }
@@ -440,6 +456,73 @@ public sealed class UpdateService
         state.LastAttemptTime = DateTimeOffset.UtcNow;
         _stateStore.SaveUpdateState(state);
         _logger.LogWarning("Update failed (attempt #{Count}): {Message}", state.FailureCount, message);
+    }
+
+    /// <summary>
+    /// Attempts graceful shutdown of the daemon by spawning <c>copilotd shutdown-instance --pid</c>.
+    /// This mirrors the graceful shutdown logic used elsewhere in the codebase.
+    /// </summary>
+    private bool TryGracefulShutdown(int pid)
+    {
+        var copilotdPath = Environment.ProcessPath;
+        if (copilotdPath is null)
+        {
+            _logger.LogDebug("Cannot determine copilotd path for graceful shutdown");
+            return false;
+        }
+
+        _logger.LogDebug("Spawning shutdown-instance helper for PID {Pid}", pid);
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = copilotdPath,
+                Arguments = $"shutdown-instance --pid {pid}",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            using var helper = System.Diagnostics.Process.Start(psi);
+            if (helper is null)
+            {
+                _logger.LogDebug("Failed to start shutdown-instance helper");
+                return false;
+            }
+
+            if (helper.WaitForExit(TimeSpan.FromSeconds(20)))
+            {
+                if (helper.ExitCode == 0)
+                {
+                    _logger.LogInformation("Daemon PID {Pid} terminated via graceful shutdown", pid);
+                    return true;
+                }
+
+                _logger.LogDebug("shutdown-instance exited with code {Code}", helper.ExitCode);
+            }
+            else
+            {
+                _logger.LogDebug("shutdown-instance timed out");
+                try { helper.Kill(); } catch { }
+            }
+
+            // Check if daemon actually exited
+            try
+            {
+                var proc = System.Diagnostics.Process.GetProcessById(pid);
+                if (proc.HasExited) return true;
+                proc.Dispose();
+            }
+            catch (ArgumentException)
+            {
+                return true; // Process not found = exited
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Graceful shutdown attempt failed");
+        }
+
+        return false;
     }
 
     private static async Task<bool> WaitForProcessExitAsync(int pid, DateTimeOffset expectedStartTime, TimeSpan timeout, CancellationToken ct)

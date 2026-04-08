@@ -15,6 +15,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
+    <PackageReference Include="NuGet.Versioning" Version="7.3.0" />
     <PackageReference Include="Spectre.Console" Version="0.54.0" />
     <PackageReference Include="System.CommandLine" Version="2.0.5" />
   </ItemGroup>
@@ -22,5 +23,9 @@
   <ItemGroup>
     <EmbeddedResource Include="..\..\scripts\verify-provenance.ps1" LogicalName="verify-provenance.ps1" />
   </ItemGroup>
+
+  <Target Name="GenerateVerifyProvenance" BeforeTargets="PrepareForBuild">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\Generate-VerifyProvenance.ps1&quot; -OutputPath &quot;$(MSBuildProjectDirectory)\..\..\scripts\verify-provenance.ps1&quot;" />
+  </Target>
 
 </Project>

@@ -124,6 +124,42 @@ public sealed class GitHubReleaseService
     }
 
     /// <summary>
+    /// Fetches the version string from the release-metadata.json asset of a release.
+    /// Used for dev builds where the tag ("dev") doesn't carry a parseable version.
+    /// </summary>
+    public string? GetDevReleaseVersion(string tag)
+    {
+        _logger.LogDebug("Fetching release-metadata.json for version from release '{Tag}'", tag);
+
+        var tempDir = Path.Combine(Path.GetTempPath(), $"copilotd-meta-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            if (!DownloadReleaseAsset(tag, "release-metadata.json", tempDir))
+                return null;
+
+            var metadataPath = Path.Combine(tempDir, "release-metadata.json");
+            var json = File.ReadAllText(metadataPath);
+            using var doc = JsonDocument.Parse(json);
+
+            if (doc.RootElement.TryGetProperty("version", out var versionEl) && versionEl.ValueKind == JsonValueKind.String)
+                return versionEl.GetString();
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to read version from release-metadata.json");
+            return null;
+        }
+        finally
+        {
+            try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); }
+            catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>
     /// Downloads a release asset using the gh CLI.
     /// </summary>
     public bool DownloadReleaseAsset(string tag, string assetName, string destinationDir)
