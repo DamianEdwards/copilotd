@@ -64,6 +64,7 @@ jobs:
           sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list <<EOF
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
           EOF'
           sudo sed -i -e 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
