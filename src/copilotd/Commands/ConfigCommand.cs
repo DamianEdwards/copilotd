@@ -34,7 +34,7 @@ public static class ConfigCommand
                     table.AddColumn(new TableColumn("[bold]Value[/]"));
 
                     table.AddRow("repo_home", Markup.Escape(config.RepoHome ?? "(not set)"));
-                    table.AddRow("prompt", Markup.Escape(config.Prompt));
+                    table.AddRow("custom_prompt", Markup.Escape(string.IsNullOrEmpty(config.Prompt) ? "(not set)" : config.Prompt));
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
                     table.AddRow("rules", Markup.Escape($"{config.Rules.Count} rule(s)"));
@@ -91,9 +91,10 @@ public static class ConfigCommand
                         ConsoleOutput.Success($"repo_home set to: {cfg.RepoHome}");
                         break;
 
-                    case "prompt":
+                    case "custom_prompt":
+                    case "prompt": // backward compat
                         cfg.Prompt = value;
-                        ConsoleOutput.Success("prompt updated.");
+                        ConsoleOutput.Success("custom_prompt updated.");
                         break;
 
                     case "max_instances":
@@ -111,7 +112,7 @@ public static class ConfigCommand
 
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, prompt, max_instances");
+                        ConsoleOutput.Info("Valid keys: repo_home, custom_prompt, max_instances");
                         return 1;
                 }
 

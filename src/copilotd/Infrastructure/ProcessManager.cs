@@ -40,8 +40,8 @@ public sealed partial class ProcessManager
             return null;
         }
 
-        var promptTemplate = _stateStore.LoadPromptTemplate(config);
-        var prompt = BuildPrompt(promptTemplate, issue, session, config);
+        var customPrompt = _stateStore.LoadCustomPrompt(config);
+        var prompt = BuildPrompt(customPrompt, issue, session, config);
         var args = BuildArguments(session, prompt, config.Rules.GetValueOrDefault(session.RuleName), repoPath);
 
         _logger.LogInformation("Launching copilot for {IssueKey} with session {SessionId}", session.IssueKey, session.CopilotSessionId);
@@ -355,19 +355,27 @@ public sealed partial class ProcessManager
         return true;
     }
 
-    private static string BuildPrompt(string template, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
+    private static string BuildPrompt(string customPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
     {
-        var prompt = template
-            .Replace("$(issue.repo)", issue.Repo)
-            .Replace("$(issue.id)", issue.Number.ToString())
-            .Replace("$(issue.type)", issue.Type ?? "issue")
-            .Replace("$(issue.milestone)", issue.Milestone ?? "none");
+        var prompt = CopilotdConfig.DefaultPrompt;
+
+        if (!string.IsNullOrWhiteSpace(customPrompt))
+        {
+            prompt += "\n\nThe user has supplied the following additional context:\n\n" + customPrompt;
+        }
 
         var rule = config.Rules.GetValueOrDefault(session.RuleName);
         if (!string.IsNullOrWhiteSpace(rule?.ExtraPrompt))
         {
             prompt += "\n\n" + rule.ExtraPrompt;
         }
+
+        // Replace tokens in the entire prompt (default + custom + extra)
+        prompt = prompt
+            .Replace("$(issue.repo)", issue.Repo)
+            .Replace("$(issue.id)", issue.Number.ToString())
+            .Replace("$(issue.type)", issue.Type ?? "issue")
+            .Replace("$(issue.milestone)", issue.Milestone ?? "none");
 
         return prompt;
     }

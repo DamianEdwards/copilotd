@@ -99,10 +99,11 @@ public sealed class StateStore
     // --- Prompt ---
 
     /// <summary>
-    /// Loads the prompt template from ~/.copilotd/prompt.md if it exists,
-    /// falling back to the config's inline Prompt property.
+    /// Loads the user's custom prompt addition from ~/.copilotd/prompt.md if it exists
+    /// and contains non-default content, falling back to the config's inline Prompt property.
+    /// Returns empty string if no custom prompt is configured.
     /// </summary>
-    public string LoadPromptTemplate(CopilotdConfig config)
+    public string LoadCustomPrompt(CopilotdConfig config)
     {
         if (File.Exists(PromptPath))
         {
@@ -111,8 +112,14 @@ public sealed class StateStore
                 var content = File.ReadAllText(PromptPath).Trim();
                 if (!string.IsNullOrEmpty(content))
                 {
-                    _logger.LogDebug("Loaded prompt template from {Path}", PromptPath);
-                    return content;
+                    // Strip the old default prompt prefix if present (backward compat
+                    // for users who appended to the auto-generated prompt.md)
+                    content = StripDefaultPromptPrefix(content);
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        _logger.LogDebug("Loaded custom prompt from {Path}", PromptPath);
+                        return content;
+                    }
                 }
             }
             catch (Exception ex)
@@ -121,27 +128,43 @@ public sealed class StateStore
             }
         }
 
-        return config.Prompt;
+        var configPrompt = config.Prompt.Trim();
+        if (!string.IsNullOrEmpty(configPrompt) && !IsDefaultPrompt(configPrompt))
+        {
+            return configPrompt;
+        }
+
+        return "";
     }
 
     /// <summary>
-    /// Writes the default prompt template to ~/.copilotd/prompt.md if it doesn't exist.
+    /// Returns true if the content matches the built-in default prompt (backward compat).
+    /// Older versions wrote the default prompt to prompt.md and config.Prompt; these
+    /// should be treated as "no custom prompt" rather than appended content.
     /// </summary>
-    public void EnsurePromptFile()
-    {
-        if (File.Exists(PromptPath))
-            return;
+    private static bool IsDefaultPrompt(string content)
+        => NormalizeForComparison(content) == NormalizeForComparison(CopilotdConfig.DefaultPrompt);
 
-        try
+    /// <summary>
+    /// If the content starts with the default prompt (e.g. a user appended to the old
+    /// auto-generated prompt.md), strips the default prefix and returns only the custom part.
+    /// </summary>
+    private static string StripDefaultPromptPrefix(string content)
+    {
+        var normalizedContent = NormalizeForComparison(content);
+        var normalizedDefault = NormalizeForComparison(CopilotdConfig.DefaultPrompt);
+
+        if (normalizedContent.StartsWith(normalizedDefault, StringComparison.Ordinal))
         {
-            File.WriteAllText(PromptPath, CopilotdConfig.DefaultPrompt);
-            _logger.LogDebug("Created default prompt file at {Path}", PromptPath);
+            var remainder = content.Trim()[CopilotdConfig.DefaultPrompt.Trim().Length..].Trim();
+            return remainder;
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to create prompt.md");
-        }
+
+        return content;
     }
+
+    private static string NormalizeForComparison(string s)
+        => s.Trim().ReplaceLineEndings("\n");
 
     // --- Single-instance guard ---
 

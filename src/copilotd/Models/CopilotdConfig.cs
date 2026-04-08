@@ -23,10 +23,10 @@ public sealed class CopilotdConfig
         => Path.GetFullPath(Path.Combine(RepoHome ?? ".", repo));
 
     /// <summary>
-    /// Base prompt template for dispatched copilot sessions.
-    /// Supports tokens: $(issue.repo), $(issue.id), $(issue.type), $(issue.milestone).
+    /// Custom prompt text appended to the default copilotd prompt.
+    /// When non-empty, this is added after the built-in prompt with a trailer.
     /// </summary>
-    public string Prompt { get; set; } = DefaultPrompt;
+    public string Prompt { get; set; } = "";
 
     /// <summary>
     /// The GitHub username of the authenticated user (populated during init).

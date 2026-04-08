@@ -64,7 +64,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
-| `copilotd config --set key=value` | Set a config value (`repo_home`, `prompt`, `max_instances`) |
+| `copilotd config --set key=value` | Set a config value (`repo_home`, `custom_prompt`, `max_instances`) |
 | `copilotd rules list` | List all dispatch rules |
 | `copilotd rules add <name>` | Add a new dispatch rule |
 | `copilotd rules update <name>` | Update an existing rule |
@@ -101,7 +101,7 @@ copilotd rules update Default --add-repo "org/repo" --delete-repo "org/old-repo"
 
 ### Prompt templating
 
-The base prompt supports token replacement:
+The built-in prompt supports token replacement:
 
 | Token | Value |
 |-------|-------|
@@ -110,7 +110,9 @@ The base prompt supports token replacement:
 | `$(issue.type)` | Issue type (e.g., `bug`) |
 | `$(issue.milestone)` | Milestone title |
 
-Per-rule extra prompts are appended after the base prompt.
+Custom prompt text (configured via `custom_prompt` or `~/.copilotd/prompt.md`) is appended after
+the built-in prompt with a trailer. Tokens are replaced in both the built-in and custom prompt
+text. Per-rule extra prompts are appended last.
 
 ## Session lifecycle
 
@@ -213,7 +215,7 @@ Use `copilotd session join <issue>` to take over any tracked session:
 
 Stored in `~/.copilotd/`:
 
-- `config.json` — user-managed settings (repo home, prompt template, rules)
+- `config.json` — user-managed settings (repo home, custom prompt, rules)
 - `state.json` — runtime session tracking (auto-managed, self-healing)
 - `.lock` — single-instance guard (present while daemon is running)
 
@@ -222,7 +224,7 @@ Stored in `~/.copilotd/`:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `repo_home` | — | Root directory where repos are cloned (`<org>/<repo>` sub-folders expected) |
-| `prompt` | *(see below)* | Base prompt template with token replacement |
+| `prompt` | *(empty)* | Custom prompt text appended to the built-in prompt |
 | `max_instances` | `3` | Maximum concurrent copilot processes; excess sessions queue as Pending |
 
 ### Rule settings
@@ -271,10 +273,10 @@ when sessions complete, are reset, or are pruned.
 
 ### Prompt customization
 
-The prompt template is stored at `~/.copilotd/prompt.md` (created during `copilotd init`).
-Edit this file to customize the instructions given to dispatched copilot sessions. Token
-replacement is applied at dispatch time. Per-rule extra prompts are appended after the base
-prompt.
+Custom prompt text can be provided via `~/.copilotd/prompt.md` or the `prompt` config property.
+This text is **appended** to the built-in copilotd prompt (not a replacement) with a trailer:
+"The user has supplied the following additional context:". Token replacement is applied to both
+the built-in and custom prompt at dispatch time. Per-rule extra prompts are appended last.
 
 ## License
 
