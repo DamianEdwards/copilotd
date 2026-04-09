@@ -158,7 +158,7 @@ jobs:
         run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.version }}' -ArtifactsDirectory './artifacts/dev'
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
         with:
           subject-path: './artifacts/dev/*'
 
@@ -225,7 +225,7 @@ jobs:
         run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.rc_version }}' -ArtifactsDirectory './artifacts/rc'
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
         with:
           subject-path: './artifacts/rc/*'
 
