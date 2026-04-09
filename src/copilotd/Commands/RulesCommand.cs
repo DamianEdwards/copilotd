@@ -87,15 +87,14 @@ public static class RulesCommand
         }
 
         var table = new Table();
-        table.AddColumn("Name");
-        table.AddColumn("User");
-        table.AddColumn("Labels");
-        table.AddColumn("Milestone");
-        table.AddColumn("Type");
-        table.AddColumn("Repos");
-        table.AddColumn("Yolo");
-        table.AddColumn("Tools");
-        table.AddColumn("URLs");
+        table.ShowRowSeparators = true;
+        table.AddColumn(new TableColumn("[bold]Name[/]"));
+        table.AddColumn(new TableColumn("[bold]Assignee[/]"));
+        table.AddColumn(new TableColumn("[bold]Labels[/]"));
+        table.AddColumn(new TableColumn("[bold]Milestone[/]"));
+        table.AddColumn(new TableColumn("[bold]Type[/]"));
+        table.AddColumn(new TableColumn("[bold]Repos[/]"));
+        table.AddColumn(new TableColumn("[bold]Launch Options[/]"));
 
         foreach (var kvp in rules)
         {
@@ -108,13 +107,31 @@ public static class RulesCommand
                 Markup.Escape(rule.Milestone ?? "*"),
                 Markup.Escape(rule.Type ?? "*"),
                 Markup.Escape(string.Join(", ", rule.Repos)),
-                rule.Yolo ? "yes" : "no",
-                rule.Yolo || rule.AllowAllTools ? "yes" : "no",
-                rule.Yolo || rule.AllowAllUrls ? "yes" : "no");
+                Markup.Escape(FormatLaunchOptions(rule)));
         }
 
         AnsiConsole.Write(table);
         return 0;
+    }
+
+    private static string FormatLaunchOptions(DispatchRule rule)
+    {
+        var parts = new List<string>();
+
+        if (rule.Yolo)
+        {
+            parts.Add("--yolo");
+        }
+        else
+        {
+            if (rule.AllowAllTools) parts.Add("--allow-all-tools");
+            if (rule.AllowAllUrls) parts.Add("--allow-all-urls");
+        }
+
+        if (rule.Model is not null)
+            parts.Add($"--model={rule.Model}");
+
+        return parts.Count > 0 ? string.Join(", ", parts) : "(defaults)";
     }
 
     private static Command CreateAdd(IServiceProvider services)
@@ -129,6 +146,7 @@ public static class RulesCommand
         var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Pass --allow-all-tools to copilot (default: true)" };
         var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Pass --allow-all-urls to copilot (default: false)" };
         var promptOption = new Option<string?>("--prompt") { Description = "Extra prompt for this rule" };
+        var modelOption = new Option<string?>("--model") { Description = "Model to use for sessions triggered by this rule (overrides global default_model)" };
         var customPromptOption = new Option<string?>("--custom-prompt") { Description = "Per-rule custom prompt (appended to or overrides global custom prompt)" };
         var customPromptModeOption = new Option<string?>("--custom-prompt-mode") { Description = "How rule custom prompt interacts with global: 'append' (default) or 'override'" };
         var repoOption = new Option<string[]>("--repo") { Description = "Repository to add (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
@@ -142,6 +160,7 @@ public static class RulesCommand
         command.Options.Add(allowAllToolsOption);
         command.Options.Add(allowAllUrlsOption);
         command.Options.Add(promptOption);
+        command.Options.Add(modelOption);
         command.Options.Add(customPromptOption);
         command.Options.Add(customPromptModeOption);
         command.Options.Add(repoOption);
@@ -171,6 +190,7 @@ public static class RulesCommand
                     Yolo = parseResult.GetValue(yoloOption),
                     AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true,
                     AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false,
+                    Model = string.IsNullOrWhiteSpace(parseResult.GetValue(modelOption)) ? null : parseResult.GetValue(modelOption),
                     ExtraPrompt = parseResult.GetValue(promptOption),
                     CustomPrompt = parseResult.GetValue(customPromptOption),
                     Repos = [.. parseResult.GetValue(repoOption) ?? []],
@@ -210,6 +230,7 @@ public static class RulesCommand
         var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Update allow-all-tools setting" };
         var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Update allow-all-urls setting" };
         var promptOption = new Option<string?>("--prompt") { Description = "Update extra prompt" };
+        var modelOption = new Option<string?>("--model") { Description = "Update model (overrides global default_model)" };
         var customPromptOption = new Option<string?>("--custom-prompt") { Description = "Update per-rule custom prompt" };
         var customPromptModeOption = new Option<string?>("--custom-prompt-mode") { Description = "Update custom prompt mode: 'append' or 'override'" };
         var addRepoOption = new Option<string[]>("--add-repo") { Description = "Add a repository", AllowMultipleArgumentsPerToken = true };
@@ -225,6 +246,7 @@ public static class RulesCommand
         command.Options.Add(allowAllToolsOption);
         command.Options.Add(allowAllUrlsOption);
         command.Options.Add(promptOption);
+        command.Options.Add(modelOption);
         command.Options.Add(customPromptOption);
         command.Options.Add(customPromptModeOption);
         command.Options.Add(addRepoOption);
@@ -276,6 +298,12 @@ public static class RulesCommand
 
                 if (parseResult.GetResult(promptOption) is not null)
                     rule.ExtraPrompt = parseResult.GetValue(promptOption);
+
+                if (parseResult.GetResult(modelOption) is not null)
+                {
+                    var modelValue = parseResult.GetValue(modelOption);
+                    rule.Model = string.IsNullOrWhiteSpace(modelValue) ? null : modelValue;
+                }
 
                 if (parseResult.GetResult(customPromptOption) is not null)
                     rule.CustomPrompt = parseResult.GetValue(customPromptOption);

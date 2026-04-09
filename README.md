@@ -6,7 +6,7 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 
 - **Issue watching** — polls GitHub repos for issues matching configurable rules (assigned user, labels, milestone, issue type)
 - **Automatic dispatch** — launches `copilot --remote` sessions with templated prompts derived from issue metadata
-- **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, extra prompts, repo assignments)
+- **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, extra prompts, repo assignments)
 - **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, and explicit completion signaling
 - **Self-healing state** — reconciles persisted state, live process status, and GitHub issue matches on every poll cycle and at startup
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
@@ -64,7 +64,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
-| `copilotd config --set key=value` | Set a config value (`repo_home`, `custom_prompt`, `max_instances`) |
+| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `max_instances`) |
 | `copilotd rules list` | List all dispatch rules |
 | `copilotd rules add <name>` | Add a new dispatch rule |
 | `copilotd rules update <name>` | Update an existing rule |
@@ -86,11 +86,14 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 
 ### Rules options
 
-Rules support conditions (`--user`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). All conditions are logical AND.
+Rules support conditions (`--user`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). All conditions are logical AND.
 
 ```bash
 # Add a rule
 copilotd rules add "Dashboard issues" --label area-dashboard --yolo --repo "org/repo"
+
+# Add a rule that uses a specific model
+copilotd rules add "Complex tasks" --label complexity-high --model "claude-sonnet-4"
 
 # Add a rule with a per-rule custom prompt that overrides the global custom prompt
 copilotd rules add "Backend" --label area-backend --custom-prompt "Focus on API design" --custom-prompt-mode override
@@ -228,6 +231,7 @@ Stored in `~/.copilotd/`:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `repo_home` | — | Root directory where repos are cloned (`<org>/<repo>` sub-folders expected) |
+| `default_model` | *(none)* | Default model passed to copilot via `--model` for all sessions (rule-specific `model` overrides) |
 | `prompt` | *(empty)* | Custom prompt text appended to the built-in prompt |
 | `max_instances` | `3` | Maximum concurrent copilot processes; excess sessions queue as Pending |
 
@@ -243,6 +247,7 @@ Stored in `~/.copilotd/`:
 | `yolo` | `false` | Pass `--yolo` to copilot (implies `allow_all_tools` and `allow_all_urls`) |
 | `allow_all_tools` | `true` | Pass `--allow-all-tools` to copilot |
 | `allow_all_urls` | `false` | Pass `--allow-all-urls` to copilot |
+| `model` | *(none)* | Model to use for sessions matching this rule (overrides global `default_model`) |
 | `extra_prompt` | *(none)* | Additional prompt text appended when this rule triggers |
 | `custom_prompt` | *(none)* | Per-rule custom prompt text (appended to or overrides global custom prompt) |
 | `custom_prompt_mode` | `append` | How rule custom prompt interacts with global: `append` or `override` |

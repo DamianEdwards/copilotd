@@ -34,6 +34,7 @@ public static class ConfigCommand
                     table.AddColumn(new TableColumn("[bold]Value[/]"));
 
                     table.AddRow("repo_home", Markup.Escape(config.RepoHome ?? "(not set)"));
+                    table.AddRow("default_model", Markup.Escape(config.DefaultModel ?? "(not set)"));
                     table.AddRow("custom_prompt", Markup.Escape(string.IsNullOrEmpty(config.Prompt) ? "(not set)" : config.Prompt));
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
@@ -55,6 +56,7 @@ public static class ConfigCommand
                                 if (rule.AllowAllTools) details.Add("allow_all_tools=true");
                                 if (rule.AllowAllUrls) details.Add("allow_all_urls=true");
                             }
+                            if (rule.Model is not null) details.Add($"model={rule.Model}");
                             if (rule.ExtraPrompt is not null) details.Add($"extra_prompt={rule.ExtraPrompt}");
                             if (rule.CustomPrompt is not null) details.Add($"custom_prompt={rule.CustomPrompt}");
                             if (rule.CustomPrompt is not null) details.Add($"custom_prompt_mode={rule.CustomPromptMode.ToString().ToLowerInvariant()}");
@@ -99,6 +101,14 @@ public static class ConfigCommand
                         ConsoleOutput.Success("custom_prompt updated.");
                         break;
 
+                    case "default_model":
+                    case "model": // convenience alias
+                        cfg.DefaultModel = string.IsNullOrWhiteSpace(value) ? null : value;
+                        ConsoleOutput.Success(cfg.DefaultModel is not null
+                            ? $"default_model set to: {cfg.DefaultModel}"
+                            : "default_model cleared.");
+                        break;
+
                     case "max_instances":
                         if (int.TryParse(value, out var maxInst) && maxInst > 0)
                         {
@@ -114,7 +124,7 @@ public static class ConfigCommand
 
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, custom_prompt, max_instances");
+                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, max_instances");
                         return 1;
                 }
 

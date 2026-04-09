@@ -42,6 +42,12 @@ public sealed class CopilotdConfig
     public int MaxInstances { get; set; } = 3;
 
     /// <summary>
+    /// Default model to use for all copilot sessions. When set, <c>--model</c> is
+    /// passed to the copilot CLI unless a rule specifies its own model override.
+    /// </summary>
+    public string? DefaultModel { get; set; }
+
+    /// <summary>
     /// Named dispatch rules. Key is the rule name.
     /// </summary>
     public Dictionary<string, DispatchRule> Rules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -95,6 +101,12 @@ public sealed class DispatchRule
 
     /// <summary>Whether to pass --allow-all-urls to copilot. Defaults to false. Implied by Yolo.</summary>
     public bool AllowAllUrls { get; set; }
+
+    /// <summary>
+    /// Model to use for sessions triggered by this rule. Overrides the global
+    /// <see cref="CopilotdConfig.DefaultModel"/> when set.
+    /// </summary>
+    public string? Model { get; set; }
 
     /// <summary>Extra prompt text appended when this rule triggers.</summary>
     public string? ExtraPrompt { get; set; }

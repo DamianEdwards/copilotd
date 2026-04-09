@@ -42,7 +42,7 @@ public sealed partial class ProcessManager
 
         var customPrompt = _stateStore.LoadCustomPrompt(config);
         var prompt = BuildPrompt(customPrompt, issue, session, config);
-        var args = BuildArguments(session, prompt, config.Rules.GetValueOrDefault(session.RuleName), repoPath);
+        var args = BuildArguments(session, prompt, config.Rules.GetValueOrDefault(session.RuleName), repoPath, config.DefaultModel);
 
         _logger.LogInformation("Launching copilot for {IssueKey} with session {SessionId}", session.IssueKey, session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
@@ -407,7 +407,7 @@ public sealed partial class ProcessManager
         };
     }
 
-    private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule, string repoPath)
+    private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule, string repoPath, string? defaultModel)
     {
         var args = new List<string>
         {
@@ -415,6 +415,14 @@ public sealed partial class ProcessManager
             $"--resume={session.CopilotSessionId}",
             "-i", $"\"{EscapeArg(prompt)}\"",
         };
+
+        // Model: rule-specific overrides global default
+        var model = rule?.Model ?? defaultModel;
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            args.Add("--model");
+            args.Add($"\"{EscapeArg(model)}\"");
+        }
 
         var yolo = rule?.Yolo == true;
 
