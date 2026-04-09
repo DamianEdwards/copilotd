@@ -123,6 +123,11 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
 
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -152,6 +157,11 @@ jobs:
         shell: pwsh
         run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.version }}' -ArtifactsDirectory './artifacts/dev'
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        with:
+          subject-path: './artifacts/dev/*'
+
       - name: Upload dev artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
@@ -179,6 +189,11 @@ jobs:
             rid: osx-arm64
 
     runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
@@ -208,6 +223,11 @@ jobs:
       - name: Publish native asset
         shell: pwsh
         run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.rc_version }}' -ArtifactsDirectory './artifacts/rc'
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        with:
+          subject-path: './artifacts/rc/*'
 
       - name: Upload RC artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
