@@ -29,9 +29,18 @@ In a PowerShell terminal:
 iex (gh release download install-scripts -R DamianEdwards/copilotd -p install.ps1 -O - | Out-String)
 ```
 
-## Install on macOS & Linux
+### Install on macOS & Linux
 
-Grab the relevant executable asset from the latest [release](https://github.com/DamianEdwards/copilotd/releases).
+In a terminal:
+
+```bash
+gh release download install-scripts -R DamianEdwards/copilotd -p install.sh -O - | bash
+```
+
+> **Note:** Artifact attestation verification requires `gh attestation verify` support. Pass `--skip-provenance` to skip provenance verification if attestations are not yet available for the release:
+> ```bash
+> gh release download install-scripts -R DamianEdwards/copilotd -p install.sh -O - | bash -s -- --skip-provenance
+> ```
 
 ## Running
 

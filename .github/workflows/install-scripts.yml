@@ -72,11 +72,18 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
       - name: Download signed install script
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: signed-install-script
           path: ./artifacts/install-script
+
+      - name: Stage bash install script
+        shell: bash
+        run: cp ./scripts/install/install-copilotd.sh ./artifacts/install-script/install.sh
 
       - name: Publish standing install release
         env:
@@ -87,11 +94,17 @@ jobs:
 
           RELEASE_TAG='install-scripts'
           RELEASE_TITLE='Install Scripts'
-          SCRIPT_PATH='./artifacts/install-script/install.ps1'
-          NOTES='Latest signed installer script for copilotd.'
+          PS1_PATH='./artifacts/install-script/install.ps1'
+          SH_PATH='./artifacts/install-script/install.sh'
+          NOTES='Latest signed installer scripts for copilotd.'
 
-          if [ ! -f "$SCRIPT_PATH" ]; then
-            echo "::error::Signed installer script was not found at $SCRIPT_PATH."
+          if [ ! -f "$PS1_PATH" ]; then
+            echo "::error::Signed installer script was not found at $PS1_PATH."
+            exit 1
+          fi
+
+          if [ ! -f "$SH_PATH" ]; then
+            echo "::error::Bash installer script was not found at $SH_PATH."
             exit 1
           fi
 
@@ -113,5 +126,6 @@ jobs:
 
           gh release upload "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
-            "$SCRIPT_PATH" \
+            "$PS1_PATH" \
+            "$SH_PATH" \
             --clobber
