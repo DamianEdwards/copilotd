@@ -376,7 +376,7 @@ assert_artifact_attestation() {
         -R "$repo" \
         --signer-repo "$repo" \
         --signer-workflow "${repo}/.github/workflows/ci.yml" \
-        --cert-identity-regex "^https://github\\.com/${repo}/\\.github/workflows/ci\\.yml@refs/heads/main\$" \
+        --source-ref "refs/heads/main" \
         2>&1) || exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
