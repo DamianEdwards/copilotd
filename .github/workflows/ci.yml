@@ -96,7 +96,7 @@ jobs:
 
       - name: Validate shell script syntax
         shell: bash
-        run: ./scripts/Verify-ShellSyntax.sh
+        run: ./scripts/verify-shell-syntax.sh
 
   build:
     runs-on: ubuntu-latest
