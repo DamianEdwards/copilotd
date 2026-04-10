@@ -17,6 +17,9 @@ public sealed class GitHubIssue
     /// <summary>Assigned user login (first assignee).</summary>
     public string? Assignee { get; set; }
 
+    /// <summary>Issue author login.</summary>
+    public string? Author { get; set; }
+
     /// <summary>All label names.</summary>
     public List<string> Labels { get; set; } = [];
 

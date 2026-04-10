@@ -103,6 +103,18 @@ copilotd rules update Default --delete-label copilotd --add-label dispatch
 
 # Add/remove repos from a rule
 copilotd rules update Default --add-repo "org/repo" --delete-repo "org/old-repo"
+
+# Only dispatch issues from specific authors
+copilotd rules add "Trusted" --add-author TimMan --add-author Rachael --repo "org/repo"
+
+# Only dispatch issues from authors with write access to the repo
+copilotd rules add "WriteOnly" --write-only-authors --repo "org/repo"
+
+# Update a rule to allow any author (clears author restrictions)
+copilotd rules update "Trusted" --any-author
+
+# Add/remove allowed authors on an existing rule
+copilotd rules update "Trusted" --add-author NewUser --delete-author OldUser
 ```
 
 ### Prompt templating
@@ -262,6 +274,8 @@ Stored in `~/.copilotd/`:
 | `milestone` | *(any)* | Milestone the issue must belong to |
 | `type` | *(any)* | Issue type filter (e.g., `bug`, `feature`) |
 | `repos` | *(none)* | Repositories this rule applies to (`org/repo` format) |
+| `author_mode` | `any` | Issue author filtering: `any` (no filter), `allowed` (only listed authors), `writeAccess` (authors with write+ repo access) |
+| `authors` | *(none)* | Allowed issue authors when `author_mode` is `allowed` |
 | `yolo` | `false` | Pass `--yolo` to copilot (implies `allow_all_tools` and `allow_all_urls`) |
 | `allow_all_tools` | `true` | Pass `--allow-all-tools` to copilot |
 | `allow_all_urls` | `false` | Pass `--allow-all-urls` to copilot |

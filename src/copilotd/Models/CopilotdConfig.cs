@@ -117,6 +117,21 @@ public sealed class DispatchRule
     /// <summary>Repositories this rule applies to (org/repo format).</summary>
     public List<string> Repos { get; set; } = [];
 
+    // --- Author filtering ---
+
+    /// <summary>
+    /// Controls how the issue author is checked when matching.
+    /// <see cref="AuthorMode.Any"/>: any author matches (default).
+    /// <see cref="AuthorMode.Allowed"/>: only authors in <see cref="Authors"/> match.
+    /// <see cref="AuthorMode.WriteAccess"/>: only authors with write+ repo access match.
+    /// </summary>
+    public AuthorMode AuthorMode { get; set; } = AuthorMode.Any;
+
+    /// <summary>
+    /// Allowed issue authors when <see cref="AuthorMode"/> is <see cref="AuthorMode.Allowed"/>.
+    /// </summary>
+    public List<string> Authors { get; set; } = [];
+
     // --- Launch options ---
 
     /// <summary>Whether to pass --yolo to copilot, which implies --allow-all-tools and --allow-all-urls.</summary>
@@ -163,6 +178,14 @@ public sealed class DispatchRule
     /// All conditions are logical AND.
     /// </summary>
     public bool Matches(GitHubIssue issue)
+        => Matches(issue, hasWriteAccess: null);
+
+    /// <summary>
+    /// Returns true if the given issue matches all conditions on this rule.
+    /// All conditions are logical AND.
+    /// <paramref name="hasWriteAccess"/> is called for <see cref="AuthorMode.WriteAccess"/> checks.
+    /// </summary>
+    public bool Matches(GitHubIssue issue, Func<string, string, bool>? hasWriteAccess)
     {
         if (User is not null && !string.Equals(User, issue.Assignee, StringComparison.OrdinalIgnoreCase))
             return false;
@@ -175,6 +198,21 @@ public sealed class DispatchRule
 
         if (Type is not null && !string.Equals(Type, issue.Type, StringComparison.OrdinalIgnoreCase))
             return false;
+
+        // Author filtering
+        if (AuthorMode == AuthorMode.Allowed)
+        {
+            if (issue.Author is null || !Authors.Contains(issue.Author, StringComparer.OrdinalIgnoreCase))
+                return false;
+        }
+        else if (AuthorMode == AuthorMode.WriteAccess)
+        {
+            if (issue.Author is null)
+                return false;
+
+            if (hasWriteAccess is not null && !hasWriteAccess(issue.Repo, issue.Author))
+                return false;
+        }
 
         return true;
     }
@@ -204,4 +242,20 @@ public enum CommentTrustLevel
 
     /// <summary>Any commenter can trigger re-dispatch (less secure, opt-in).</summary>
     All,
+}
+
+/// <summary>
+/// Controls how the issue author is checked when matching a dispatch rule.
+/// </summary>
+[JsonConverter(typeof(TolerantAuthorModeConverter))]
+public enum AuthorMode
+{
+    /// <summary>Any author matches (default, no filtering).</summary>
+    Any,
+
+    /// <summary>Only authors in the rule's <see cref="DispatchRule.Authors"/> list match.</summary>
+    Allowed,
+
+    /// <summary>Only authors with write (or higher) access to the repository match.</summary>
+    WriteAccess,
 }

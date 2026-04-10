@@ -186,7 +186,8 @@ public sealed class ReconciliationEngine
                     foreach (var issue in issues)
                     {
                         // Double-check rule match (gh filters are best-effort)
-                        if (!rule.Matches(issue))
+                        // Pass HasWriteAccess for AuthorMode.WriteAccess checks
+                        if (!rule.Matches(issue, _ghCli.HasWriteAccess))
                             continue;
 
                         if (!desired.ContainsKey(issue.Key))

@@ -98,8 +98,8 @@ public sealed class GhCliService
     public List<GitHubIssue> QueryIssues(string repo, DispatchRule rule)
     {
         var jsonFields = _supportsTypeField
-            ? "number,title,assignees,labels,milestone,type"
-            : "number,title,assignees,labels,milestone";
+            ? "number,title,author,assignees,labels,milestone,type"
+            : "number,title,author,assignees,labels,milestone";
 
         var args = $"issue list --repo {repo} --state open --json {jsonFields} --limit 100";
 
@@ -119,7 +119,7 @@ public sealed class GhCliService
         {
             _logger.LogDebug("gh CLI does not support 'type' JSON field, retrying without it");
             _supportsTypeField = false;
-            args = $"issue list --repo {repo} --state open --json number,title,assignees,labels,milestone --limit 100";
+            args = $"issue list --repo {repo} --state open --json number,title,author,assignees,labels,milestone --limit 100";
 
             if (rule.User is not null)
                 args += $" --assignee {rule.User}";
@@ -169,6 +169,11 @@ public sealed class GhCliService
             {
                 var first = assignees[0];
                 issue.Assignee = first.TryGetProperty("login", out var login) ? login.GetString() : null;
+            }
+
+            if (element.TryGetProperty("author", out var authorEl) && authorEl.ValueKind == JsonValueKind.Object)
+            {
+                issue.Author = authorEl.TryGetProperty("login", out var authorLogin) ? authorLogin.GetString() : null;
             }
 
             if (element.TryGetProperty("labels", out var labels))

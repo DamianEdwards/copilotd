@@ -151,13 +151,48 @@ public sealed class TolerantCommentTrustLevelConverter : JsonConverter<CommentTr
 }
 
 /// <summary>
+/// AOT-compatible JSON converter for <see cref="AuthorMode"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="AuthorMode.Any"/>.
+/// </summary>
+public sealed class TolerantAuthorModeConverter : JsonConverter<AuthorMode>
+{
+    public override AuthorMode Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<AuthorMode>(value, ignoreCase: true, out var mode))
+                return mode;
+
+            return AuthorMode.Any;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(AuthorMode), intValue))
+                return (AuthorMode)intValue;
+
+            return AuthorMode.Any;
+        }
+
+        return AuthorMode.Any;
+    }
+
+    public override void Write(Utf8JsonWriter writer, AuthorMode value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
 /// AOT-safe JSON serialization metadata for all persisted models.
 /// </summary>
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter)])]
+    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter), typeof(TolerantAuthorModeConverter)])]
 [JsonSerializable(typeof(CopilotdConfig))]
 [JsonSerializable(typeof(DaemonState))]
 [JsonSerializable(typeof(DispatchRule))]
