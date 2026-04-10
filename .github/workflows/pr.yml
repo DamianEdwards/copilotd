@@ -55,7 +55,7 @@ jobs:
             rid: win-x64
           - runner: ubuntu-22.04
             rid: linux-x64
-          - runner: ubuntu-22.04
+          - runner: ubuntu-22.04-arm
             rid: linux-arm64
           - runner: macos-latest
             rid: osx-arm64
@@ -65,22 +65,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-
-      - name: Install linux-arm64 prerequisites
-        if: matrix.rid == 'linux-arm64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo dpkg --add-architecture arm64
-          sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
-          EOF'
-          sudo sed -i -e 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          sudo apt update
-          sudo apt install -y clang llvm binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu zlib1g-dev:arm64
 
       - name: Build and validate NativeAOT publish
         uses: ./.github/actions/build

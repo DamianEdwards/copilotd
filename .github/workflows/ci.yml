@@ -125,7 +125,7 @@ jobs:
             rid: win-arm64
           - runner: ubuntu-22.04
             rid: linux-x64
-          - runner: ubuntu-22.04
+          - runner: ubuntu-22.04-arm
             rid: linux-arm64
           - runner: macos-latest
             rid: osx-x64
@@ -147,22 +147,6 @@ jobs:
         uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
         with:
           dotnet-version: '10.0.x'
-
-      - name: Install linux-arm64 prerequisites
-        if: matrix.rid == 'linux-arm64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo dpkg --add-architecture arm64
-          sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
-          EOF'
-          sudo sed -i -e 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          sudo apt update
-          sudo apt install -y clang llvm binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu zlib1g-dev:arm64
 
       - name: Publish native asset
         shell: pwsh
@@ -197,7 +181,7 @@ jobs:
             rid: win-arm64
           - runner: ubuntu-22.04
             rid: linux-x64
-          - runner: ubuntu-22.04
+          - runner: ubuntu-22.04-arm
             rid: linux-arm64
           - runner: macos-latest
             rid: osx-x64
@@ -219,22 +203,6 @@ jobs:
         uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
         with:
           dotnet-version: '10.0.x'
-
-      - name: Install linux-arm64 prerequisites
-        if: matrix.rid == 'linux-arm64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo dpkg --add-architecture arm64
-          sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-backports main restricted universe multiverse
-          EOF'
-          sudo sed -i -e 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          sudo apt update
-          sudo apt install -y clang llvm binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu zlib1g-dev:arm64
 
       - name: Publish native asset
         shell: pwsh
