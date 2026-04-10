@@ -365,14 +365,15 @@ assert_archive_integrity() {
 # ─── Attestation verification ───────────────────────────────────────────────
 
 assert_artifact_attestation() {
-    local archive_path="$1"
+    local file_path="$1"
     local repo="$2"
+    local description="${3:-artifact}"
 
-    log_verbose "Verifying artifact attestation for '$archive_path' from '$repo'."
+    log_verbose "Verifying $description attestation for '$file_path' from '$repo'."
 
     local output
     local exit_code=0
-    output=$(gh attestation verify "$archive_path" \
+    output=$(gh attestation verify "$file_path" \
         -R "$repo" \
         --signer-repo "$repo" \
         --signer-workflow "${repo}/.github/workflows/ci.yml" \
@@ -380,10 +381,10 @@ assert_artifact_attestation() {
         2>&1) || exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
-        die "Artifact attestation verification failed for '$archive_path': $output"
+        die "Artifact attestation verification failed for $description '$file_path': $output"
     fi
 
-    log_verbose "Artifact attestation verification succeeded for '$archive_path'."
+    log_verbose "Artifact attestation verification succeeded for $description '$file_path'."
 }
 
 # ─── Platform detection ─────────────────────────────────────────────────────
@@ -709,8 +710,8 @@ install_copilotd() {
         if [[ "$SKIP_PROVENANCE" == true ]]; then
             echo "Skipping provenance verification (--skip-provenance)."
         else
-            status_step "Verifying asset provenance" \
-                assert_artifact_attestation "$download_path" "$REPOSITORY"
+            status_step "Verifying archive provenance" \
+                assert_artifact_attestation "$download_path" "$REPOSITORY" "archive"
         fi
     else
         echo "Skipping checksum and provenance verification for development build."
@@ -718,6 +719,11 @@ install_copilotd() {
 
     local downloaded_binary_path
     downloaded_binary_path=$(expand_release_archive "$download_path" "$extract_path")
+
+    if [[ "$QUALITY" != "Dev" && "$SKIP_PROVENANCE" != true ]]; then
+        status_step "Verifying executable provenance" \
+            assert_artifact_attestation "$downloaded_binary_path" "$REPOSITORY" "executable"
+    fi
 
     local install_directory
     install_directory=$(cd "$TARGET_PATH" 2>/dev/null && pwd || echo "$TARGET_PATH")

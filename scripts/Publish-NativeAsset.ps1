@@ -194,6 +194,12 @@ try
     $hashPath = Join-Path $artifactsDirectory ($assetName + '.sha256')
     "$hash  $assetName" | Set-Content -Path $hashPath -NoNewline
 
+    # Copy the raw executable to the artifacts directory for attestation.
+    # This is removed before artifact upload; its attestation is looked up by digest
+    # after the installer extracts the binary from the archive.
+    $attestBinaryName = "copilotd-$RuntimeIdentifier" + $(if ($platform -eq 'win') { '.exe' } else { '' })
+    Copy-Item $binaryPath (Join-Path $artifactsDirectory $attestBinaryName) -Force
+
     $metadata = [ordered]@{
         version = $Version
         runtimeIdentifier = $RuntimeIdentifier
