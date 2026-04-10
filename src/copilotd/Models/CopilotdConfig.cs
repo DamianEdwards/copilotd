@@ -63,7 +63,7 @@ public sealed class CopilotdConfig
         If you have enough information to implement the requested changes:
         - You are already on a new branch created for this issue. Commit your changes here.
         - When your work is complete, push the branch and create a pull request that references the issue (e.g., "Closes #$(issue.id)").
-        - After the pull request is created, run `copilotd session complete $(issue.repo)#$(issue.id)` to mark this session as done.
+        - After the pull request is created, run `copilotd session pr <pr-number> $(issue.repo)#$(issue.id)` to enable automatic review feedback handling (replace <pr-number> with the actual PR number).
 
         If you need more information or clarification before proceeding:
         - Run `copilotd session comment $(issue.repo)#$(issue.id) --message "Your question or findings here"` to post a comment on the issue.

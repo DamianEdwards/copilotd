@@ -21,6 +21,7 @@ public static class SessionCommand
         command.Subcommands.Add(CreateJoinCommand(services));
         command.Subcommands.Add(CreateCommentCommand(services));
         command.Subcommands.Add(CreateCompleteCommand(services));
+        command.Subcommands.Add(CreatePrCommand(services));
         command.Subcommands.Add(CreateResetCommand(services));
 
         // Default to list behavior when no subcommand is specified
@@ -333,6 +334,63 @@ public static class SessionCommand
         return command;
     }
 
+    // ---- pr subcommand ----
+
+    private static Command CreatePrCommand(IServiceProvider services)
+    {
+        var command = new Command("pr", "Associate a pull request with a session and wait for review feedback (can be called from within a copilot session)");
+
+        var prNumberArg = new Argument<int>("pr-number") { Description = "Pull request number" };
+        command.Arguments.Add(prNumberArg);
+
+        var issueArg = new Argument<string>("issue") { Description = "Issue key (e.g., owner/repo#123)" };
+        command.Arguments.Add(issueArg);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            return await ConsoleOutput.RunWithErrorHandling(async () =>
+            {
+                var stateStore = services.GetRequiredService<StateStore>();
+                var state = stateStore.LoadState();
+
+                var prNumber = parseResult.GetValue(prNumberArg);
+                var issueKey = parseResult.GetValue(issueArg)!;
+
+                if (!state.Sessions.TryGetValue(issueKey, out var session))
+                {
+                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
+                    return 1;
+                }
+
+                if (session.IsTerminal)
+                {
+                    ConsoleOutput.Error($"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.");
+                    return 1;
+                }
+
+                if (prNumber <= 0)
+                {
+                    ConsoleOutput.Error("Pull request number must be a positive integer.");
+                    return 1;
+                }
+
+                session.PullRequestNumber = prNumber;
+                session.Status = SessionStatus.WaitingForReview;
+                session.WaitingSince = DateTimeOffset.UtcNow;
+                session.ProcessId = null;
+                session.ProcessStartTime = null;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+                stateStore.SaveState(state);
+
+                ConsoleOutput.Success($"PR #{prNumber} associated with session for {issueKey}. Session is now waiting for review feedback.");
+                return 0;
+            }, logger);
+        });
+
+        return command;
+    }
+
     // ---- reset subcommand ----
 
     private static Command CreateResetCommand(IServiceProvider services)
@@ -371,11 +429,13 @@ public static class SessionCommand
 
                 session.Status = SessionStatus.Pending;
                 session.CompletedBySession = false;
+                session.PullRequestNumber = null;
                 session.CopilotSessionId = Guid.NewGuid().ToString();
                 session.ProcessId = null;
                 session.ProcessStartTime = null;
                 session.RetryCount = 0;
                 session.LastFailureAt = null;
+                session.WaitingSince = null;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
                 stateStore.SaveState(state);
 
@@ -496,6 +556,7 @@ public static class SessionCommand
                 SessionStatus.Running => $"[green]{s.Status}[/]",
                 SessionStatus.Joined => $"[blue]{s.Status}[/]",
                 SessionStatus.WaitingForFeedback => $"[cyan]{s.Status}[/]",
+                SessionStatus.WaitingForReview => $"[magenta]{s.Status}[/]",
                 SessionStatus.Pending or SessionStatus.Dispatching => $"[yellow]{s.Status}[/]",
                 SessionStatus.Failed or SessionStatus.Orphaned => $"[red]{s.Status}[/]",
                 SessionStatus.Completed => $"[grey]{s.Status}[/]",

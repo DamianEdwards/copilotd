@@ -59,10 +59,11 @@ public sealed class ReconciliationEngine
         state.LastPollTime = DateTimeOffset.UtcNow;
         _stateStore.SaveState(state);
 
-        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {Waiting} waiting, {Terminal} terminal sessions",
+        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {Waiting} waiting, {WaitingForReview} waiting for review, {Terminal} terminal sessions",
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Running),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Pending),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForFeedback),
+            state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForReview),
             state.Sessions.Values.Count(s => s.IsTerminal));
     }
 
@@ -107,8 +108,8 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.Pending)
                 continue;
 
-            // WaitingForFeedback sessions have no running process — skip liveness check
-            if (session.Status is SessionStatus.WaitingForFeedback)
+            // WaitingForFeedback and WaitingForReview sessions have no running process — skip liveness check
+            if (session.Status is SessionStatus.WaitingForFeedback or SessionStatus.WaitingForReview)
                 continue;
 
             // For Joined sessions, check if the interactive process is still alive.
@@ -264,6 +265,17 @@ public sealed class ReconciliationEngine
                     continue;
                 }
 
+                // WaitingForReview sessions have no process to terminate
+                if (session.Status is SessionStatus.WaitingForReview)
+                {
+                    _logger.LogInformation("Issue {Key} no longer matches rules, completing PR review session", key);
+                    session.Status = SessionStatus.Completed;
+                    session.WaitingSince = null;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    _processManager.CleanupWorktree(session, config, state);
+                    continue;
+                }
+
                 _logger.LogInformation("Issue {Key} no longer matches rules, terminating session", key);
                 toTerminate.Add(session);
             }
@@ -318,12 +330,64 @@ public sealed class ReconciliationEngine
                         }
                         continue;
 
+                    case SessionStatus.WaitingForReview:
+                        if (existing.PullRequestNumber is not null)
+                        {
+                            // Check if the PR has been merged or closed — auto-complete the session
+                            var prState = _ghCli.GetPullRequestState(existing.Repo, existing.PullRequestNumber.Value);
+                            if (prState is "MERGED" or "CLOSED")
+                            {
+                                _logger.LogInformation("PR #{Pr} for {Key} is {State}, completing session",
+                                    existing.PullRequestNumber, issueKey, prState);
+                                existing.Status = SessionStatus.Completed;
+                                existing.CompletedBySession = true;
+                                existing.WaitingSince = null;
+                                existing.ProcessId = null;
+                                existing.ProcessStartTime = null;
+                                existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                continue;
+                            }
+
+                            // Check for new review comments on the PR
+                            if (existing.WaitingSince is not null
+                                && _ghCli.HasNewPrReviewCommentsSince(existing.Repo, existing.PullRequestNumber.Value, existing.WaitingSince.Value))
+                            {
+                                _logger.LogInformation("New review comment detected on PR #{Pr} for {Key}, re-dispatching session",
+                                    existing.PullRequestNumber, issueKey);
+                                // Keep same CopilotSessionId so --resume preserves context
+                                existing.Status = SessionStatus.Pending;
+                                existing.WaitingSince = null;
+                                existing.ProcessId = null;
+                                existing.ProcessStartTime = null;
+                                existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                continue;
+                            }
+                        }
+
+                        // Also check for new issue comments (maintainer may respond on the issue)
+                        if (existing.WaitingSince is not null
+                            && _ghCli.HasNewCommentsSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value))
+                        {
+                            _logger.LogInformation("New issue comment detected on {Key} while waiting for PR review, re-dispatching session", issueKey);
+                            existing.Status = SessionStatus.Pending;
+                            existing.WaitingSince = null;
+                            existing.ProcessId = null;
+                            existing.ProcessStartTime = null;
+                            existing.UpdatedAt = DateTimeOffset.UtcNow;
+                        }
+                        else
+                        {
+                            _logger.LogDebug("Session {Key} still waiting for PR review feedback", issueKey);
+                        }
+                        continue;
+
                     case SessionStatus.Orphaned when existing.CanRetry:
                         _logger.LogInformation("Re-dispatching orphaned session {Key} (retry {N}/{Max})",
                             issueKey, existing.RetryCount + 1, DispatchSession.MaxRetries);
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
                         existing.RetryCount++;
+                        existing.PullRequestNumber = null;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
@@ -353,6 +417,7 @@ public sealed class ReconciliationEngine
                         _logger.LogInformation("Issue {Key} re-matched after completion, re-dispatching", issueKey);
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
+                        existing.PullRequestNumber = null;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;

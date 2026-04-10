@@ -53,7 +53,13 @@ public enum SessionStatus
     /// Session posted a comment on the issue and is waiting for a response.
     /// No process is running; the reconciler monitors for new comments.
     /// </summary>
-    WaitingForFeedback
+    WaitingForFeedback,
+
+    /// <summary>
+    /// Session created a pull request and is waiting for review feedback.
+    /// No process is running; the reconciler monitors for new PR review comments.
+    /// </summary>
+    WaitingForReview
 }
 
 /// <summary>
@@ -112,6 +118,12 @@ public sealed class DispatchSession
     /// Used to detect new comments on the issue since the session started waiting.
     /// </summary>
     public DateTimeOffset? WaitingSince { get; set; }
+
+    /// <summary>
+    /// The pull request number associated with this session, if one was created.
+    /// Set via 'copilotd session pr' and used to monitor for review comments.
+    /// </summary>
+    public int? PullRequestNumber { get; set; }
 
     /// <summary>
     /// Path to the git worktree directory for this session. Null if using the main repo checkout.

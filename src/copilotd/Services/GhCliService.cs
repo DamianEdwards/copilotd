@@ -309,6 +309,134 @@ public sealed class GhCliService
         }
     }
 
+    /// <summary>
+    /// Checks whether there are new review comments on a pull request since the given timestamp,
+    /// excluding comments posted by copilotd itself (identified by <see cref="CommentMarker"/>).
+    /// Checks both PR review comments (from formal reviews) and regular PR comments.
+    /// </summary>
+    public bool HasNewPrReviewCommentsSince(string repo, int prNumber, DateTimeOffset since)
+    {
+        var args = $"pr view {prNumber} --repo {repo} --json comments,reviews";
+        var (exitCode, output) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query PR comments on {Repo}#{Pr}: {Output}", repo, prNumber, output);
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+
+            // Check regular PR comments
+            if (doc.RootElement.TryGetProperty("comments", out var comments))
+            {
+                foreach (var comment in comments.EnumerateArray())
+                {
+                    if (IsNewNonBotComment(comment, since))
+                    {
+                        _logger.LogDebug("Found new PR comment on {Repo}!{Pr}", repo, prNumber);
+                        return true;
+                    }
+                }
+            }
+
+            // Check formal review submissions (requested changes, comments)
+            if (doc.RootElement.TryGetProperty("reviews", out var reviews))
+            {
+                foreach (var review in reviews.EnumerateArray())
+                {
+                    if (!review.TryGetProperty("submittedAt", out var submittedAtEl))
+                        continue;
+
+                    var submittedAtStr = submittedAtEl.GetString();
+                    if (submittedAtStr is null || !DateTimeOffset.TryParse(submittedAtStr, out var submittedAt))
+                        continue;
+
+                    if (submittedAt <= since)
+                        continue;
+
+                    // Skip empty/approved-only reviews with no body
+                    if (review.TryGetProperty("body", out var bodyEl))
+                    {
+                        var body = bodyEl.GetString();
+                        if (body is not null && body.Contains(CommentMarker, StringComparison.Ordinal))
+                            continue;
+                    }
+
+                    // Check review state — we care about CHANGES_REQUESTED and COMMENTED
+                    if (review.TryGetProperty("state", out var stateEl))
+                    {
+                        var reviewState = stateEl.GetString();
+                        if (reviewState is "CHANGES_REQUESTED" or "COMMENTED")
+                        {
+                            _logger.LogDebug("Found new review ({State}) on {Repo}!{Pr}", reviewState, repo, prNumber);
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse PR comments JSON for {Repo}!{Pr}", repo, prNumber);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Gets the current state of a pull request (e.g., OPEN, CLOSED, MERGED).
+    /// Returns null if the PR state cannot be determined.
+    /// </summary>
+    public string? GetPullRequestState(string repo, int prNumber)
+    {
+        var args = $"pr view {prNumber} --repo {repo} --json state";
+        var (exitCode, output) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query PR state for {Repo}!{Pr}: {Output}", repo, prNumber, output);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.TryGetProperty("state", out var stateEl))
+                return stateEl.GetString();
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse PR state JSON for {Repo}!{Pr}", repo, prNumber);
+            return null;
+        }
+    }
+
+    private bool IsNewNonBotComment(JsonElement comment, DateTimeOffset since)
+    {
+        if (!comment.TryGetProperty("createdAt", out var createdAtEl))
+            return false;
+
+        var createdAtStr = createdAtEl.GetString();
+        if (createdAtStr is null || !DateTimeOffset.TryParse(createdAtStr, out var createdAt))
+            return false;
+
+        if (createdAt <= since)
+            return false;
+
+        // Skip comments posted by copilotd
+        if (comment.TryGetProperty("body", out var bodyEl))
+        {
+            var body = bodyEl.GetString();
+            if (body is not null && body.Contains(CommentMarker, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);
 
     private (int ExitCode, string Output) RunGh(string arguments)
