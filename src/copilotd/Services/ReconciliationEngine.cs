@@ -187,7 +187,8 @@ public sealed class ReconciliationEngine
                     foreach (var issue in issues)
                     {
                         // Double-check rule match (gh filters are best-effort)
-                        if (!rule.Matches(issue))
+                        // Pass HasWriteAccess for AuthorMode.WriteAccess checks
+                        if (!rule.Matches(issue, _ghCli.HasWriteAccess))
                             continue;
 
                         if (!desired.ContainsKey(issue.Key))
@@ -313,20 +314,46 @@ public sealed class ReconciliationEngine
 
                     case SessionStatus.WaitingForFeedback:
                         // Check for new comments since the session started waiting
-                        if (existing.WaitingSince is not null
-                            && _ghCli.HasNewCommentsSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value))
+                        if (existing.WaitingSince is not null)
                         {
-                            _logger.LogInformation("New comment detected on {Key}, re-dispatching waiting session", issueKey);
-                            // Keep same CopilotSessionId so --resume preserves context
-                            existing.Status = SessionStatus.Pending;
-                            existing.WaitingSince = null;
-                            existing.ProcessId = null;
-                            existing.ProcessStartTime = null;
-                            existing.UpdatedAt = DateTimeOffset.UtcNow;
-                        }
-                        else
-                        {
-                            _logger.LogDebug("Session {Key} still waiting for feedback", issueKey);
+                            var commentInfo = _ghCli.GetNewCommentSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value);
+                            if (commentInfo is not null)
+                            {
+                                // Check re-dispatch rate limit
+                                if (existing.RedispatchCount >= config.MaxRedispatches)
+                                {
+                                    _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                                        "Use 'copilotd session reset' to re-enable. Ignoring comment from {Author}",
+                                        issueKey, config.MaxRedispatches, commentInfo.Author);
+                                    continue;
+                                }
+
+                                // Check author trust level
+                                var rule = config.Rules.GetValueOrDefault(existing.RuleName);
+                                var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+
+                                if (trustLevel == CommentTrustLevel.Collaborators
+                                    && !_ghCli.HasWriteAccess(existing.Repo, commentInfo.Author))
+                                {
+                                    _logger.LogInformation("Ignoring comment from non-collaborator {Author} on {Key} (trust_level=collaborators)",
+                                        commentInfo.Author, issueKey);
+                                    continue;
+                                }
+
+                                _logger.LogInformation("New comment from {Author} detected on {Key}, re-dispatching waiting session (redispatch {N}/{Max})",
+                                    commentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
+                                // Keep same CopilotSessionId so --resume preserves context
+                                existing.Status = SessionStatus.Pending;
+                                existing.RedispatchCount++;
+                                existing.WaitingSince = null;
+                                existing.ProcessId = null;
+                                existing.ProcessStartTime = null;
+                                existing.UpdatedAt = DateTimeOffset.UtcNow;
+                            }
+                            else
+                            {
+                                _logger.LogDebug("Session {Key} still waiting for feedback", issueKey);
+                            }
                         }
                         continue;
 
@@ -349,35 +376,86 @@ public sealed class ReconciliationEngine
                             }
 
                             // Check for new review comments on the PR
-                            if (existing.WaitingSince is not null
-                                && _ghCli.HasNewPrReviewCommentsSince(existing.Repo, existing.PullRequestNumber.Value, existing.WaitingSince.Value))
+                            if (existing.WaitingSince is not null)
                             {
-                                _logger.LogInformation("New review comment detected on PR #{Pr} for {Key}, re-dispatching session",
-                                    existing.PullRequestNumber, issueKey);
-                                // Keep same CopilotSessionId so --resume preserves context
-                                existing.Status = SessionStatus.Pending;
-                                existing.WaitingSince = null;
-                                existing.ProcessId = null;
-                                existing.ProcessStartTime = null;
-                                existing.UpdatedAt = DateTimeOffset.UtcNow;
-                                continue;
+                                var reviewInfo = _ghCli.GetNewPrReviewCommentSince(existing.Repo, existing.PullRequestNumber.Value, existing.WaitingSince.Value);
+                                if (reviewInfo is not null)
+                                {
+                                    // Check re-dispatch rate limit
+                                    if (existing.RedispatchCount >= config.MaxRedispatches)
+                                    {
+                                        _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                                            "Use 'copilotd session reset' to re-enable. Ignoring PR review from {Author}",
+                                            issueKey, config.MaxRedispatches, reviewInfo.Author);
+                                        continue;
+                                    }
+
+                                    // Check author trust level
+                                    var rule = config.Rules.GetValueOrDefault(existing.RuleName);
+                                    var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+
+                                    if (trustLevel == CommentTrustLevel.Collaborators
+                                        && !_ghCli.HasWriteAccess(existing.Repo, reviewInfo.Author))
+                                    {
+                                        _logger.LogInformation("Ignoring PR review from non-collaborator {Author} on {Key} (trust_level=collaborators)",
+                                            reviewInfo.Author, issueKey);
+                                        continue;
+                                    }
+
+                                    _logger.LogInformation("New PR review from {Author} detected on PR #{Pr} for {Key}, re-dispatching session (redispatch {N}/{Max})",
+                                        reviewInfo.Author, existing.PullRequestNumber, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
+                                    // Keep same CopilotSessionId so --resume preserves context
+                                    existing.Status = SessionStatus.Pending;
+                                    existing.RedispatchCount++;
+                                    existing.WaitingSince = null;
+                                    existing.ProcessId = null;
+                                    existing.ProcessStartTime = null;
+                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                    continue;
+                                }
                             }
                         }
 
                         // Also check for new issue comments (maintainer may respond on the issue)
-                        if (existing.WaitingSince is not null
-                            && _ghCli.HasNewCommentsSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value))
+                        if (existing.WaitingSince is not null)
                         {
-                            _logger.LogInformation("New issue comment detected on {Key} while waiting for PR review, re-dispatching session", issueKey);
-                            existing.Status = SessionStatus.Pending;
-                            existing.WaitingSince = null;
-                            existing.ProcessId = null;
-                            existing.ProcessStartTime = null;
-                            existing.UpdatedAt = DateTimeOffset.UtcNow;
-                        }
-                        else
-                        {
-                            _logger.LogDebug("Session {Key} still waiting for PR review feedback", issueKey);
+                            var issueCommentInfo = _ghCli.GetNewCommentSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value);
+                            if (issueCommentInfo is not null)
+                            {
+                                // Check re-dispatch rate limit
+                                if (existing.RedispatchCount >= config.MaxRedispatches)
+                                {
+                                    _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                                        "Use 'copilotd session reset' to re-enable. Ignoring issue comment from {Author}",
+                                        issueKey, config.MaxRedispatches, issueCommentInfo.Author);
+                                    continue;
+                                }
+
+                                // Check author trust level
+                                var rule = config.Rules.GetValueOrDefault(existing.RuleName);
+                                var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+
+                                if (trustLevel == CommentTrustLevel.Collaborators
+                                    && !_ghCli.HasWriteAccess(existing.Repo, issueCommentInfo.Author))
+                                {
+                                    _logger.LogInformation("Ignoring issue comment from non-collaborator {Author} on {Key} while waiting for PR review (trust_level=collaborators)",
+                                        issueCommentInfo.Author, issueKey);
+                                    continue;
+                                }
+
+                                _logger.LogInformation("New issue comment from {Author} detected on {Key} while waiting for PR review, re-dispatching session (redispatch {N}/{Max})",
+                                    issueCommentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
+                                existing.Status = SessionStatus.Pending;
+                                existing.RedispatchCount++;
+                                existing.WaitingSince = null;
+                                existing.ProcessId = null;
+                                existing.ProcessStartTime = null;
+                                existing.UpdatedAt = DateTimeOffset.UtcNow;
+                            }
+                            else
+                            {
+                                _logger.LogDebug("Session {Key} still waiting for PR review feedback", issueKey);
+                            }
                         }
                         continue;
 
@@ -388,6 +466,7 @@ public sealed class ReconciliationEngine
                         existing.Status = SessionStatus.Pending;
                         existing.RetryCount++;
                         existing.PullRequestNumber = null;
+                        existing.RedispatchCount = 0;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
@@ -418,6 +497,7 @@ public sealed class ReconciliationEngine
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
                         existing.PullRequestNumber = null;
+                        existing.RedispatchCount = 0;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;

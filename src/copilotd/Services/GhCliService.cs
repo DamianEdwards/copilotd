@@ -13,6 +13,10 @@ public sealed class GhCliService
     private readonly ILogger<GhCliService> _logger;
     private bool _supportsTypeField = true;
 
+    // Cache collaborator permission checks to avoid excessive API calls (TTL: 15 minutes)
+    private readonly Dictionary<string, (bool HasAccess, DateTimeOffset CheckedAt)> _collaboratorCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan CollaboratorCacheTtl = TimeSpan.FromMinutes(15);
+
     public GhCliService(ILogger<GhCliService> logger)
     {
         _logger = logger;
@@ -94,8 +98,8 @@ public sealed class GhCliService
     public List<GitHubIssue> QueryIssues(string repo, DispatchRule rule)
     {
         var jsonFields = _supportsTypeField
-            ? "number,title,assignees,labels,milestone,type"
-            : "number,title,assignees,labels,milestone";
+            ? "number,title,author,assignees,labels,milestone,type"
+            : "number,title,author,assignees,labels,milestone";
 
         var args = $"issue list --repo {repo} --state open --json {jsonFields} --limit 100";
 
@@ -115,7 +119,7 @@ public sealed class GhCliService
         {
             _logger.LogDebug("gh CLI does not support 'type' JSON field, retrying without it");
             _supportsTypeField = false;
-            args = $"issue list --repo {repo} --state open --json number,title,assignees,labels,milestone --limit 100";
+            args = $"issue list --repo {repo} --state open --json number,title,author,assignees,labels,milestone --limit 100";
 
             if (rule.User is not null)
                 args += $" --assignee {rule.User}";
@@ -165,6 +169,11 @@ public sealed class GhCliService
             {
                 var first = assignees[0];
                 issue.Assignee = first.TryGetProperty("login", out var login) ? login.GetString() : null;
+            }
+
+            if (element.TryGetProperty("author", out var authorEl) && authorEl.ValueKind == JsonValueKind.Object)
+            {
+                issue.Author = authorEl.TryGetProperty("login", out var authorLogin) ? authorLogin.GetString() : null;
             }
 
             if (element.TryGetProperty("labels", out var labels))
@@ -254,24 +263,36 @@ public sealed class GhCliService
     }
 
     /// <summary>
+    /// Information about a new comment detected on an issue or PR.
+    /// </summary>
+    public sealed record NewCommentInfo(string Author, DateTimeOffset CreatedAt);
+
+    /// <summary>
     /// Checks whether there are new comments on an issue since the given timestamp,
     /// excluding comments posted by copilotd itself (identified by <see cref="CommentMarker"/>).
     /// </summary>
     public bool HasNewCommentsSince(string repo, int issueNumber, DateTimeOffset since)
+        => GetNewCommentSince(repo, issueNumber, since) is not null;
+
+    /// <summary>
+    /// Returns info about the first new non-bot comment on an issue since the given timestamp,
+    /// or null if no new comments exist. Excludes comments posted by copilotd.
+    /// </summary>
+    public NewCommentInfo? GetNewCommentSince(string repo, int issueNumber, DateTimeOffset since)
     {
         var args = $"issue view {issueNumber} --repo {repo} --json comments";
         var (exitCode, output) = RunGh(args);
         if (exitCode != 0)
         {
             _logger.LogWarning("Failed to query comments on {Repo}#{Issue}: {Output}", repo, issueNumber, output);
-            return false;
+            return null;
         }
 
         try
         {
             using var doc = JsonDocument.Parse(output);
             if (!doc.RootElement.TryGetProperty("comments", out var comments))
-                return false;
+                return null;
 
             foreach (var comment in comments.EnumerateArray())
             {
@@ -293,20 +314,58 @@ public sealed class GhCliService
                         continue;
                 }
 
-                // Found at least one new comment not posted by copilotd
-                _logger.LogDebug("Found new comment on {Repo}#{Issue} from {Author}",
-                    repo, issueNumber,
-                    comment.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l) ? l.GetString() : "unknown");
-                return true;
+                var author = comment.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l)
+                    ? l.GetString() ?? "unknown"
+                    : "unknown";
+
+                _logger.LogDebug("Found new comment on {Repo}#{Issue} from {Author}", repo, issueNumber, author);
+                return new NewCommentInfo(author, createdAt);
             }
 
-            return false;
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to parse comments JSON for {Repo}#{Issue}", repo, issueNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Checks whether a user has write (or higher) access to a repository.
+    /// Results are cached for 15 minutes to avoid excessive API calls.
+    /// </summary>
+    public bool HasWriteAccess(string repo, string username)
+    {
+        var cacheKey = $"{repo}/{username}";
+
+        // Check cache first
+        if (_collaboratorCache.TryGetValue(cacheKey, out var cached)
+            && DateTimeOffset.UtcNow - cached.CheckedAt < CollaboratorCacheTtl)
+        {
+            _logger.LogDebug("Collaborator cache hit for {User} on {Repo}: {HasAccess}", username, repo, cached.HasAccess);
+            return cached.HasAccess;
+        }
+
+        var args = $"api repos/{repo}/collaborators/{username}/permission --jq .permission";
+        var (exitCode, output) = RunGh(args);
+
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to check permissions for {User} on {Repo}: {Output}", username, repo, output);
+            // On API failure, deny by default (fail-closed)
+            _collaboratorCache[cacheKey] = (false, DateTimeOffset.UtcNow);
             return false;
         }
+
+        var permission = output.Trim().ToLowerInvariant();
+        var hasAccess = permission is "admin" or "maintain" or "write";
+
+        _collaboratorCache[cacheKey] = (hasAccess, DateTimeOffset.UtcNow);
+        _logger.LogDebug("Permission check for {User} on {Repo}: {Permission} (hasAccess={HasAccess})",
+            username, repo, permission, hasAccess);
+
+        return hasAccess;
     }
 
     /// <summary>
@@ -315,13 +374,20 @@ public sealed class GhCliService
     /// Checks both PR review comments (from formal reviews) and regular PR comments.
     /// </summary>
     public bool HasNewPrReviewCommentsSince(string repo, int prNumber, DateTimeOffset since)
+        => GetNewPrReviewCommentSince(repo, prNumber, since) is not null;
+
+    /// <summary>
+    /// Returns info about the first new non-bot review comment or PR comment since the given timestamp,
+    /// or null if no new comments exist. Checks both regular PR comments and formal review submissions.
+    /// </summary>
+    public NewCommentInfo? GetNewPrReviewCommentSince(string repo, int prNumber, DateTimeOffset since)
     {
         var args = $"pr view {prNumber} --repo {repo} --json comments,reviews";
         var (exitCode, output) = RunGh(args);
         if (exitCode != 0)
         {
             _logger.LogWarning("Failed to query PR comments on {Repo}#{Pr}: {Output}", repo, prNumber, output);
-            return false;
+            return null;
         }
 
         try
@@ -333,10 +399,11 @@ public sealed class GhCliService
             {
                 foreach (var comment in comments.EnumerateArray())
                 {
-                    if (IsNewNonBotComment(comment, since))
+                    var info = ExtractNewNonBotComment(comment, since, "createdAt");
+                    if (info is not null)
                     {
-                        _logger.LogDebug("Found new PR comment on {Repo}!{Pr}", repo, prNumber);
-                        return true;
+                        _logger.LogDebug("Found new PR comment on {Repo}!{Pr} from {Author}", repo, prNumber, info.Author);
+                        return info;
                     }
                 }
             }
@@ -370,19 +437,22 @@ public sealed class GhCliService
                         var reviewState = stateEl.GetString();
                         if (reviewState is "CHANGES_REQUESTED" or "COMMENTED")
                         {
-                            _logger.LogDebug("Found new review ({State}) on {Repo}!{Pr}", reviewState, repo, prNumber);
-                            return true;
+                            var author = review.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l)
+                                ? l.GetString() ?? "unknown"
+                                : "unknown";
+                            _logger.LogDebug("Found new review ({State}) on {Repo}!{Pr} from {Author}", reviewState, repo, prNumber, author);
+                            return new NewCommentInfo(author, submittedAt);
                         }
                     }
                 }
             }
 
-            return false;
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to parse PR comments JSON for {Repo}!{Pr}", repo, prNumber);
-            return false;
+            return null;
         }
     }
 
@@ -414,27 +484,35 @@ public sealed class GhCliService
         }
     }
 
-    private bool IsNewNonBotComment(JsonElement comment, DateTimeOffset since)
+    /// <summary>
+    /// Extracts comment info from a JSON element if it's a new non-bot comment.
+    /// Returns null if the comment is old, from copilotd, or has no timestamp.
+    /// </summary>
+    private NewCommentInfo? ExtractNewNonBotComment(JsonElement comment, DateTimeOffset since, string timestampField = "createdAt")
     {
-        if (!comment.TryGetProperty("createdAt", out var createdAtEl))
-            return false;
+        if (!comment.TryGetProperty(timestampField, out var createdAtEl))
+            return null;
 
         var createdAtStr = createdAtEl.GetString();
         if (createdAtStr is null || !DateTimeOffset.TryParse(createdAtStr, out var createdAt))
-            return false;
+            return null;
 
         if (createdAt <= since)
-            return false;
+            return null;
 
         // Skip comments posted by copilotd
         if (comment.TryGetProperty("body", out var bodyEl))
         {
             var body = bodyEl.GetString();
             if (body is not null && body.Contains(CommentMarker, StringComparison.Ordinal))
-                return false;
+                return null;
         }
 
-        return true;
+        var author = comment.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l)
+            ? l.GetString() ?? "unknown"
+            : "unknown";
+
+        return new NewCommentInfo(author, createdAt);
     }
 
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);

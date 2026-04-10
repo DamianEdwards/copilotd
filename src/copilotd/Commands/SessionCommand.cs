@@ -434,6 +434,7 @@ public static class SessionCommand
                 session.ProcessId = null;
                 session.ProcessStartTime = null;
                 session.RetryCount = 0;
+                session.RedispatchCount = 0;
                 session.LastFailureAt = null;
                 session.WaitingSince = null;
                 session.UpdatedAt = DateTimeOffset.UtcNow;

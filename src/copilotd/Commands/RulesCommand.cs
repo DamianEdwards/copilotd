@@ -90,6 +90,7 @@ public static class RulesCommand
         table.ShowRowSeparators = true;
         table.AddColumn(new TableColumn("[bold]Name[/]"));
         table.AddColumn(new TableColumn("[bold]Assignee[/]"));
+        table.AddColumn(new TableColumn("[bold]Authors[/]"));
         table.AddColumn(new TableColumn("[bold]Labels[/]"));
         table.AddColumn(new TableColumn("[bold]Milestone[/]"));
         table.AddColumn(new TableColumn("[bold]Type[/]"));
@@ -103,6 +104,7 @@ public static class RulesCommand
             table.AddRow(
                 Markup.Escape(name),
                 Markup.Escape(rule.User ?? "*"),
+                Markup.Escape(FormatAuthorMode(rule)),
                 Markup.Escape(string.Join(", ", rule.Labels)),
                 Markup.Escape(rule.Milestone ?? "*"),
                 Markup.Escape(rule.Type ?? "*"),
@@ -134,6 +136,16 @@ public static class RulesCommand
         return parts.Count > 0 ? string.Join(", ", parts) : "(defaults)";
     }
 
+    private static string FormatAuthorMode(DispatchRule rule)
+    {
+        return rule.AuthorMode switch
+        {
+            AuthorMode.Allowed => string.Join(", ", rule.Authors),
+            AuthorMode.WriteAccess => "(write access)",
+            _ => "*",
+        };
+    }
+
     private static Command CreateAdd(IServiceProvider services)
     {
         var command = new Command("add", "Add a new dispatch rule");
@@ -150,6 +162,9 @@ public static class RulesCommand
         var customPromptOption = new Option<string?>("--custom-prompt") { Description = "Per-rule custom prompt (appended to or overrides global custom prompt)" };
         var customPromptModeOption = new Option<string?>("--custom-prompt-mode") { Description = "How rule custom prompt interacts with global: 'append' (default) or 'override'" };
         var repoOption = new Option<string[]>("--repo") { Description = "Repository to add (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
+        var addAuthorOption = new Option<string[]>("--add-author") { Description = "Add an allowed issue author (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
+        var writeOnlyAuthorsOption = new Option<bool>("--write-only-authors") { Description = "Only dispatch issues from authors with write access to the repo" };
+        var anyAuthorOption = new Option<bool>("--any-author") { Description = "Allow issues from any author (default)" };
 
         command.Arguments.Add(nameArg);
         command.Options.Add(userOption);
@@ -164,6 +179,9 @@ public static class RulesCommand
         command.Options.Add(customPromptOption);
         command.Options.Add(customPromptModeOption);
         command.Options.Add(repoOption);
+        command.Options.Add(addAuthorOption);
+        command.Options.Add(writeOnlyAuthorsOption);
+        command.Options.Add(anyAuthorOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -194,7 +212,19 @@ public static class RulesCommand
                     ExtraPrompt = parseResult.GetValue(promptOption),
                     CustomPrompt = parseResult.GetValue(customPromptOption),
                     Repos = [.. parseResult.GetValue(repoOption) ?? []],
+                    Authors = [.. parseResult.GetValue(addAuthorOption) ?? []],
                 };
+
+                // Author mode: --write-only-authors wins over --add-author, --any-author is default
+                if (parseResult.GetValue(writeOnlyAuthorsOption))
+                {
+                    rule.AuthorMode = AuthorMode.WriteAccess;
+                }
+                else if (rule.Authors.Count > 0)
+                {
+                    rule.AuthorMode = AuthorMode.Allowed;
+                }
+                // else: AuthorMode.Any (default)
 
                 var modeValue = parseResult.GetValue(customPromptModeOption);
                 if (modeValue is not null)
@@ -235,6 +265,10 @@ public static class RulesCommand
         var customPromptModeOption = new Option<string?>("--custom-prompt-mode") { Description = "Update custom prompt mode: 'append' or 'override'" };
         var addRepoOption = new Option<string[]>("--add-repo") { Description = "Add a repository", AllowMultipleArgumentsPerToken = true };
         var deleteRepoOption = new Option<string[]>("--delete-repo") { Description = "Remove a repository", AllowMultipleArgumentsPerToken = true };
+        var addAuthorOption = new Option<string[]>("--add-author") { Description = "Add an allowed issue author", AllowMultipleArgumentsPerToken = true };
+        var deleteAuthorOption = new Option<string[]>("--delete-author") { Description = "Remove an allowed issue author", AllowMultipleArgumentsPerToken = true };
+        var writeOnlyAuthorsOption = new Option<bool>("--write-only-authors") { Description = "Only dispatch issues from authors with write access to the repo" };
+        var anyAuthorOption = new Option<bool>("--any-author") { Description = "Allow issues from any author (clears author list)" };
 
         command.Arguments.Add(nameArg);
         command.Options.Add(userOption);
@@ -251,6 +285,10 @@ public static class RulesCommand
         command.Options.Add(customPromptModeOption);
         command.Options.Add(addRepoOption);
         command.Options.Add(deleteRepoOption);
+        command.Options.Add(addAuthorOption);
+        command.Options.Add(deleteAuthorOption);
+        command.Options.Add(writeOnlyAuthorsOption);
+        command.Options.Add(anyAuthorOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -327,6 +365,35 @@ public static class RulesCommand
                 {
                     if (!rule.Repos.Contains(repo, StringComparer.OrdinalIgnoreCase))
                         rule.Repos.Add(repo);
+                }
+
+                // Author mode updates: --any-author and --write-only-authors change the mode;
+                // --add-author/--delete-author modify the allowed list (and imply Allowed mode)
+                if (parseResult.GetValue(anyAuthorOption))
+                {
+                    rule.AuthorMode = AuthorMode.Any;
+                    rule.Authors.Clear();
+                }
+                else if (parseResult.GetValue(writeOnlyAuthorsOption))
+                {
+                    rule.AuthorMode = AuthorMode.WriteAccess;
+                    rule.Authors.Clear();
+                }
+
+                var addAuthors = parseResult.GetValue(addAuthorOption) ?? [];
+                var deleteAuthors = parseResult.GetValue(deleteAuthorOption) ?? [];
+                foreach (var author in deleteAuthors)
+                    rule.Authors.RemoveAll(a => string.Equals(a, author, StringComparison.OrdinalIgnoreCase));
+                foreach (var author in addAuthors)
+                {
+                    if (!rule.Authors.Contains(author, StringComparer.OrdinalIgnoreCase))
+                        rule.Authors.Add(author);
+                }
+
+                // If authors were added and mode is still Any, switch to Allowed
+                if (rule.Authors.Count > 0 && rule.AuthorMode == AuthorMode.Any)
+                {
+                    rule.AuthorMode = AuthorMode.Allowed;
                 }
 
                 stateStore.SaveConfig(config);
