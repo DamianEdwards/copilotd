@@ -668,17 +668,16 @@ install_copilotd() {
         fi
     fi
 
-    local temp_root
-    temp_root=$(mktemp -d "${TMPDIR:-/tmp}/copilotd-install-XXXXXX")
+    COPILOTD_INSTALL_TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/copilotd-install-XXXXXX")
+    local temp_root="$COPILOTD_INSTALL_TEMP_ROOT"
     local download_path="${temp_root}/${asset_name}"
     local extract_path="${temp_root}/extract"
 
     log_verbose "Using temporary workspace '$temp_root'."
 
     cleanup() {
-        if [[ -d "$temp_root" ]]; then
-            log_verbose "Cleaning up temporary workspace '$temp_root'."
-            rm -rf "$temp_root"
+        if [[ -d "${COPILOTD_INSTALL_TEMP_ROOT:-}" ]]; then
+            rm -rf "$COPILOTD_INSTALL_TEMP_ROOT"
         fi
     }
     trap cleanup EXIT
