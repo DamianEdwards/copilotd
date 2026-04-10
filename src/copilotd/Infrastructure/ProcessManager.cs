@@ -374,6 +374,12 @@ public sealed partial class ProcessManager
             prompt += "\n\n" + rule.ExtraPrompt;
         }
 
+        // Append security context when re-dispatching in response to comments
+        if (session.RedispatchCount > 0)
+        {
+            prompt += "\n\n" + CopilotdConfig.SecurityPrompt;
+        }
+
         // Replace tokens in the entire prompt (default + custom + extra)
         prompt = prompt
             .Replace("$(issue.repo)", issue.Repo)

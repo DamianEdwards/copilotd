@@ -114,6 +114,12 @@ public sealed class DispatchSession
     public DateTimeOffset? WaitingSince { get; set; }
 
     /// <summary>
+    /// Number of times this session has been re-dispatched via comment/review feedback loops.
+    /// Used to enforce <see cref="CopilotdConfig.MaxRedispatches"/> and prevent unbounded loops.
+    /// </summary>
+    public int RedispatchCount { get; set; }
+
+    /// <summary>
     /// Path to the git worktree directory for this session. Null if using the main repo checkout.
     /// </summary>
     public string? WorktreePath { get; set; }

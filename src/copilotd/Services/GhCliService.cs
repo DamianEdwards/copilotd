@@ -13,6 +13,10 @@ public sealed class GhCliService
     private readonly ILogger<GhCliService> _logger;
     private bool _supportsTypeField = true;
 
+    // Cache collaborator permission checks to avoid excessive API calls (TTL: 15 minutes)
+    private readonly Dictionary<string, (bool HasAccess, DateTimeOffset CheckedAt)> _collaboratorCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan CollaboratorCacheTtl = TimeSpan.FromMinutes(15);
+
     public GhCliService(ILogger<GhCliService> logger)
     {
         _logger = logger;
@@ -254,24 +258,36 @@ public sealed class GhCliService
     }
 
     /// <summary>
+    /// Information about a new comment detected on an issue or PR.
+    /// </summary>
+    public sealed record NewCommentInfo(string Author, DateTimeOffset CreatedAt);
+
+    /// <summary>
     /// Checks whether there are new comments on an issue since the given timestamp,
     /// excluding comments posted by copilotd itself (identified by <see cref="CommentMarker"/>).
     /// </summary>
     public bool HasNewCommentsSince(string repo, int issueNumber, DateTimeOffset since)
+        => GetNewCommentSince(repo, issueNumber, since) is not null;
+
+    /// <summary>
+    /// Returns info about the first new non-bot comment on an issue since the given timestamp,
+    /// or null if no new comments exist. Excludes comments posted by copilotd.
+    /// </summary>
+    public NewCommentInfo? GetNewCommentSince(string repo, int issueNumber, DateTimeOffset since)
     {
         var args = $"issue view {issueNumber} --repo {repo} --json comments";
         var (exitCode, output) = RunGh(args);
         if (exitCode != 0)
         {
             _logger.LogWarning("Failed to query comments on {Repo}#{Issue}: {Output}", repo, issueNumber, output);
-            return false;
+            return null;
         }
 
         try
         {
             using var doc = JsonDocument.Parse(output);
             if (!doc.RootElement.TryGetProperty("comments", out var comments))
-                return false;
+                return null;
 
             foreach (var comment in comments.EnumerateArray())
             {
@@ -293,20 +309,58 @@ public sealed class GhCliService
                         continue;
                 }
 
-                // Found at least one new comment not posted by copilotd
-                _logger.LogDebug("Found new comment on {Repo}#{Issue} from {Author}",
-                    repo, issueNumber,
-                    comment.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l) ? l.GetString() : "unknown");
-                return true;
+                var author = comment.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l)
+                    ? l.GetString() ?? "unknown"
+                    : "unknown";
+
+                _logger.LogDebug("Found new comment on {Repo}#{Issue} from {Author}", repo, issueNumber, author);
+                return new NewCommentInfo(author, createdAt);
             }
 
-            return false;
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to parse comments JSON for {Repo}#{Issue}", repo, issueNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Checks whether a user has write (or higher) access to a repository.
+    /// Results are cached for 15 minutes to avoid excessive API calls.
+    /// </summary>
+    public bool HasWriteAccess(string repo, string username)
+    {
+        var cacheKey = $"{repo}/{username}";
+
+        // Check cache first
+        if (_collaboratorCache.TryGetValue(cacheKey, out var cached)
+            && DateTimeOffset.UtcNow - cached.CheckedAt < CollaboratorCacheTtl)
+        {
+            _logger.LogDebug("Collaborator cache hit for {User} on {Repo}: {HasAccess}", username, repo, cached.HasAccess);
+            return cached.HasAccess;
+        }
+
+        var args = $"api repos/{repo}/collaborators/{username}/permission --jq .permission";
+        var (exitCode, output) = RunGh(args);
+
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to check permissions for {User} on {Repo}: {Output}", username, repo, output);
+            // On API failure, deny by default (fail-closed)
+            _collaboratorCache[cacheKey] = (false, DateTimeOffset.UtcNow);
             return false;
         }
+
+        var permission = output.Trim().ToLowerInvariant();
+        var hasAccess = permission is "admin" or "maintain" or "write";
+
+        _collaboratorCache[cacheKey] = (hasAccess, DateTimeOffset.UtcNow);
+        _logger.LogDebug("Permission check for {User} on {Repo}: {Permission} (hasAccess={HasAccess})",
+            username, repo, permission, hasAccess);
+
+        return hasAccess;
     }
 
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);

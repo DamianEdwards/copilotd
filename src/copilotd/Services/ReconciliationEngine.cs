@@ -301,20 +301,46 @@ public sealed class ReconciliationEngine
 
                     case SessionStatus.WaitingForFeedback:
                         // Check for new comments since the session started waiting
-                        if (existing.WaitingSince is not null
-                            && _ghCli.HasNewCommentsSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value))
+                        if (existing.WaitingSince is not null)
                         {
-                            _logger.LogInformation("New comment detected on {Key}, re-dispatching waiting session", issueKey);
-                            // Keep same CopilotSessionId so --resume preserves context
-                            existing.Status = SessionStatus.Pending;
-                            existing.WaitingSince = null;
-                            existing.ProcessId = null;
-                            existing.ProcessStartTime = null;
-                            existing.UpdatedAt = DateTimeOffset.UtcNow;
-                        }
-                        else
-                        {
-                            _logger.LogDebug("Session {Key} still waiting for feedback", issueKey);
+                            var commentInfo = _ghCli.GetNewCommentSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value);
+                            if (commentInfo is not null)
+                            {
+                                // Check re-dispatch rate limit
+                                if (existing.RedispatchCount >= config.MaxRedispatches)
+                                {
+                                    _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                                        "Use 'copilotd session reset' to re-enable. Ignoring comment from {Author}",
+                                        issueKey, config.MaxRedispatches, commentInfo.Author);
+                                    continue;
+                                }
+
+                                // Check author trust level
+                                var rule = config.Rules.GetValueOrDefault(existing.RuleName);
+                                var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+
+                                if (trustLevel == CommentTrustLevel.Collaborators
+                                    && !_ghCli.HasWriteAccess(existing.Repo, commentInfo.Author))
+                                {
+                                    _logger.LogInformation("Ignoring comment from non-collaborator {Author} on {Key} (trust_level=collaborators)",
+                                        commentInfo.Author, issueKey);
+                                    continue;
+                                }
+
+                                _logger.LogInformation("New comment from {Author} detected on {Key}, re-dispatching waiting session (redispatch {N}/{Max})",
+                                    commentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
+                                // Keep same CopilotSessionId so --resume preserves context
+                                existing.Status = SessionStatus.Pending;
+                                existing.RedispatchCount++;
+                                existing.WaitingSince = null;
+                                existing.ProcessId = null;
+                                existing.ProcessStartTime = null;
+                                existing.UpdatedAt = DateTimeOffset.UtcNow;
+                            }
+                            else
+                            {
+                                _logger.LogDebug("Session {Key} still waiting for feedback", issueKey);
+                            }
                         }
                         continue;
 
@@ -324,6 +350,7 @@ public sealed class ReconciliationEngine
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
                         existing.RetryCount++;
+                        existing.RedispatchCount = 0;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
@@ -353,6 +380,7 @@ public sealed class ReconciliationEngine
                         _logger.LogInformation("Issue {Key} re-matched after completion, re-dispatching", issueKey);
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
+                        existing.RedispatchCount = 0;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
