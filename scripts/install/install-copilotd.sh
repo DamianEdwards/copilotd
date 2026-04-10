@@ -372,7 +372,12 @@ assert_artifact_attestation() {
 
     local output
     local exit_code=0
-    output=$(gh attestation verify "$archive_path" -R "$repo" 2>&1) || exit_code=$?
+    output=$(gh attestation verify "$archive_path" \
+        -R "$repo" \
+        --signer-repo "$repo" \
+        --signer-workflow "${repo}/.github/workflows/ci.yml" \
+        --cert-identity-regex "^https://github\\.com/${repo}/\\.github/workflows/ci\\.yml@refs/heads/main\$" \
+        2>&1) || exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
         die "Artifact attestation verification failed for '$archive_path': $output"
