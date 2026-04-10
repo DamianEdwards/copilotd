@@ -400,12 +400,19 @@ public sealed partial class ProcessManager
             Important:
             - You are on the same branch that was used to create the PR. Your changes will be pushed to the existing PR.
             - Address each review comment by making the requested changes.
+            - If a review comment includes a suggested change (```suggestion block), apply it directly to the relevant file.
             - After addressing all review feedback, push your changes to update the PR.
             - Then run `copilotd session pr $(pr.id) $(issue.repo)#$(issue.id)` to continue monitoring for further review feedback.
             - If the changes are complete and no more reviews are expected, run `copilotd session complete $(issue.repo)#$(issue.id)` instead.
 
-            If you need more information or clarification before proceeding:
-            - Run `copilotd session comment $(issue.repo)#$(issue.id) --message "Your question or findings here"` to post a comment on the issue.
+            Interacting with the PR:
+            - To post a general comment on the PR: `gh pr comment $(pr.id) --repo $(issue.repo) --body "Your comment"`
+            - To reply to a specific review thread, use `gh api graphql` with the addPullRequestReviewThreadReply mutation:
+              ```
+              gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: "THREAD_ID", body: "Your reply" }) { comment { id } } }'
+              ```
+              You can find thread IDs by querying: `gh api graphql -f query='{ repository(owner: "OWNER", name: "REPO") { pullRequest(number: $(pr.id)) { reviewThreads(last: 20) { nodes { id isResolved comments(last: 5) { nodes { body author { login } } } } } } } }'`
+            - Do NOT use `copilotd session comment` to post to the issue when in PR review mode. All communication should happen on the PR itself.
             """;
     }
 

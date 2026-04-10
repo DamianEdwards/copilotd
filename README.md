@@ -233,6 +233,11 @@ When a copilot session creates a pull request, it can enter a review monitoring 
 
 The default prompt instructs copilot sessions to use `session pr` after creating a pull request. Multiple review rounds are supported — the session resumes with `--resume` for full conversation context continuity.
 
+When re-dispatched for PR review, copilot is instructed to interact with the PR directly:
+- **General comments** — posted to the PR via `gh pr comment`
+- **Thread replies** — reply to specific review comment threads via the GitHub GraphQL API
+- **Suggested changes** — applied directly to the relevant files when a review comment includes a `suggestion` block
+
 ### Interactive takeover
 
 Use `copilotd session join <issue>` to take over any tracked session:
