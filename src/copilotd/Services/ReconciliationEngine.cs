@@ -337,6 +337,9 @@ public sealed class ReconciliationEngine
                                 {
                                     _logger.LogInformation("Ignoring comment from non-collaborator {Author} on {Key} (trust_level=collaborators)",
                                         commentInfo.Author, issueKey);
+                                    // Advance WaitingSince past this comment so the next poll can find later trusted comments
+                                    existing.WaitingSince = commentInfo.CreatedAt;
+                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
                                     continue;
                                 }
 
@@ -372,6 +375,7 @@ public sealed class ReconciliationEngine
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                _processManager.CleanupWorktree(existing, config, state);
                                 continue;
                             }
 
@@ -399,6 +403,9 @@ public sealed class ReconciliationEngine
                                     {
                                         _logger.LogInformation("Ignoring PR review from non-collaborator {Author} on {Key} (trust_level=collaborators)",
                                             reviewInfo.Author, issueKey);
+                                        // Advance WaitingSince past this review so the next poll can find later trusted reviews
+                                        existing.WaitingSince = reviewInfo.CreatedAt;
+                                        existing.UpdatedAt = DateTimeOffset.UtcNow;
                                         continue;
                                     }
 
@@ -440,6 +447,9 @@ public sealed class ReconciliationEngine
                                 {
                                     _logger.LogInformation("Ignoring issue comment from non-collaborator {Author} on {Key} while waiting for PR review (trust_level=collaborators)",
                                         issueCommentInfo.Author, issueKey);
+                                    // Advance WaitingSince past this comment so the next poll can find later trusted comments
+                                    existing.WaitingSince = issueCommentInfo.CreatedAt;
+                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
                                     continue;
                                 }
 

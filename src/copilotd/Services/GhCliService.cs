@@ -379,6 +379,8 @@ public sealed class GhCliService
     /// <summary>
     /// Returns info about the first new non-bot review comment or PR comment since the given timestamp,
     /// or null if no new comments exist. Checks both regular PR comments and formal review submissions.
+    /// Note: Does not detect individual review-thread replies (only top-level comments and formal
+    /// review submissions). Detecting thread replies would require GraphQL queries against reviewThreads.
     /// </summary>
     public NewCommentInfo? GetNewPrReviewCommentSince(string repo, int prNumber, DateTimeOffset since)
     {
