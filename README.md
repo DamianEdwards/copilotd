@@ -7,7 +7,8 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 - **Issue watching** — polls GitHub repos for issues matching configurable rules (assigned user, labels, milestone, issue type)
 - **Automatic dispatch** — launches `copilot --remote` sessions with templated prompts derived from issue metadata
 - **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, extra prompts, repo assignments)
-- **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, and explicit completion signaling
+- **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, PR review monitoring, and explicit completion signaling
+- **PR review feedback** — sessions that create PRs can wait for review comments and automatically re-dispatch to address feedback
 - **Self-healing state** — reconciles persisted state, live process status, and GitHub issue matches on every poll cycle and at startup
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
 - **Interactive takeover** — join any orchestrated session interactively with `copilotd session join`, then hand it back automatically
@@ -62,6 +63,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 | `copilotd session join <issue>` | Take over a session interactively |
 | `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
+| `copilotd session pr <pr-number> <issue>` | Associate a PR with a session and wait for review feedback (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
 | `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `max_instances`) |
@@ -80,7 +82,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 ### Status & session options
 
 ```
---filter <status>   Filter by status (pending, running, joined, waitingforfeedback, completed, failed, orphaned)
+--filter <status>   Filter by status (pending, running, joined, waitingforfeedback, waitingforreview, completed, failed, orphaned)
 --all               Include ended (completed/failed) sessions
 ```
 
@@ -115,6 +117,7 @@ The built-in prompt supports token replacement:
 | `$(issue.id)` | Issue number |
 | `$(issue.type)` | Issue type (e.g., `bug`) |
 | `$(issue.milestone)` | Milestone title |
+| `$(pr.id)` | Pull request number (available in PR review re-dispatch prompts) |
 
 Custom prompt text (configured via `custom_prompt` or `~/.copilotd/prompt.md`) is appended after
 the built-in prompt with a trailer. Rules can also specify a `custom_prompt` that either appends
@@ -154,6 +157,17 @@ Each dispatched copilot session follows a state machine:
                       ▼          │
                     Pending ─────┘
                  │
+                 │                   copilot calls
+                 │                   session pr
+                 │◄── WaitingForReview ◄─────────────────────────┘
+                      │          ▲
+      review comment  │          │ no new reviews
+      detected        │          │ (keeps waiting)
+                      ▼          │
+                    Pending ─────┘
+                      │
+                PR merged/closed → Completed (auto)
+                 │
           re-opened / re-matched
           (only if not explicitly completed)
 ```
@@ -168,6 +182,7 @@ Each dispatched copilot session follows a state machine:
 | **Dispatching** | **Failed** | Process launch failed (increments retry count) |
 | **Running** | **Completed** | Issue no longer matches rules (closed, relabeled, etc.) — process gracefully terminated |
 | **Running** | **WaitingForFeedback** | Copilot calls `copilotd session comment` — process exits, session waits for new issue comments |
+| **Running** | **WaitingForReview** | Copilot calls `copilotd session pr <pr-number>` — process exits, session waits for PR review feedback |
 | **Running** | **Orphaned** | Process died unexpectedly (PID gone or reused) |
 | **Running** | **Joined** | User runs `copilotd session join` — process terminated, user takes over |
 | **Orphaned** | **Pending** | Retry eligible (retry count < 3) — exponential backoff: 2^n minutes, capped at 30m |
@@ -176,6 +191,8 @@ Each dispatched copilot session follows a state machine:
 | **Joined** | **Pending** | User exits interactive session — automatically re-queued for dispatch |
 | **WaitingForFeedback** | **Pending** | New comment detected on the issue (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity |
 | **WaitingForFeedback** | **Completed** | Issue no longer matches rules while waiting |
+| **WaitingForReview** | **Pending** | New review comment or changes-requested review detected on the PR — re-dispatched with PR review prompt |
+| **WaitingForReview** | **Completed** | PR is merged or closed, or issue no longer matches rules |
 | **Completed** | **Pending** | Issue re-matches rules (e.g., reopened) — only if not explicitly completed by copilot |
 | Any non-terminal | **Completed** | Copilot calls `copilotd session complete` — sets `CompletedBySession` flag, prevents re-dispatch |
 
@@ -202,6 +219,20 @@ When a copilot session encounters an issue that needs more information before wo
 
 The default prompt instructs copilot sessions to use this flow when they need clarification.
 
+### PR review feedback
+
+When a copilot session creates a pull request, it can enter a review monitoring loop:
+
+1. The session calls `copilotd session pr <pr-number> <issue>` after pushing a PR
+2. The session transitions to **WaitingForReview** — the copilot process exits, no instance slot is consumed
+3. On each poll cycle, the reconciler checks for new PR review comments, formal reviews (`CHANGES_REQUESTED` or `COMMENTED`), and falls back to checking issue comments
+4. When review feedback is detected, the session is re-dispatched with a PR-specific prompt that instructs copilot to address the feedback
+5. The existing worktree is refreshed (`git fetch` + `git pull --ff-only`) rather than recreated, preserving any local state
+6. Copilot addresses the feedback, pushes changes to the existing PR, and calls `session pr` again to continue the loop
+7. If the PR is merged or closed, the session is automatically completed
+
+The default prompt instructs copilot sessions to use `session pr` after creating a pull request. Multiple review rounds are supported — the session resumes with `--resume` for full conversation context continuity.
+
 ### Interactive takeover
 
 Use `copilotd session join <issue>` to take over any tracked session:
@@ -214,7 +245,7 @@ Use `copilotd session join <issue>` to take over any tracked session:
 ### Terminal states and pruning
 
 - **Completed** and **Failed** are terminal states
-- **WaitingForFeedback** is *not* terminal — the session is paused, not finished
+- **WaitingForFeedback** and **WaitingForReview** are *not* terminal — the session is paused, not finished
 - Terminal sessions are automatically pruned from state after 7 days
 - All running sessions are gracefully terminated when the daemon shuts down
 
