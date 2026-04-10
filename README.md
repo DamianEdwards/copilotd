@@ -298,3 +298,8 @@ full combined prompt at dispatch time. Per-rule extra prompts (`--prompt`) are a
 ## License
 
 MIT
+
+
+## E2E Test
+
+This section was added by an automated E2E test and can be safely removed.
