@@ -2,6 +2,17 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      default_post_release_phase:
+        description: "Phase for the next version after release (pre, rc, rtm). Defaults to repo variable DEFAULT_POST_RELEASE_PHASE or 'pre'."
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - pre
+          - rc
+          - rtm
 
 env:
   DOTNET_NOLOGO: true
@@ -281,6 +292,25 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve post-release phase
+        id: post_release_phase
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEFAULT_PHASE='${{ github.event.inputs.default_post_release_phase }}'
+          if [ -z "$DEFAULT_PHASE" ]; then
+            DEFAULT_PHASE='${{ vars.DEFAULT_POST_RELEASE_PHASE }}'
+          fi
+
+          if [ -n "$DEFAULT_PHASE" ] && [[ ! "$DEFAULT_PHASE" =~ ^(pre|rc|rtm)$ ]]; then
+            echo "::error::Invalid post-release phase '${DEFAULT_PHASE}'. Must be pre, rc, or rtm."
+            exit 1
+          fi
+
+          echo "phase=${DEFAULT_PHASE}" >> "$GITHUB_OUTPUT"
+          echo "Resolved post-release phase: '${DEFAULT_PHASE:-<default: pre>}'"
+
       - name: Create GitHub release
         id: create_release
         env:
@@ -328,7 +358,15 @@ jobs:
           set -euo pipefail
 
           VERSION='${{ needs.prepare-release.outputs.version }}'
-          NEW_STATE_JSON=$(dotnet scripts/version.cs advance --state "$STATE_JSON" --shipped-version "$VERSION")
+
+          DEFAULT_PHASE='${{ steps.post_release_phase.outputs.phase }}'
+
+          PHASE_FLAG=()
+          if [ -n "$DEFAULT_PHASE" ]; then
+            PHASE_FLAG+=(--default-phase "$DEFAULT_PHASE")
+          fi
+
+          NEW_STATE_JSON=$(dotnet scripts/version.cs advance --state "$STATE_JSON" --shipped-version "$VERSION" "${PHASE_FLAG[@]}")
           VERSIONS_JSON=$(dotnet scripts/version.cs calculate --state "$NEW_STATE_JSON")
           NEXT_DEV_VERSION=$(echo "$VERSIONS_JSON" | jq -r '.devVersion')
           NEXT_RC_VERSION=$(echo "$VERSIONS_JSON" | jq -r '.rcVersion')

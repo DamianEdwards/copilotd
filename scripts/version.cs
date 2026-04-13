@@ -62,16 +62,19 @@ rootCommand.Subcommands.Add(calculateCommand);
 var advanceCommand = new Command("advance", "Calculate the next state after a release is shipped.");
 var advanceStateOption = new Option<string>("--state") { Description = "Current version state as JSON.", Required = true };
 var shippedVersionOption = new Option<string>("--shipped-version") { Description = "The version that was just shipped.", Required = true };
+var defaultPhaseOption = new Option<string?>("--default-phase") { Description = "Default phase after an RTM release (pre, rc, rtm). Defaults to 'pre'." };
 advanceCommand.Options.Add(advanceStateOption);
 advanceCommand.Options.Add(shippedVersionOption);
+advanceCommand.Options.Add(defaultPhaseOption);
 advanceCommand.SetAction(parseResult => ExecuteHandled(() =>
 {
     var stateJson = parseResult.GetValue(advanceStateOption)!;
     var shippedVersion = parseResult.GetValue(shippedVersionOption)!;
+    var defaultPhase = parseResult.GetValue(defaultPhaseOption);
     var state = JsonSerializer.Deserialize<VersionState>(stateJson, jsonOptions)
         ?? throw new ArgumentException("Invalid state JSON.");
 
-    var newState = AdvanceState(state);
+    var newState = AdvanceState(state, defaultPhase);
     Console.WriteLine(JsonSerializer.Serialize(newState, jsonOptions));
 }));
 rootCommand.Subcommands.Add(advanceCommand);
@@ -227,13 +230,28 @@ static CalculatedVersions CalculateVersions(VersionState state)
     return new CalculatedVersions(devVersion, rcVersion, nextState);
 }
 
-static VersionState AdvanceState(VersionState state)
+static VersionState AdvanceState(VersionState state, string? defaultPhase = null)
 {
     return state.Phase switch
     {
         "pre" or "rc" => new VersionState(state.Base, state.Phase, state.PhaseNumber + 1, 0, "none"),
-        "rtm" => new VersionState(BumpBaseVersion(state.Base), "pre", 1, 0, "none"),
+        "rtm" => AdvanceFromRtm(state, defaultPhase ?? "pre"),
         _ => throw new ArgumentException($"Unknown phase: {state.Phase}")
+    };
+}
+
+static VersionState AdvanceFromRtm(VersionState state, string nextPhase)
+{
+    if (nextPhase is not ("pre" or "rc" or "rtm"))
+    {
+        throw new ArgumentException($"Invalid default phase: {nextPhase}. Must be pre, rc, or rtm.");
+    }
+
+    var newBase = BumpBaseVersion(state.Base);
+    return nextPhase switch
+    {
+        "rtm" => new VersionState(newBase, "rtm", 0, 0, "none"),
+        _ => new VersionState(newBase, nextPhase, 1, 0, "none"),
     };
 }
 
