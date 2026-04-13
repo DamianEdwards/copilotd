@@ -7,11 +7,10 @@ using Microsoft.Extensions.Logging;
 namespace Copilotd.Infrastructure;
 
 /// <summary>
-/// Verifies provenance (Authenticode signature + certificate chain) of downloaded binaries
-/// by writing the embedded PowerShell verification script to a temp file and executing it.
-/// The temp file uses a random name and is deleted immediately after use.
-/// Also handles SHA256 checksum and release-metadata.json validation.
-/// Windows-only; no-ops on other platforms.
+/// Verifies provenance of downloaded binaries.
+/// Windows: Authenticode signature + certificate chain via embedded PowerShell script.
+/// Linux/macOS: GitHub artifact attestations via <c>gh attestation verify</c>.
+/// Also handles SHA256 checksum and release-metadata.json validation (cross-platform).
 /// </summary>
 public sealed class ProvenanceVerifier
 {
@@ -24,23 +23,104 @@ public sealed class ProvenanceVerifier
     }
 
     /// <summary>
-    /// Verifies the Authenticode signature and certificate chain of a binary
-    /// by writing the embedded verify-provenance.ps1 to a temp file and executing it.
+    /// Verifies provenance of a binary file.
+    /// On Windows: Authenticode signature and certificate chain via embedded PowerShell script.
+    /// On Linux/macOS: GitHub artifact attestation via <c>gh attestation verify</c>.
     /// </summary>
     /// <returns>True if verification passed, false if it failed.</returns>
     public async Task<(bool Success, string? Error)> VerifyBinaryTrustAsync(string binaryPath, CancellationToken ct)
     {
-        if (!OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows())
+            return await VerifyAuthenticodeAsync(binaryPath, ct);
+
+        return await VerifyAttestationAsync(binaryPath, ct);
+    }
+
+    /// <summary>
+    /// Verifies GitHub artifact attestation for a file using <c>gh attestation verify</c>.
+    /// Used on Linux/macOS where Authenticode is not available.
+    /// Mirrors the verification done by <c>install-copilotd.sh</c>.
+    /// </summary>
+    public async Task<(bool Success, string? Error)> VerifyAttestationAsync(string filePath, CancellationToken ct)
+    {
+        _logger.LogInformation("Verifying artifact attestation for '{FilePath}'", filePath);
+
+        var repo = GitHubReleaseService.Repository;
+        var args = $"attestation verify \"{filePath}\""
+            + $" -R {repo}"
+            + $" --signer-repo {repo}"
+            + " --source-ref refs/heads/main";
+
+        var psi = new ProcessStartInfo
         {
-            _logger.LogDebug("Skipping provenance verification on non-Windows platform");
-            return (true, null);
+            FileName = "gh",
+            Arguments = args,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(VerifyTimeout);
+
+        Process process;
+        try
+        {
+            process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start gh process");
+        }
+        catch (Exception ex)
+        {
+            var msg = $"Failed to start gh CLI for attestation verification: {ex.Message}";
+            _logger.LogWarning("{Message}", msg);
+            return (false, msg);
         }
 
+        using (process)
+        {
+            var stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
+
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogWarning("Attestation verification timed out after {Timeout}s", VerifyTimeout.TotalSeconds);
+                process.Kill();
+                return (false, "Attestation verification timed out");
+            }
+
+            if (process.ExitCode == 0)
+            {
+                _logger.LogInformation("Artifact attestation verification passed for '{FilePath}'", filePath);
+                return (true, null);
+            }
+
+            // gh attestation verify outputs errors to stderr
+            var stderr = await stderrTask;
+            var stdout = await stdoutTask;
+            var error = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim()
+                : !string.IsNullOrWhiteSpace(stdout) ? stdout.Trim()
+                : "Attestation verification failed";
+
+            _logger.LogWarning("Attestation verification failed for '{FilePath}': {Error}", filePath, error);
+            return (false, error);
+        }
+    }
+
+    /// <summary>
+    /// Verifies the Authenticode signature and certificate chain of a binary (Windows only)
+    /// by writing the embedded verify-provenance.ps1 to a temp file and executing it.
+    /// </summary>
+    private async Task<(bool Success, string? Error)> VerifyAuthenticodeAsync(string binaryPath, CancellationToken ct)
+    {
         var scriptContent = GetEmbeddedScript();
         if (scriptContent is null)
             return (false, "Failed to load embedded verification script");
 
-        _logger.LogInformation("Verifying provenance of '{BinaryPath}'", binaryPath);
+        _logger.LogInformation("Verifying Authenticode provenance of '{BinaryPath}'", binaryPath);
 
         // Write the embedded script to a temp file for execution. We use a temp file
         // because -EncodedCommand exceeds the 32K command-line limit and -Command -
@@ -67,7 +147,7 @@ public sealed class ProvenanceVerifier
             var stderrTask = process.StandardError.ReadToEndAsync(timeoutCts.Token);
             var stdoutTask = process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
 
-        try
+            try
             {
                 await process.WaitForExitAsync(timeoutCts.Token);
             }

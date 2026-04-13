@@ -16,7 +16,6 @@ public sealed record UpdateCheckResult(
 
 /// <summary>
 /// Orchestrates the self-update lifecycle: check → download → verify → stage → install.
-/// Windows-only; no-ops on other platforms.
 /// </summary>
 public sealed class UpdateService
 {
@@ -51,12 +50,6 @@ public sealed class UpdateService
     /// </summary>
     public UpdateCheckResult? CheckForUpdate(bool allowPreRelease)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            _logger.LogDebug("Self-update is only supported on Windows");
-            return null;
-        }
-
         var currentVersionStr = VersionHelper.GetCurrentVersion();
         if (currentVersionStr is null || !VersionHelper.TryParse(currentVersionStr, out var currentVersion))
         {
@@ -69,7 +62,7 @@ public sealed class UpdateService
             : VersionHelper.IsStableBuild(currentVersion) && !allowPreRelease ? "Stable"
             : "PreRelease";
 
-        var assetName = GitHubReleaseService.GetWindowsAssetName();
+        var assetName = GitHubReleaseService.GetPlatformAssetName();
         var release = _releaseService.GetLatestRelease(quality, assetName);
         if (release is null)
         {
@@ -131,7 +124,7 @@ public sealed class UpdateService
         state.CurrentReleaseTag = update.ReleaseTag;
         _stateStore.SaveUpdateState(state);
 
-        var assetName = GitHubReleaseService.GetWindowsAssetName();
+        var assetName = GitHubReleaseService.GetPlatformAssetName();
         var tempRoot = Path.Combine(Path.GetTempPath(), $"copilotd-update-{Guid.NewGuid():N}");
 
         try
@@ -179,10 +172,21 @@ public sealed class UpdateService
                 }
             }
 
+            // Verify provenance of archive before extraction (skip for dev builds)
+            if (!update.IsDevBuild && !skipProvenance)
+            {
+                var (archiveTrustOk, archiveTrustErr) = await _provenanceVerifier.VerifyBinaryTrustAsync(archivePath, ct);
+                if (!archiveTrustOk)
+                {
+                    RecordFailure(state, archiveTrustErr ?? "Archive provenance verification failed");
+                    return false;
+                }
+            }
+
             // Extract archive
             var extractedBinary = GitHubReleaseService.ExtractReleaseArchive(archivePath, extractPath);
 
-            // Verify Authenticode provenance of extracted binary (skip for dev builds)
+            // Verify provenance of extracted binary (skip for dev builds)
             if (!update.IsDevBuild && !skipProvenance)
             {
                 var (trustOk, trustErr) = await _provenanceVerifier.VerifyBinaryTrustAsync(extractedBinary, ct);
@@ -197,9 +201,16 @@ public sealed class UpdateService
             var currentExePath = Environment.ProcessPath
                 ?? throw new InvalidOperationException("Cannot determine current executable path");
             var installDir = Path.GetDirectoryName(currentExePath)!;
-            var stagedPath = Path.Combine(installDir, "copilotd.exe.staged");
+            var binaryName = OperatingSystem.IsWindows() ? "copilotd.exe" : "copilotd";
+            var stagedPath = Path.Combine(installDir, $"{binaryName}.staged");
 
             File.Copy(extractedBinary, stagedPath, overwrite: true);
+
+            // Ensure the staged binary is executable on Unix
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(stagedPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                    | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             state.Status = UpdateStatus.Staged;
             state.StagedVersion = update.AvailableVersion;
@@ -289,7 +300,7 @@ public sealed class UpdateService
             _logger.LogInformation("Waiting for daemon (PID {Pid}) to exit...", daemonPid.Value.Pid);
             if (!await WaitForProcessExitAsync(daemonPid.Value.Pid, daemonPid.Value.StartTime, DaemonExitTimeout, ct))
             {
-                // Try graceful shutdown first via shutdown-instance helper
+                // Try graceful shutdown first
                 _logger.LogWarning("Daemon did not exit within timeout, attempting graceful shutdown");
                 if (!TryGracefulShutdown(daemonPid.Value.Pid))
                 {
@@ -313,15 +324,13 @@ public sealed class UpdateService
         var currentExePath = Environment.ProcessPath
             ?? throw new InvalidOperationException("Cannot determine current executable path");
         var installDir = Path.GetDirectoryName(currentExePath)!;
-        var targetPath = Path.Combine(installDir, "copilotd.exe");
-        var oldPath = Path.Combine(installDir, "copilotd.exe.old");
+        var binaryName = OperatingSystem.IsWindows() ? "copilotd.exe" : "copilotd";
+        var targetPath = Path.Combine(installDir, binaryName);
+        var oldPath = Path.Combine(installDir, $"{binaryName}.old");
 
-        // The install process itself is copilotd.exe, so we can't replace ourselves directly.
-        // But we CAN replace the target if we're running from a different path (the staged copy).
-        // However, if running as the target binary, Windows allows renaming the running executable.
         try
         {
-            // Rename current → old (Windows allows renaming running executables)
+            // Rename current → old
             if (File.Exists(targetPath))
             {
                 if (File.Exists(oldPath))
@@ -333,6 +342,12 @@ public sealed class UpdateService
             // Move staged → target
             File.Move(state.StagedPath, targetPath);
             _logger.LogDebug("Moved staged binary to '{Target}'", targetPath);
+
+            // Ensure the installed binary is executable on Unix
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(targetPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                    | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             // Success — clear update state
             _stateStore.ClearUpdateState();
@@ -433,7 +448,8 @@ public sealed class UpdateService
         var currentExePath = Environment.ProcessPath;
         if (currentExePath is null) return;
 
-        var oldPath = Path.Combine(Path.GetDirectoryName(currentExePath)!, "copilotd.exe.old");
+        var binaryName = OperatingSystem.IsWindows() ? "copilotd.exe" : "copilotd";
+        var oldPath = Path.Combine(Path.GetDirectoryName(currentExePath)!, $"{binaryName}.old");
         if (File.Exists(oldPath))
         {
             try
@@ -459,11 +475,15 @@ public sealed class UpdateService
     }
 
     /// <summary>
-    /// Attempts graceful shutdown of the daemon by spawning <c>copilotd shutdown-instance --pid</c>.
-    /// This mirrors the graceful shutdown logic used elsewhere in the codebase.
+    /// Attempts graceful shutdown of the daemon.
+    /// Windows: spawns <c>copilotd shutdown-instance --pid</c> (required for console attachment).
+    /// Unix: sends SIGINT directly via <c>libc kill()</c>.
     /// </summary>
     private bool TryGracefulShutdown(int pid)
     {
+        if (!OperatingSystem.IsWindows())
+            return TryGracefulShutdownUnix(pid);
+
         var copilotdPath = Environment.ProcessPath;
         if (copilotdPath is null)
         {
@@ -520,6 +540,68 @@ public sealed class UpdateService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Graceful shutdown attempt failed");
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Sends SIGINT to the daemon process on Unix for graceful shutdown,
+    /// followed by SIGKILL if the process doesn't exit promptly.
+    /// </summary>
+    private bool TryGracefulShutdownUnix(int pid)
+    {
+        _logger.LogDebug("Sending SIGINT to daemon PID {Pid}", pid);
+        try
+        {
+            // Send SIGINT for graceful shutdown
+            if (NativeInterop.sys_kill(pid, NativeInterop.SIGINT) != 0)
+            {
+                _logger.LogDebug("SIGINT failed for PID {Pid}", pid);
+                return false;
+            }
+
+            // Wait up to 10 seconds for the process to exit
+            for (var i = 0; i < 20; i++)
+            {
+                Thread.Sleep(500);
+                try
+                {
+                    var proc = System.Diagnostics.Process.GetProcessById(pid);
+                    if (proc.HasExited)
+                    {
+                        _logger.LogInformation("Daemon PID {Pid} terminated via SIGINT", pid);
+                        return true;
+                    }
+                    proc.Dispose();
+                }
+                catch (ArgumentException)
+                {
+                    // Process not found = already exited
+                    _logger.LogInformation("Daemon PID {Pid} terminated via SIGINT", pid);
+                    return true;
+                }
+            }
+
+            // Fallback: SIGKILL
+            _logger.LogWarning("Daemon did not exit after SIGINT, sending SIGKILL to PID {Pid}", pid);
+            NativeInterop.sys_kill(pid, NativeInterop.SIGKILL);
+            Thread.Sleep(1000);
+
+            try
+            {
+                var proc = System.Diagnostics.Process.GetProcessById(pid);
+                if (proc.HasExited) return true;
+                proc.Dispose();
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Unix graceful shutdown attempt failed");
         }
 
         return false;

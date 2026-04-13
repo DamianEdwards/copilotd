@@ -17,7 +17,7 @@ public static class UpdateCommand
 
     public static Command Create(IServiceProvider services)
     {
-        var command = new Command("update", "Check for and install updates (Windows only)");
+        var command = new Command("update", "Check for and install updates");
 
         var checkOption = new Option<bool>("--check")
         {
@@ -29,7 +29,7 @@ public static class UpdateCommand
         };
         var skipProvenanceOption = new Option<bool>("--skip-provenance-checks")
         {
-            Description = "Disable Authenticode signature verification"
+            Description = "Disable provenance verification (Authenticode on Windows, attestation on Linux/macOS)"
         };
         var dryRunOption = new Option<bool>("--dry-run")
         {
@@ -52,12 +52,6 @@ public static class UpdateCommand
             var logger = services.GetRequiredService<ILogger<Program>>();
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
-                if (!OperatingSystem.IsWindows())
-                {
-                    ConsoleOutput.Warning("Self-updating is currently only supported on Windows.");
-                    return 1;
-                }
-
                 var updateService = services.GetRequiredService<UpdateService>();
                 var stateStore = services.GetRequiredService<StateStore>();
 
@@ -148,7 +142,7 @@ public static class UpdateCommand
         {
             ConsoleOutput.Info("[dry-run] Would download, verify, and install this update.");
             ConsoleOutput.Info($"[dry-run] Release tag: {update.ReleaseTag}, Dev build: {update.IsDevBuild}");
-            ConsoleOutput.Info($"[dry-run] Authenticode verification: {(update.IsDevBuild || skipProvenance ? "skipped" : "enabled")}");
+            ConsoleOutput.Info($"[dry-run] Provenance verification: {(update.IsDevBuild || skipProvenance ? "skipped" : "enabled")}");
             ConsoleOutput.Info($"[dry-run] Checksum verification: enabled");
             return 0;
         }

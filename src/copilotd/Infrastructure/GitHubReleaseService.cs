@@ -259,16 +259,54 @@ public sealed class GitHubReleaseService
     }
 
     /// <summary>
-    /// Extracts a ZIP archive to a destination directory.
+    /// Extracts a release archive to a destination directory.
+    /// Handles ZIP (Windows) and tar.gz (Linux/macOS) formats.
     /// </summary>
     public static string ExtractReleaseArchive(string archivePath, string destinationDir)
     {
         Directory.CreateDirectory(destinationDir);
-        ZipFile.ExtractToDirectory(archivePath, destinationDir, overwriteFiles: true);
 
-        var binaryPath = Path.Combine(destinationDir, "copilotd.exe");
+        var binaryName = OperatingSystem.IsWindows() ? "copilotd.exe" : "copilotd";
+
+        if (archivePath.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
+        {
+            // Use tar for extraction on Unix — preserves file permissions
+            var psi = new ProcessStartInfo
+            {
+                FileName = "tar",
+                Arguments = $"-xzf \"{archivePath}\" -C \"{destinationDir}\"",
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start tar process");
+            var stderr = process.StandardError.ReadToEnd();
+
+            if (!process.WaitForExit(60_000))
+            {
+                process.Kill();
+                throw new TimeoutException("tar extraction timed out after 60 seconds");
+            }
+
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException($"tar extraction failed (exit code {process.ExitCode}): {stderr}");
+        }
+        else
+        {
+            ZipFile.ExtractToDirectory(archivePath, destinationDir, overwriteFiles: true);
+        }
+
+        var binaryPath = Path.Combine(destinationDir, binaryName);
         if (!File.Exists(binaryPath))
-            throw new FileNotFoundException($"Archive did not contain copilotd.exe", binaryPath);
+            throw new FileNotFoundException($"Archive did not contain {binaryName}", binaryPath);
+
+        // Ensure the binary is executable on Unix
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(binaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
         return binaryPath;
     }
@@ -276,17 +314,31 @@ public sealed class GitHubReleaseService
     /// <summary>
     /// Gets the architecture-specific asset name for the current platform.
     /// </summary>
-    public static string GetWindowsAssetName()
+    public static string GetPlatformAssetName()
     {
-        var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
+        var arch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
         var archStr = arch switch
         {
             System.Runtime.InteropServices.Architecture.X64 => "x64",
             System.Runtime.InteropServices.Architecture.Arm64 => "arm64",
             _ => throw new PlatformNotSupportedException($"Unsupported architecture: {arch}")
         };
-        return $"copilotd-win-{archStr}.zip";
+
+        if (OperatingSystem.IsWindows())
+            return $"copilotd-win-{archStr}.zip";
+        if (OperatingSystem.IsMacOS())
+            return $"copilotd-osx-{archStr}.tar.gz";
+        if (OperatingSystem.IsLinux())
+            return $"copilotd-linux-{archStr}.tar.gz";
+
+        throw new PlatformNotSupportedException("Unsupported operating system");
     }
+
+    /// <summary>
+    /// Gets the architecture-specific asset name for Windows.
+    /// </summary>
+    [Obsolete("Use GetPlatformAssetName() instead")]
+    public static string GetWindowsAssetName() => GetPlatformAssetName();
 
     private static bool ReleaseHasAsset(JsonElement release, string assetName)
     {
