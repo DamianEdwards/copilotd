@@ -158,48 +158,35 @@ in both the built-in and custom prompt text. Per-rule extra prompts are appended
 
 Each dispatched copilot session follows a state machine:
 
-```
-                 ┌──────────────────────────────────────────────┐
-                 │                                              │
-  new issue      ▼     launch        process alive              │
-  matched ──► Pending ──► Dispatching ──► Running               │
-                 ▲                        │   │                 │
-                 │                        │   │  user takes     │
-      retry      │   process died         │   │  over           │
-   (≤3 times)    │◄──── Orphaned ◄────────┘   │                 │
-                 │          │                  ▼                 │
-                 │          │ max          Joined                │
-                 │          │ retries       │  │                 │
-                 │          ▼               │  │ user exits      │
-                 │       Failed            │  └────────────────►│
-                 │                         │                     │
-                 │   issue closed/         │  copilot calls      │
-                 │   unmatched             │  session complete    │
-                 │◄──── Completed ◄────────┴─────────────────────┘
-                 │      (auto)                   (explicit)
-                 │
-                 │                   copilot calls
-                 │                   session comment
-                 │◄── WaitingForFeedback ◄───────────────────────┘
-                      │          ▲
-          new comment │          │ no new comments
-          detected    │          │ (keeps waiting)
-                      ▼          │
-                    Pending ─────┘
-                 │
-                 │                   copilot calls
-                 │                   session pr
-                 │◄── WaitingForReview ◄─────────────────────────┘
-                      │          ▲
-      review comment  │          │ no new reviews
-      detected        │          │ (keeps waiting)
-                      ▼          │
-                    Pending ─────┘
-                      │
-                PR merged/closed → Completed (auto)
-                 │
-          re-opened / re-matched
-          (only if not explicitly completed)
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : Issue matches rule
+
+    Pending --> Dispatching : Launch
+    Dispatching --> Running : Process alive
+    Dispatching --> Failed : Launch failed
+
+    Running --> Orphaned : Process died
+    Running --> Joined : User takes over
+    Running --> Completed : Issue closed/unmatched (auto)
+    Running --> WaitingForFeedback : session comment
+    Running --> WaitingForReview : session pr
+
+    Orphaned --> Pending : Retry (≤3 times)
+    Orphaned --> Failed : Max retries exceeded
+
+    Joined --> Pending : User exits
+
+    WaitingForFeedback --> Pending : New comment detected
+    WaitingForFeedback --> Completed : Issue unmatched
+
+    WaitingForReview --> Pending : Review feedback detected
+    WaitingForReview --> Completed : PR merged/closed
+
+    Completed --> Pending : Re-matched (not explicitly completed)
+    Failed --> Pending : Re-matched (retries remaining)
+
+    Running --> Completed : session complete (explicit)
 ```
 
 ### State transitions
