@@ -39,6 +39,27 @@ public sealed class GhCliService
     }
 
     /// <summary>
+    /// Returns the gh CLI version string, or null if unavailable.
+    /// </summary>
+    public string? GetVersion()
+    {
+        try
+        {
+            var (exitCode, output) = RunGh("--version");
+            if (exitCode != 0) return null;
+
+            // Output is like "gh version 2.50.0 (2024-05-29)"
+            var trimmed = output.Trim();
+            var idx = trimmed.IndexOf('\n');
+            return idx > 0 ? trimmed[..idx].Trim() : trimmed;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Checks whether gh is authenticated and returns the current username.
     /// </summary>
     public (bool IsLoggedIn, string? Username) CheckAuth()

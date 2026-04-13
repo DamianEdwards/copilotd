@@ -32,6 +32,26 @@ public sealed class CopilotCliService
     }
 
     /// <summary>
+    /// Returns the copilot CLI version string, or null if unavailable.
+    /// </summary>
+    public string? GetVersion()
+    {
+        try
+        {
+            var (exitCode, output) = RunCopilot("--version");
+            if (exitCode != 0) return null;
+
+            var trimmed = output.Trim();
+            var idx = trimmed.IndexOf('\n');
+            return idx > 0 ? trimmed[..idx].Trim() : trimmed;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Best-effort check for copilot login status.
     /// Since copilot CLI has no "login status" command, we attempt a lightweight
     /// operation and check if it fails with auth errors.

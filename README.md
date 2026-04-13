@@ -44,7 +44,18 @@ gh release download install-scripts -R DamianEdwards/copilotd -p install.sh -O -
 
 ## Running
 
-Run `copilotd init` to configure watched repos then run `copilotd run` to start the daemon. Run `copilotd --help` for other commands.
+Run `copilotd init` to configure watched repos then run `copilotd run` to start the daemon.
+
+The `init` command is an interactive wizard that walks you through:
+1. **Dependency & auth checks** — verifies `gh` and `copilot` CLIs are installed (showing versions) and authenticated
+2. **Repo home** — where your repository clones live on disk
+3. **Global settings** — max concurrent sessions, default model
+4. **Default rule** — author filtering, required labels, tool permissions (yolo/allow-all-tools/allow-all-urls), model override
+5. **Repository selection** — pick which repos to watch (shows clone status)
+
+After setup, a configuration summary and concrete next-step commands are displayed.
+
+Run `copilotd --help` for other commands.
 
 ## Building from source
 
@@ -73,7 +84,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 
 | Command | Description |
 |---------|-------------|
-| `copilotd init` | Interactive first-run setup (dependency checks, auth, repo selection, default rule) |
+| `copilotd init` | Interactive first-run wizard (dependency checks with versions, auth, global config, rule setup, repo selection) |
 | `copilotd run` | Start the polling daemon |
 | `copilotd status` | Show daemon health, watched repos, and session list |
 | `copilotd session` | List dispatched sessions (alias for `session list`) |
