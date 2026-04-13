@@ -74,7 +74,6 @@ public sealed class ProvenanceVerifier
     {
         var args = $"attestation verify \"{filePath}\""
             + $" -R {repo}"
-            + $" --signer-repo {repo}"
             + $" --signer-workflow {signerWorkflow}"
             + " --source-ref refs/heads/main";
 

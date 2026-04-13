@@ -375,7 +375,6 @@ assert_artifact_attestation() {
     local exit_code=0
     output=$(gh attestation verify "$file_path" \
         -R "$repo" \
-        --signer-repo "$repo" \
         --signer-workflow "${repo}/.github/workflows/ci.yml" \
         --source-ref "refs/heads/main" \
         2>&1) || exit_code=$?
