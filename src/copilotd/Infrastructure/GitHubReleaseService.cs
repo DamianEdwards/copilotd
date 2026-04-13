@@ -334,11 +334,6 @@ public sealed class GitHubReleaseService
         throw new PlatformNotSupportedException("Unsupported operating system");
     }
 
-    /// <summary>
-    /// Gets the architecture-specific asset name for Windows.
-    /// </summary>
-    [Obsolete("Use GetPlatformAssetName() instead")]
-    public static string GetWindowsAssetName() => GetPlatformAssetName();
 
     private static bool ReleaseHasAsset(JsonElement release, string assetName)
     {

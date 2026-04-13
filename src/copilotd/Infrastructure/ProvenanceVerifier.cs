@@ -40,15 +40,42 @@ public sealed class ProvenanceVerifier
     /// Verifies GitHub artifact attestation for a file using <c>gh attestation verify</c>.
     /// Used on Linux/macOS where Authenticode is not available.
     /// Mirrors the verification done by <c>install-copilotd.sh</c>.
+    /// Tries both the CI and bump-version workflows since either may have produced the release.
     /// </summary>
     public async Task<(bool Success, string? Error)> VerifyAttestationAsync(string filePath, CancellationToken ct)
     {
         _logger.LogInformation("Verifying artifact attestation for '{FilePath}'", filePath);
 
         var repo = GitHubReleaseService.Repository;
+
+        // Try each workflow that produces attested release assets
+        string[] signerWorkflows =
+        [
+            $"{repo}/.github/workflows/ci.yml",
+            $"{repo}/.github/workflows/bump-version.yml",
+        ];
+
+        string? lastError = null;
+        foreach (var workflow in signerWorkflows)
+        {
+            var (success, error) = await RunAttestationVerifyAsync(filePath, repo, workflow, ct);
+            if (success)
+                return (true, null);
+            lastError = error;
+            _logger.LogDebug("Attestation verification with workflow '{Workflow}' did not match, trying next", workflow);
+        }
+
+        _logger.LogWarning("Attestation verification failed for '{FilePath}': {Error}", filePath, lastError);
+        return (false, lastError ?? "Attestation verification failed");
+    }
+
+    private async Task<(bool Success, string? Error)> RunAttestationVerifyAsync(
+        string filePath, string repo, string signerWorkflow, CancellationToken ct)
+    {
         var args = $"attestation verify \"{filePath}\""
             + $" -R {repo}"
             + $" --signer-repo {repo}"
+            + $" --signer-workflow {signerWorkflow}"
             + " --source-ref refs/heads/main";
 
         var psi = new ProcessStartInfo
@@ -98,14 +125,12 @@ public sealed class ProvenanceVerifier
                 return (true, null);
             }
 
-            // gh attestation verify outputs errors to stderr
             var stderr = await stderrTask;
             var stdout = await stdoutTask;
             var error = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim()
                 : !string.IsNullOrWhiteSpace(stdout) ? stdout.Trim()
                 : "Attestation verification failed";
 
-            _logger.LogWarning("Attestation verification failed for '{FilePath}': {Error}", filePath, error);
             return (false, error);
         }
     }
