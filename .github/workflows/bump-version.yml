@@ -127,6 +127,11 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
 
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -139,6 +144,15 @@ jobs:
       - name: Publish native asset
         shell: pwsh
         run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.version }}' -ArtifactsDirectory './artifacts/dev'
+
+      - name: Attest build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
+        with:
+          subject-path: './artifacts/dev/*'
+
+      - name: Remove attestation-only binaries
+        shell: bash
+        run: rm -f ./artifacts/dev/copilotd-${{ matrix.rid }} ./artifacts/dev/copilotd-${{ matrix.rid }}.exe
 
       - name: Upload dev artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
@@ -168,6 +182,11 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
 
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -180,6 +199,15 @@ jobs:
       - name: Publish native asset
         shell: pwsh
         run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.rc_version }}' -ArtifactsDirectory './artifacts/rc'
+
+      - name: Attest build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
+        with:
+          subject-path: './artifacts/rc/*'
+
+      - name: Remove attestation-only binaries
+        shell: bash
+        run: rm -f ./artifacts/rc/copilotd-${{ matrix.rid }} ./artifacts/rc/copilotd-${{ matrix.rid }}.exe
 
       - name: Upload RC artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
