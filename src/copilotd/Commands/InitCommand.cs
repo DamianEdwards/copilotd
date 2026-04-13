@@ -170,6 +170,7 @@ public static class InitCommand
                         .Title("Who can create issues that copilotd will dispatch?")
                         .AddChoices(authorChoices)
                         .HighlightStyle(new Style(Color.Blue)));
+                AnsiConsole.MarkupLine($"  Issue authors: [blue]{Markup.Escape(authorChoice)}[/]");
 
                 AuthorMode authorMode;
                 List<string> authors = [];
@@ -200,12 +201,14 @@ public static class InitCommand
                     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
+                AnsiConsole.MarkupLine($"  Labels: [blue]{Markup.Escape(string.Join(", ", labels))}[/]");
                 AnsiConsole.WriteLine();
 
                 // Yolo / tool permissions
                 AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools and --allow-all-urls).[/]");
                 var existingYolo = existingRule?.Yolo ?? false;
                 var yolo = AnsiConsole.Confirm("Enable yolo mode?", existingYolo);
+                AnsiConsole.MarkupLine($"  Yolo mode: [blue]{(yolo ? "yes" : "no")}[/]");
 
                 bool allowAllTools = true;
                 bool allowAllUrls = false;
@@ -213,8 +216,10 @@ public static class InitCommand
                 {
                     AnsiConsole.MarkupLine("[grey]Allow copilot to use all available tools without prompting.[/]");
                     allowAllTools = AnsiConsole.Confirm("Allow all tools?", existingRule?.AllowAllTools ?? true);
+                    AnsiConsole.MarkupLine($"  Allow all tools: [blue]{(allowAllTools ? "yes" : "no")}[/]");
                     AnsiConsole.MarkupLine("[grey]Allow copilot to access any URL without prompting.[/]");
                     allowAllUrls = AnsiConsole.Confirm("Allow all URLs?", existingRule?.AllowAllUrls ?? false);
+                    AnsiConsole.MarkupLine($"  Allow all URLs: [blue]{(allowAllUrls ? "yes" : "no")}[/]");
                 }
                 AnsiConsole.WriteLine();
 
@@ -226,6 +231,7 @@ public static class InitCommand
                         .DefaultValue(existingRuleModel)
                         .AllowEmpty());
                 var ruleModel = string.IsNullOrWhiteSpace(ruleModelInput) ? null : ruleModelInput.Trim();
+                AnsiConsole.MarkupLine($"  Model override: [blue]{Markup.Escape(ruleModel ?? "(inherit global)")}[/]");
                 AnsiConsole.WriteLine();
 
                 // Build the default rule
