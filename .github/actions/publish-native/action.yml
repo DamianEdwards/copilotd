@@ -1,0 +1,44 @@
+name: Publish Native Asset
+description: Publish a NativeAOT binary, attest provenance, and upload as an artifact.
+
+inputs:
+  runtime-identifier:
+    description: The .NET runtime identifier to publish for (e.g., win-x64, linux-arm64).
+    required: true
+  version:
+    description: Semantic version to inject into the publish.
+    required: true
+  artifacts-directory:
+    description: Directory to place the published assets in.
+    required: true
+  artifact-name:
+    description: Name for the uploaded GitHub Actions artifact.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Publish native asset
+      shell: pwsh
+      run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ inputs.runtime-identifier }}' -Version '${{ inputs.version }}' -ArtifactsDirectory '${{ inputs.artifacts-directory }}'
+
+    - name: Attest build provenance
+      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
+      with:
+        subject-path: '${{ inputs.artifacts-directory }}/*'
+
+    - name: Remove attestation-only binaries
+      shell: bash
+      run: rm -f ${{ inputs.artifacts-directory }}/copilotd-${{ inputs.runtime-identifier }} ${{ inputs.artifacts-directory }}/copilotd-${{ inputs.runtime-identifier }}.exe
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.artifacts-directory }}/*
+        retention-days: 90

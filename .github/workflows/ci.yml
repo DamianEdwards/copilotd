@@ -143,30 +143,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
-        with:
-          dotnet-version: '10.0.x'
-
       - name: Publish native asset
-        shell: pwsh
-        run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.version }}' -ArtifactsDirectory './artifacts/dev'
-
-      - name: Attest build provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
+        uses: ./.github/actions/publish-native
         with:
-          subject-path: './artifacts/dev/*'
-
-      - name: Remove attestation-only binaries
-        shell: bash
-        run: rm -f ./artifacts/dev/copilotd-${{ matrix.rid }} ./artifacts/dev/copilotd-${{ matrix.rid }}.exe
-
-      - name: Upload dev artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
-        with:
-          name: native-dev-${{ matrix.rid }}
-          path: ./artifacts/dev/*
-          retention-days: 90
+          runtime-identifier: ${{ matrix.rid }}
+          version: ${{ needs.version.outputs.version }}
+          artifacts-directory: './artifacts/dev'
+          artifact-name: native-dev-${{ matrix.rid }}
 
   publish-rc:
     needs: [version, build]
@@ -198,30 +181,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7
-        with:
-          dotnet-version: '10.0.x'
-
       - name: Publish native asset
-        shell: pwsh
-        run: ./scripts/Publish-NativeAsset.ps1 -RuntimeIdentifier '${{ matrix.rid }}' -Version '${{ needs.version.outputs.rc_version }}' -ArtifactsDirectory './artifacts/rc'
-
-      - name: Attest build provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26
+        uses: ./.github/actions/publish-native
         with:
-          subject-path: './artifacts/rc/*'
-
-      - name: Remove attestation-only binaries
-        shell: bash
-        run: rm -f ./artifacts/rc/copilotd-${{ matrix.rid }} ./artifacts/rc/copilotd-${{ matrix.rid }}.exe
-
-      - name: Upload RC artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
-        with:
-          name: native-rc-${{ matrix.rid }}
-          path: ./artifacts/rc/*
-          retention-days: 90
+          runtime-identifier: ${{ matrix.rid }}
+          version: ${{ needs.version.outputs.rc_version }}
+          artifacts-directory: './artifacts/rc'
+          artifact-name: native-rc-${{ matrix.rid }}
 
   bundle-dev:
     runs-on: ubuntu-latest
@@ -257,55 +223,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -euo pipefail
-
-          VERSION='${{ needs.version.outputs.version }}'
-          RC_VERSION='${{ needs.version.outputs.rc_version }}'
-          NEXT_STATE='${{ needs.version.outputs.next_state }}'
-          NOTES=$(cat <<EOF
-          ## Development Build
-
-          **Dev Version:** ${VERSION}
-          **RC Version:** ${RC_VERSION}
-          **Commit:** ${{ github.sha }}
-          **Build:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-          This draft release contains the latest native development assets and carries the workflow-managed version state.
-
-          <!-- VERSION_STATE: ${NEXT_STATE} -->
-          <!-- RC_VERSION: ${RC_VERSION} -->
-          <!-- CI_RUN_ID: ${{ github.run_id }} -->
-          EOF
-          )
-
-          if gh release view dev --repo "${{ github.repository }}" --json isDraft &>/dev/null; then
-            gh release edit dev \
-              --repo "${{ github.repository }}" \
-              --draft \
-              --prerelease \
-              --title "Development Build" \
-              --notes "$NOTES"
-
-            while IFS= read -r asset; do
-              if [ -n "$asset" ]; then
-                gh release delete-asset dev "$asset" --repo "${{ github.repository }}" --yes
-              fi
-            done < <(gh release view dev --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
-
-            gh release upload dev \
-              --repo "${{ github.repository }}" \
-              ./bundle/dev/* \
-              --clobber
-          else
-            gh release create dev \
-              --repo "${{ github.repository }}" \
-              --target "${{ github.sha }}" \
-              --draft \
-              --prerelease \
-              --title "Development Build" \
-              --notes "$NOTES" \
-              ./bundle/dev/*
-          fi
+          ./scripts/update-dev-release.sh \
+            '${{ needs.version.outputs.version }}' \
+            '${{ needs.version.outputs.rc_version }}' \
+            '${{ needs.version.outputs.next_state }}' \
+            './bundle/dev' \
+            'This draft release contains the latest native development assets and carries the workflow-managed version state.'
 
   bundle-rc:
     runs-on: ubuntu-latest

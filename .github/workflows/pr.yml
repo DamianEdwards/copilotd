@@ -3,6 +3,10 @@ name: PR
 on:
   pull_request:
 
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   DOTNET_NOLOGO: true
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
@@ -53,8 +57,6 @@ jobs:
         include:
           - runner: windows-latest
             rid: win-x64
-          - runner: ubuntu-22.04
-            rid: linux-x64
           - runner: ubuntu-22.04-arm
             rid: linux-arm64
           - runner: macos-latest

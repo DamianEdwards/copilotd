@@ -3,6 +3,10 @@ name: Install Scripts
 on:
   workflow_dispatch:
 
+concurrency:
+  group: install-scripts
+  cancel-in-progress: false
+
 jobs:
   sign-install-script:
     runs-on: windows-2022

@@ -14,6 +14,10 @@ on:
           - rc
           - rtm
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   DOTNET_NOLOGO: true
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
