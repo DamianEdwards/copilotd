@@ -340,6 +340,7 @@ jobs:
             --target "${{ github.sha }}" \
             "${PRERELEASE_FLAG[@]}" \
             --title "v${VERSION}" \
+            --generate-notes \
             --notes "## copilotd ${VERSION}
 
           Native release assets for Windows, Linux, and macOS.
