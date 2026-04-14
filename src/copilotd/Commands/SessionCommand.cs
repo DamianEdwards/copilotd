@@ -110,54 +110,73 @@ public static class SessionCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
-                var state = stateStore.LoadState();
                 var config = stateStore.LoadConfig();
+                var repoResolver = services.GetRequiredService<RepoPathResolver>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
+                string? sessionId = null;
+                string? worktreePath = null;
+                string? workingDir = null;
+                var priorProcess = default(TrackedProcessRef);
+                var priorStatus = SessionStatus.Pending;
+                string? errorMessage = null;
 
-                if (!state.Sessions.TryGetValue(issueKey, out var session))
+                stateStore.WithStateLock(() =>
                 {
-                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
-                    ConsoleOutput.Info("Use 'copilotd session list --all' to see all tracked sessions.");
+                    var state = stateStore.LoadState();
+
+                    if (!state.Sessions.TryGetValue(issueKey, out var session))
+                    {
+                        errorMessage = $"No session found for '{issueKey}'.";
+                        return;
+                    }
+
+                    if (string.IsNullOrEmpty(session.CopilotSessionId))
+                    {
+                        errorMessage = $"Session for '{issueKey}' has no copilot session ID.";
+                        return;
+                    }
+
+                    workingDir = session.WorktreePath ?? repoResolver.ResolveRepoPath(session.Repo, config, state);
+                    if (workingDir is null || !Directory.Exists(workingDir))
+                    {
+                        errorMessage = $"Working directory not found for {session.Repo}. Ensure the repository is cloned under the configured RepoHome directory.";
+                        return;
+                    }
+
+                    sessionId = session.CopilotSessionId;
+                    worktreePath = session.WorktreePath;
+                    priorStatus = session.Status;
+
+                    if (session.Status is SessionStatus.Running or SessionStatus.Dispatching or SessionStatus.Joined)
+                        priorProcess = CaptureTrackedProcess(session);
+
+                    session.Status = SessionStatus.Joined;
+                    ClearTrackedProcess(session);
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateStore.SaveState(state);
+                }, ct);
+
+                if (errorMessage is not null)
+                {
+                    ConsoleOutput.Error(errorMessage);
+                    if (errorMessage.StartsWith("No session found", StringComparison.Ordinal))
+                        ConsoleOutput.Info("Use 'copilotd session list --all' to see all tracked sessions.");
                     return 1;
                 }
 
-                if (string.IsNullOrEmpty(session.CopilotSessionId))
+                if (priorProcess.HasProcess)
                 {
-                    ConsoleOutput.Error($"Session for '{issueKey}' has no copilot session ID.");
-                    return 1;
+                    var message = priorStatus is SessionStatus.Joined
+                        ? $"Stopping previously joined interactive session for {issueKey} (PID {priorProcess.ProcessId})..."
+                        : $"Stopping orchestrated session for {issueKey} (PID {priorProcess.ProcessId})...";
+                    ConsoleOutput.Info(message);
+                    processManager.TerminateProcess(priorProcess.Label, priorProcess.ProcessId, priorProcess.ProcessStartTime);
                 }
 
-                // Use worktree path if available, otherwise resolve the main repo
-                var repoResolver = services.GetRequiredService<RepoPathResolver>();
-                var workingDir = session.WorktreePath ?? repoResolver.ResolveRepoPath(session.Repo, config, state);
-                if (workingDir is null || !Directory.Exists(workingDir))
-                {
-                    ConsoleOutput.Error($"Working directory not found for {session.Repo}. Ensure the repository is cloned under the configured RepoHome directory.");
-                    return 1;
-                }
-
-                // If the session is currently running, terminate the orchestrated process first
-                if (session.Status is SessionStatus.Running or SessionStatus.Dispatching)
-                {
-                    ConsoleOutput.Info($"Stopping orchestrated session for {issueKey} (PID {session.ProcessId})...");
-                    processManager.TerminateProcess(session);
-                }
-                else if (session.Status is SessionStatus.Joined)
-                {
-                    ConsoleOutput.Info($"Session was previously joined but not cleaned up. Resuming...");
-                }
-
-                // Mark as Joined so the daemon doesn't interfere
-                session.Status = SessionStatus.Joined;
-                session.ProcessId = null;
-                session.ProcessStartTime = null;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                stateStore.SaveState(state);
-
-                ConsoleOutput.Success($"Joining session {session.CopilotSessionId} for {issueKey}");
-                if (session.WorktreePath is not null)
-                    ConsoleOutput.Info($"Working directory: {session.WorktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)}");
+                ConsoleOutput.Success($"Joining session {sessionId} for {issueKey}");
+                if (worktreePath is not null)
+                    ConsoleOutput.Info($"Working directory: {worktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)}");
                 ConsoleOutput.Info("Press Ctrl+C to exit the interactive session.");
                 Console.WriteLine();
 
@@ -165,7 +184,7 @@ public static class SessionCommand
                 var psi = new ProcessStartInfo
                 {
                     FileName = "copilot",
-                    Arguments = $"--resume={session.CopilotSessionId}",
+                    Arguments = $"--resume={sessionId}",
                     WorkingDirectory = workingDir,
                     UseShellExecute = false,
                     RedirectStandardInput = false,
@@ -186,14 +205,17 @@ public static class SessionCommand
 
                     // Track the interactive process PID so the daemon can detect
                     // if it exits (e.g., terminal killed without cleanup)
-                    state = stateStore.LoadState();
-                    if (state.Sessions.TryGetValue(issueKey, out var tracked))
+                    stateStore.WithStateLock(() =>
                     {
-                        tracked.ProcessId = interactiveProcess.Id;
-                        try { tracked.ProcessStartTime = new DateTimeOffset(interactiveProcess.StartTime.ToUniversalTime(), TimeSpan.Zero); }
-                        catch { tracked.ProcessStartTime = DateTimeOffset.UtcNow; }
-                        stateStore.SaveState(state);
-                    }
+                        var state = stateStore.LoadState();
+                        if (state.Sessions.TryGetValue(issueKey, out var tracked))
+                        {
+                            tracked.ProcessId = interactiveProcess.Id;
+                            try { tracked.ProcessStartTime = new DateTimeOffset(interactiveProcess.StartTime.ToUniversalTime(), TimeSpan.Zero); }
+                            catch { tracked.ProcessStartTime = DateTimeOffset.UtcNow; }
+                            stateStore.SaveState(state);
+                        }
+                    }, ct);
 
                     await interactiveProcess.WaitForExitAsync(ct);
                     var exitCode = interactiveProcess.ExitCode;
@@ -246,39 +268,83 @@ public static class SessionCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var ghCli = services.GetRequiredService<GhCliService>();
-                var state = stateStore.LoadState();
+                var processManager = services.GetRequiredService<ProcessManager>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
                 var message = parseResult.GetValue(messageOption)!;
+                var trackedProcess = default(TrackedProcessRef);
+                string? repo = null;
+                var issueNumber = 0;
+                string? expectedSessionId = null;
+                string? errorMessage = null;
 
-                if (!state.Sessions.TryGetValue(issueKey, out var session))
+                stateStore.WithStateLock(() =>
                 {
-                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
+                    var state = stateStore.LoadState();
+                    if (!state.Sessions.TryGetValue(issueKey, out var session))
+                    {
+                        errorMessage = $"No session found for '{issueKey}'.";
+                        return;
+                    }
+
+                    if (session.IsTerminal)
+                    {
+                        errorMessage = $"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.";
+                        return;
+                    }
+                    repo = session.Repo;
+                    issueNumber = session.IssueNumber;
+                    expectedSessionId = session.CopilotSessionId;
+                }, ct);
+
+                if (errorMessage is not null)
+                {
+                    ConsoleOutput.Error(errorMessage);
                     return 1;
                 }
 
-                if (session.IsTerminal)
-                {
-                    ConsoleOutput.Error($"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.");
-                    return 1;
-                }
-
-                // Post the comment to the issue
-                if (!ghCli.PostIssueComment(session.Repo, session.IssueNumber, message))
+                if (!ghCli.PostIssueComment(repo!, issueNumber, message))
                 {
                     ConsoleOutput.Error($"Failed to post comment on {issueKey}.");
                     return 1;
                 }
 
-                // Transition to WaitingForFeedback. The calling copilot process is
-                // expected to exit on its own after this command returns. We clear the
-                // PID so the reconciler doesn't try to verify a dead process.
-                session.Status = SessionStatus.WaitingForFeedback;
-                session.WaitingSince = DateTimeOffset.UtcNow;
-                session.ProcessId = null;
-                session.ProcessStartTime = null;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                stateStore.SaveState(state);
+                stateStore.WithStateLock(() =>
+                {
+                    var state = stateStore.LoadState();
+                    if (!state.Sessions.TryGetValue(issueKey, out var session))
+                    {
+                        errorMessage = $"Comment posted on {issueKey}, but the session is no longer tracked.";
+                        return;
+                    }
+
+                    if (session.CopilotSessionId != expectedSessionId)
+                    {
+                        errorMessage = $"Comment posted on {issueKey}, but the session was reset before the wait state could be recorded.";
+                        return;
+                    }
+
+                    if (session.IsTerminal)
+                    {
+                        errorMessage = $"Comment posted on {issueKey}, but the session is already {session.Status.ToString().ToLowerInvariant()}.";
+                        return;
+                    }
+
+                    trackedProcess = CaptureTrackedProcess(session);
+                    session.Status = SessionStatus.WaitingForFeedback;
+                    session.WaitingSince = DateTimeOffset.UtcNow;
+                    ClearTrackedProcess(session);
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateStore.SaveState(state);
+                }, ct);
+
+                if (errorMessage is not null)
+                {
+                    ConsoleOutput.Error(errorMessage);
+                    return 1;
+                }
+
+                processManager.TerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime);
 
                 ConsoleOutput.Success($"Comment posted on {issueKey}. Session is now waiting for feedback.");
                 return 0;
@@ -303,28 +369,49 @@ public static class SessionCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
-                var state = stateStore.LoadState();
+                var processManager = services.GetRequiredService<ProcessManager>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
+                var trackedProcess = default(TrackedProcessRef);
+                string? terminalStatus = null;
+                string? errorMessage = null;
 
-                if (!state.Sessions.TryGetValue(issueKey, out var session))
+                stateStore.WithStateLock(() =>
                 {
-                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
+                    var state = stateStore.LoadState();
+                    if (!state.Sessions.TryGetValue(issueKey, out var session))
+                    {
+                        errorMessage = $"No session found for '{issueKey}'.";
+                        return;
+                    }
+
+                    if (session.IsTerminal)
+                    {
+                        terminalStatus = session.Status.ToString().ToLowerInvariant();
+                        return;
+                    }
+
+                    trackedProcess = CaptureTrackedProcess(session);
+                    session.Status = SessionStatus.Completed;
+                    session.CompletedBySession = true;
+                    ClearTrackedProcess(session);
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateStore.SaveState(state);
+                }, ct);
+
+                if (errorMessage is not null)
+                {
+                    ConsoleOutput.Error(errorMessage);
                     return 1;
                 }
 
-                if (session.IsTerminal)
+                if (terminalStatus is not null)
                 {
-                    ConsoleOutput.Info($"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.");
+                    ConsoleOutput.Info($"Session for '{issueKey}' is already {terminalStatus}.");
                     return 0;
                 }
 
-                session.Status = SessionStatus.Completed;
-                session.CompletedBySession = true;
-                session.ProcessId = null;
-                session.ProcessStartTime = null;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                stateStore.SaveState(state);
+                processManager.TerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime);
 
                 ConsoleOutput.Success($"Session for {issueKey} marked as completed.");
                 return 0;
@@ -352,22 +439,10 @@ public static class SessionCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
-                var state = stateStore.LoadState();
+                var processManager = services.GetRequiredService<ProcessManager>();
 
                 var prNumber = parseResult.GetValue(prNumberArg);
                 var issueKey = parseResult.GetValue(issueArg)!;
-
-                if (!state.Sessions.TryGetValue(issueKey, out var session))
-                {
-                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
-                    return 1;
-                }
-
-                if (session.IsTerminal)
-                {
-                    ConsoleOutput.Error($"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.");
-                    return 1;
-                }
 
                 if (prNumber <= 0)
                 {
@@ -375,13 +450,40 @@ public static class SessionCommand
                     return 1;
                 }
 
-                session.PullRequestNumber = prNumber;
-                session.Status = SessionStatus.WaitingForReview;
-                session.WaitingSince = DateTimeOffset.UtcNow;
-                session.ProcessId = null;
-                session.ProcessStartTime = null;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                stateStore.SaveState(state);
+                var trackedProcess = default(TrackedProcessRef);
+                string? errorMessage = null;
+
+                stateStore.WithStateLock(() =>
+                {
+                    var state = stateStore.LoadState();
+                    if (!state.Sessions.TryGetValue(issueKey, out var session))
+                    {
+                        errorMessage = $"No session found for '{issueKey}'.";
+                        return;
+                    }
+
+                    if (session.IsTerminal)
+                    {
+                        errorMessage = $"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.";
+                        return;
+                    }
+
+                    trackedProcess = CaptureTrackedProcess(session);
+                    session.PullRequestNumber = prNumber;
+                    session.Status = SessionStatus.WaitingForReview;
+                    session.WaitingSince = DateTimeOffset.UtcNow;
+                    ClearTrackedProcess(session);
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateStore.SaveState(state);
+                }, ct);
+
+                if (errorMessage is not null)
+                {
+                    ConsoleOutput.Error(errorMessage);
+                    return 1;
+                }
+
+                processManager.TerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime);
 
                 ConsoleOutput.Success($"PR #{prNumber} associated with session for {issueKey}. Session is now waiting for review feedback.");
                 return 0;
@@ -407,40 +509,59 @@ public static class SessionCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
-                var state = stateStore.LoadState();
                 var config = stateStore.LoadConfig();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
+                var pending = false;
+                string? errorMessage = null;
+                string? newSessionId = null;
 
-                if (!state.Sessions.TryGetValue(issueKey, out var session))
+                stateStore.WithStateLock(() =>
                 {
-                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
+                    var state = stateStore.LoadState();
+
+                    if (!state.Sessions.TryGetValue(issueKey, out var session))
+                    {
+                        errorMessage = $"No session found for '{issueKey}'.";
+                        return;
+                    }
+
+                    if (session.Status == SessionStatus.Pending)
+                    {
+                        pending = true;
+                        return;
+                    }
+
+                    processManager.TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+                    processManager.CleanupWorktree(session, config, state);
+
+                    session.Status = SessionStatus.Pending;
+                    session.CompletedBySession = false;
+                    session.PullRequestNumber = null;
+                    session.CopilotSessionId = Guid.NewGuid().ToString();
+                    ClearTrackedProcess(session);
+                    session.RetryCount = 0;
+                    session.RedispatchCount = 0;
+                    session.LastFailureAt = null;
+                    session.WaitingSince = null;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    newSessionId = session.CopilotSessionId;
+                    stateStore.SaveState(state);
+                }, ct);
+
+                if (errorMessage is not null)
+                {
+                    ConsoleOutput.Error(errorMessage);
                     return 1;
                 }
 
-                if (session.Status == SessionStatus.Pending)
+                if (pending)
                 {
                     ConsoleOutput.Info($"Session for '{issueKey}' is already pending.");
                     return 0;
                 }
 
-                // Clean up old worktree before resetting
-                processManager.CleanupWorktree(session, config, state);
-
-                session.Status = SessionStatus.Pending;
-                session.CompletedBySession = false;
-                session.PullRequestNumber = null;
-                session.CopilotSessionId = Guid.NewGuid().ToString();
-                session.ProcessId = null;
-                session.ProcessStartTime = null;
-                session.RetryCount = 0;
-                session.RedispatchCount = 0;
-                session.LastFailureAt = null;
-                session.WaitingSince = null;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                stateStore.SaveState(state);
-
-                ConsoleOutput.Success($"Session for {issueKey} reset to pending (new session {session.CopilotSessionId}).");
+                ConsoleOutput.Success($"Session for {issueKey} reset to pending (new session {newSessionId}).");
                 return 0;
             }, logger);
         });
@@ -457,37 +578,42 @@ public static class SessionCommand
     public static int RenderSessionList(StateStore stateStore, ProcessManager processManager,
         string? filterValue, bool showAll)
     {
-        var state = stateStore.LoadState();
-
-        // Recover stale Joined sessions — no PID or process dead
         var stateChanged = false;
-        foreach (var (key, s) in state.Sessions)
+        var state = stateStore.WithStateLock(() =>
         {
-            if (s.Status != SessionStatus.Joined)
-                continue;
+            var currentState = stateStore.LoadState();
 
-            var isStale = s.ProcessId is null;
-            if (!isStale)
+            // Recover stale Joined sessions — no PID or process dead
+            foreach (var (key, s) in currentState.Sessions)
             {
-                var liveness = processManager.CheckProcess(s);
-                isStale = liveness is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused;
-            }
+                if (s.Status != SessionStatus.Joined)
+                    continue;
 
-            if (isStale)
-            {
+                var isStale = s.ProcessId is null;
+                if (!isStale)
+                {
+                    var liveness = processManager.CheckProcess(s);
+                    isStale = liveness is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused;
+                }
+
+                if (!isStale)
+                    continue;
+
                 s.Status = SessionStatus.Pending;
-                s.ProcessId = null;
-                s.ProcessStartTime = null;
+                ClearTrackedProcess(s);
                 s.UpdatedAt = DateTimeOffset.UtcNow;
                 stateChanged = true;
                 ConsoleOutput.Warning($"Recovered stale joined session {key} → Pending");
             }
-        }
+
+            if (stateChanged)
+                stateStore.SaveState(currentState);
+
+            return currentState;
+        });
+
         if (stateChanged)
-        {
-            stateStore.SaveState(state);
             AnsiConsole.WriteLine();
-        }
 
         // Filter sessions
         SessionStatus? statusFilter = null;
@@ -601,22 +727,38 @@ public static class SessionCommand
     {
         try
         {
-            var state = stateStore.LoadState();
-            if (state.Sessions.TryGetValue(issueKey, out var session) &&
-                session.Status == SessionStatus.Joined)
+            stateStore.WithStateLock(() =>
             {
-                session.Status = SessionStatus.Pending;
-                session.ProcessId = null;
-                session.ProcessStartTime = null;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                stateStore.SaveState(state);
-                ConsoleOutput.Info("Session re-queued for orchestrated dispatch.");
-            }
+                var state = stateStore.LoadState();
+                if (state.Sessions.TryGetValue(issueKey, out var session) &&
+                    session.Status == SessionStatus.Joined)
+                {
+                    session.Status = SessionStatus.Pending;
+                    ClearTrackedProcess(session);
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateStore.SaveState(state);
+                    ConsoleOutput.Info("Session re-queued for orchestrated dispatch.");
+                }
+            });
         }
         catch
         {
             // Best effort — if state save fails, the daemon's safety net
             // will detect the stale Joined session and reset it
         }
+    }
+
+    private static TrackedProcessRef CaptureTrackedProcess(DispatchSession session)
+        => new(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+
+    private static void ClearTrackedProcess(DispatchSession session)
+    {
+        session.ProcessId = null;
+        session.ProcessStartTime = null;
+    }
+
+    private readonly record struct TrackedProcessRef(string Label, int? ProcessId, DateTimeOffset? ProcessStartTime)
+    {
+        public bool HasProcess => ProcessId is not null;
     }
 }

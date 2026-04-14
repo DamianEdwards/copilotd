@@ -54,45 +54,64 @@ public static class RunCommand
 
                     // Startup reconciliation pass
                     var config = stateStore.LoadConfig();
-                    var state = stateStore.LoadState();
                     ConsoleOutput.Info("Running startup reconciliation...");
-                    reconciliation.Reconcile(config, state);
+                    stateStore.WithStateLock(() =>
+                    {
+                        var state = stateStore.LoadState();
+                        reconciliation.Reconcile(config, state);
+                    }, ct);
                     ConsoleOutput.Success("Startup reconciliation complete.");
 
                     // Launch control session if enabled
                     if (config.EnableControlSession)
                     {
-                        state = stateStore.LoadState();
+                        var existingControlPid = default(int?);
+                        var launchedControlPid = default(int?);
+                        var launchFailed = false;
 
-                        // Check if a control session from a prior daemon run is still alive
-                        var existingAlive = state.ControlSession is not null
-                            && state.ControlSession.Status == ControlSessionStatus.Running
-                            && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+                        stateStore.WithStateLock(() =>
+                        {
+                            var state = stateStore.LoadState();
 
-                        if (existingAlive)
-                        {
-                            ConsoleOutput.Success($"Control session already running (PID {state.ControlSession!.ProcessId}).");
-                        }
-                        else
-                        {
-                            // Terminate stale process if needed
+                            var existingAlive = state.ControlSession is not null
+                                && state.ControlSession.Status == ControlSessionStatus.Running
+                                && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+
+                            if (existingAlive)
+                            {
+                                existingControlPid = state.ControlSession!.ProcessId;
+                                return;
+                            }
+
                             if (state.ControlSession?.ProcessId is not null)
                                 processManager.TerminateControlSession(state.ControlSession);
 
-                            ConsoleOutput.Info("Launching control remote session...");
                             var controlSession = processManager.LaunchControlSession(config);
                             if (controlSession is not null)
                             {
                                 state.ControlSession = controlSession;
-                                stateStore.SaveState(state);
-                                ConsoleOutput.Success($"Control session launched (PID {controlSession.ProcessId}).");
+                                launchedControlPid = controlSession.ProcessId;
                             }
                             else
                             {
                                 state.ControlSession = new ControlSessionInfo { Status = ControlSessionStatus.Failed };
-                                stateStore.SaveState(state);
-                                ConsoleOutput.Warning("Failed to launch control session. Will retry next cycle.");
+                                launchFailed = true;
                             }
+
+                            stateStore.SaveState(state);
+                        }, ct);
+
+                        if (existingControlPid is not null)
+                        {
+                            ConsoleOutput.Success($"Control session already running (PID {existingControlPid}).");
+                        }
+                        else if (launchedControlPid is not null)
+                        {
+                            ConsoleOutput.Success($"Control session launched (PID {launchedControlPid}).");
+                        }
+                        else if (launchFailed)
+                        {
+                            ConsoleOutput.Warning("Failed to launch control session. Will retry next cycle.");
                         }
                     }
 
@@ -120,49 +139,50 @@ public static class RunCommand
                         {
                             // Reload config each cycle for live editing support
                             config = stateStore.LoadConfig();
-                            state = stateStore.LoadState();
-
-                            reconciliation.Reconcile(config, state);
-
-                            // Control session health check
-                            state = stateStore.LoadState();
-                            if (config.EnableControlSession)
+                            stateStore.WithStateLock(() =>
                             {
-                                var controlAlive = state.ControlSession is not null
-                                    && state.ControlSession.Status == ControlSessionStatus.Running
-                                    && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+                                var state = stateStore.LoadState();
 
-                                if (!controlAlive)
+                                reconciliation.Reconcile(config, state);
+
+                                if (config.EnableControlSession)
                                 {
-                                    // Terminate stale process if needed
-                                    if (state.ControlSession?.ProcessId is not null)
-                                        processManager.TerminateControlSession(state.ControlSession);
+                                    var controlAlive = state.ControlSession is not null
+                                        && state.ControlSession.Status == ControlSessionStatus.Running
+                                        && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
 
-                                    logger.LogInformation("Relaunching control session...");
-                                    var controlSession = processManager.LaunchControlSession(config);
-                                    if (controlSession is not null)
+                                    if (!controlAlive)
                                     {
-                                        state.ControlSession = controlSession;
-                                        logger.LogInformation("Control session relaunched (PID {Pid})", controlSession.ProcessId);
+                                        if (state.ControlSession?.ProcessId is not null)
+                                            processManager.TerminateControlSession(state.ControlSession);
+
+                                        logger.LogInformation("Relaunching control session...");
+                                        var controlSession = processManager.LaunchControlSession(config);
+                                        if (controlSession is not null)
+                                        {
+                                            state.ControlSession = controlSession;
+                                            logger.LogInformation("Control session relaunched (PID {Pid})", controlSession.ProcessId);
+                                        }
+                                        else
+                                        {
+                                            state.ControlSession = new ControlSessionInfo { Status = ControlSessionStatus.Failed };
+                                            logger.LogWarning("Failed to relaunch control session");
+                                        }
+
+                                        stateStore.SaveState(state);
                                     }
-                                    else
-                                    {
-                                        state.ControlSession = new ControlSessionInfo { Status = ControlSessionStatus.Failed };
-                                        logger.LogWarning("Failed to relaunch control session");
-                                    }
+                                }
+                                else if (state.ControlSession is not null
+                                         && state.ControlSession.Status == ControlSessionStatus.Running)
+                                {
+                                    logger.LogInformation("Control session disabled, terminating...");
+                                    processManager.TerminateControlSession(state.ControlSession);
+                                    state.ControlSession.Status = ControlSessionStatus.Stopped;
+                                    state.ControlSession.ProcessId = null;
+                                    state.ControlSession.ProcessStartTime = null;
                                     stateStore.SaveState(state);
                                 }
-                            }
-                            else if (state.ControlSession is not null
-                                     && state.ControlSession.Status == ControlSessionStatus.Running)
-                            {
-                                // Config toggled off — terminate control session
-                                logger.LogInformation("Control session disabled, terminating...");
-                                processManager.TerminateControlSession(state.ControlSession);
-                                state.ControlSession.Status = ControlSessionStatus.Stopped;
-                                state.ControlSession.ProcessId = null;
-                                stateStore.SaveState(state);
-                            }
+                            }, cts.Token);
 
                             // Self-update: check for staged update or fire background check
                             var updateState = stateStore.LoadUpdateState();
@@ -210,34 +230,38 @@ public static class RunCommand
                     }
 
                     // Gracefully terminate running sessions before exit
-                    state = stateStore.LoadState();
-
-                    // Terminate control session
-                    if (state.ControlSession is not null
-                        && state.ControlSession.Status == ControlSessionStatus.Running)
+                    stateStore.WithStateLock(() =>
                     {
-                        ConsoleOutput.Info("Shutting down control session...");
-                        processManager.TerminateControlSession(state.ControlSession);
-                        state.ControlSession.Status = ControlSessionStatus.Stopped;
-                        state.ControlSession.ProcessId = null;
-                    }
+                        var state = stateStore.LoadState();
 
-                    var runningSessions = state.Sessions.Values
-                        .Where(s => s.Status == SessionStatus.Running)
-                        .ToList();
-                    if (runningSessions.Count > 0)
-                    {
-                        ConsoleOutput.Info($"Shutting down {runningSessions.Count} active copilot session(s)...");
-                        foreach (var session in runningSessions)
+                        if (state.ControlSession is not null
+                            && state.ControlSession.Status == ControlSessionStatus.Running)
                         {
-                            processManager.TerminateProcess(session);
-                            session.Status = SessionStatus.Completed;
-                            session.UpdatedAt = DateTimeOffset.UtcNow;
+                            ConsoleOutput.Info("Shutting down control session...");
+                            processManager.TerminateControlSession(state.ControlSession);
+                            state.ControlSession.Status = ControlSessionStatus.Stopped;
+                            state.ControlSession.ProcessId = null;
+                            state.ControlSession.ProcessStartTime = null;
                         }
-                    }
 
-                    // Always save state on shutdown to persist control session and dispatch session changes
-                    stateStore.SaveState(state);
+                        var runningSessions = state.Sessions.Values
+                            .Where(s => s.Status == SessionStatus.Running)
+                            .ToList();
+                        if (runningSessions.Count > 0)
+                        {
+                            ConsoleOutput.Info($"Shutting down {runningSessions.Count} active copilot session(s)...");
+                            foreach (var session in runningSessions)
+                            {
+                                processManager.TerminateProcess(session);
+                                session.Status = SessionStatus.Completed;
+                                session.ProcessId = null;
+                                session.ProcessStartTime = null;
+                                session.UpdatedAt = DateTimeOffset.UtcNow;
+                            }
+                        }
+
+                        stateStore.SaveState(state);
+                    }, ct);
 
                     ConsoleOutput.Info("copilotd daemon stopped.");
                     return 0;

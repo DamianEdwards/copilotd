@@ -16,6 +16,7 @@ public sealed class StateStore
     private readonly string _statePath;
     private readonly string _updateStatePath;
     private readonly string _lockPath;
+    private readonly string _stateLockPath;
     private readonly string _updateLockPath;
     private readonly string _pidPath;
     private readonly ILogger<StateStore> _logger;
@@ -33,6 +34,7 @@ public sealed class StateStore
         _statePath = Path.Combine(_configDir, "state.json");
         _updateStatePath = Path.Combine(_configDir, "update-state.json");
         _lockPath = Path.Combine(_configDir, ".lock");
+        _stateLockPath = Path.Combine(_configDir, ".state-lock");
         _updateLockPath = Path.Combine(_configDir, ".update-lock");
         _pidPath = Path.Combine(_configDir, ".pid");
         Directory.CreateDirectory(_configDir);
@@ -99,6 +101,23 @@ public sealed class StateStore
         AtomicWrite(_statePath, json);
         _logger.LogDebug("State saved to {Path}", _statePath);
     }
+
+    /// <summary>
+    /// Serializes state mutations across daemon and CLI commands so load-modify-save
+    /// sequences cannot overwrite each other.
+    /// </summary>
+    public T WithStateLock<T>(Func<T> action, CancellationToken ct = default)
+    {
+        using var lockStream = AcquireExclusiveLock(_stateLockPath, ct);
+        return action();
+    }
+
+    public void WithStateLock(Action action, CancellationToken ct = default)
+        => WithStateLock(() =>
+        {
+            action();
+            return 0;
+        }, ct);
 
     // --- Prompt ---
 
@@ -285,6 +304,29 @@ public sealed class StateStore
         var tmp = Path.Combine(dir, $".{Path.GetFileName(path)}.tmp");
         File.WriteAllText(tmp, content);
         File.Move(tmp, path, overwrite: true);
+    }
+
+    private FileStream AcquireExclusiveLock(string path, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException ex)
+            {
+                if (DateTime.UtcNow >= deadline)
+                    throw new TimeoutException($"Timed out waiting to acquire state lock '{path}'.", ex);
+
+                if (ct.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(100)))
+                    ct.ThrowIfCancellationRequested();
+            }
+        }
     }
 
     // --- Update state ---

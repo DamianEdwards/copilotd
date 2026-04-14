@@ -179,10 +179,17 @@ public sealed partial class ProcessManager
     /// Returns true if the process was successfully terminated or was already dead.
     /// </summary>
     public bool TerminateProcess(DispatchSession session)
+        => TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+
+    /// <summary>
+    /// Gracefully terminates a tracked copilot process using the saved PID and start time.
+    /// The label is used only for logging.
+    /// </summary>
+    public bool TerminateProcess(string processLabel, int? processId, DateTimeOffset? processStartTime)
     {
-        if (session.ProcessId is not { } pid)
+        if (processId is not { } pid)
         {
-            _logger.LogDebug("No PID tracked for {Key}, nothing to terminate", session.IssueKey);
+            _logger.LogDebug("No PID tracked for {ProcessLabel}, nothing to terminate", processLabel);
             return true;
         }
 
@@ -193,31 +200,31 @@ public sealed partial class ProcessManager
         }
         catch (ArgumentException)
         {
-            _logger.LogDebug("Process {Pid} for {Key} not found, already exited", pid, session.IssueKey);
+            _logger.LogDebug("Process {Pid} for {ProcessLabel} not found, already exited", pid, processLabel);
             return true;
         }
 
         try
         {
             // Verify start time to avoid terminating a different process that reused the PID
-            if (session.ProcessStartTime is { } expectedStart)
+            if (processStartTime is { } expectedStart)
             {
                 var actualStart = GetProcessStartTime(process);
                 if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
                 {
-                    _logger.LogWarning("PID {Pid} for {Key} was reused by another process, skipping termination",
-                        pid, session.IssueKey);
+                    _logger.LogWarning("PID {Pid} for {ProcessLabel} was reused by another process, skipping termination",
+                        pid, processLabel);
                     return true;
                 }
             }
 
             if (process.HasExited)
             {
-                _logger.LogDebug("Process {Pid} for {Key} already exited", pid, session.IssueKey);
+                _logger.LogDebug("Process {Pid} for {ProcessLabel} already exited", pid, processLabel);
                 return true;
             }
 
-            _logger.LogInformation("Gracefully terminating copilot process {Pid} for {Key}", pid, session.IssueKey);
+            _logger.LogInformation("Gracefully terminating copilot process {Pid} for {ProcessLabel}", pid, processLabel);
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
@@ -230,7 +237,7 @@ public sealed partial class ProcessManager
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to terminate process {Pid} for {Key}", pid, session.IssueKey);
+            _logger.LogWarning(ex, "Failed to terminate process {Pid} for {ProcessLabel}", pid, processLabel);
             return false;
         }
         finally
@@ -416,7 +423,7 @@ public sealed partial class ProcessManager
             StartedAt = DateTimeOffset.UtcNow,
         };
 
-        var args = BuildControlSessionArguments(CopilotdConfig.ControlSessionPrompt, config.DefaultModel);
+        var args = BuildControlSessionArguments(session.CopilotSessionId, CopilotdConfig.ControlSessionPrompt, config.DefaultModel);
         _logger.LogInformation("Launching control session {SessionId}", session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
 
@@ -494,69 +501,14 @@ public sealed partial class ProcessManager
     /// Gracefully terminates the control session process.
     /// </summary>
     public bool TerminateControlSession(ControlSessionInfo session)
-    {
-        if (session.ProcessId is not { } pid)
-        {
-            _logger.LogDebug("No PID tracked for control session, nothing to terminate");
-            return true;
-        }
+        => TerminateProcess("control session", session.ProcessId, session.ProcessStartTime);
 
-        Process process;
-        try
-        {
-            process = Process.GetProcessById(pid);
-        }
-        catch (ArgumentException)
-        {
-            _logger.LogDebug("Control session process {Pid} not found, already exited", pid);
-            return true;
-        }
-
-        try
-        {
-            if (session.ProcessStartTime is { } expectedStart)
-            {
-                var actualStart = GetProcessStartTime(process);
-                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
-                {
-                    _logger.LogWarning("Control session PID {Pid} was reused by another process, skipping termination", pid);
-                    return true;
-                }
-            }
-
-            if (process.HasExited)
-            {
-                _logger.LogDebug("Control session process {Pid} already exited", pid);
-                return true;
-            }
-
-            _logger.LogInformation("Gracefully terminating control session process {Pid}", pid);
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return TerminateViaShutdownInstance(process, pid);
-            }
-            else
-            {
-                return TerminateViaSignals(process, pid);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to terminate control session process {Pid}", pid);
-            return false;
-        }
-        finally
-        {
-            process.Dispose();
-        }
-    }
-
-    private static string BuildControlSessionArguments(string prompt, string? defaultModel)
+    private static string BuildControlSessionArguments(string sessionId, string prompt, string? defaultModel)
     {
         var args = new List<string>
         {
             "--remote",
+            $"--resume={sessionId}",
             "-i", $"\"{EscapeArg(prompt)}\"",
             // Only allow copilotd, gh, and git commands — no general shell access
             "--allow-tool=shell(copilotd:*)",
