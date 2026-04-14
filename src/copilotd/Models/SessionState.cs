@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Copilotd.Models;
 
 /// <summary>
@@ -21,6 +23,13 @@ public sealed class DaemonState
     /// Populated by <see cref="Infrastructure.RepoPathResolver"/> and validated on each use.
     /// </summary>
     public Dictionary<string, string> ResolvedRepoPaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The control remote session that allows remote management of copilotd.
+    /// Null when no control session has been started. Tracked separately from
+    /// dispatch sessions to avoid interference with reconciliation and pruning.
+    /// </summary>
+    public ControlSessionInfo? ControlSession { get; set; }
 }
 
 /// <summary>
@@ -158,4 +167,46 @@ public sealed class DispatchSession
     /// <summary>Whether this session can be re-dispatched.</summary>
     public bool CanRetry => Status is SessionStatus.Orphaned or SessionStatus.Failed
                             && RetryCount < MaxRetries;
+}
+
+/// <summary>
+/// Lifecycle status of the control remote session.
+/// </summary>
+[JsonConverter(typeof(TolerantControlSessionStatusConverter))]
+public enum ControlSessionStatus
+{
+    /// <summary>Control session is not running.</summary>
+    Stopped,
+
+    /// <summary>Control session process is being launched.</summary>
+    Starting,
+
+    /// <summary>Control session process is alive.</summary>
+    Running,
+
+    /// <summary>Control session process exited abnormally.</summary>
+    Failed,
+}
+
+/// <summary>
+/// Tracks the daemon's control remote session — a special <c>copilot --remote</c> session
+/// that allows remote management of copilotd via the GitHub remote sessions UI.
+/// Tracked separately from dispatch sessions to avoid interference with reconciliation.
+/// </summary>
+public sealed class ControlSessionInfo
+{
+    /// <summary>Generated UUID for the copilot remote session.</summary>
+    public string CopilotSessionId { get; set; } = "";
+
+    /// <summary>OS process ID of the copilot process.</summary>
+    public int? ProcessId { get; set; }
+
+    /// <summary>Process start time, used alongside PID to detect PID reuse.</summary>
+    public DateTimeOffset? ProcessStartTime { get; set; }
+
+    /// <summary>Current lifecycle status.</summary>
+    public ControlSessionStatus Status { get; set; } = ControlSessionStatus.Stopped;
+
+    /// <summary>When the control session was last started.</summary>
+    public DateTimeOffset? StartedAt { get; set; }
 }

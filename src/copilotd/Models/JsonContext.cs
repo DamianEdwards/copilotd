@@ -186,17 +186,53 @@ public sealed class TolerantAuthorModeConverter : JsonConverter<AuthorMode>
 }
 
 /// <summary>
+/// AOT-compatible JSON converter for <see cref="ControlSessionStatus"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="ControlSessionStatus.Stopped"/>.
+/// </summary>
+public sealed class TolerantControlSessionStatusConverter : JsonConverter<ControlSessionStatus>
+{
+    public override ControlSessionStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<ControlSessionStatus>(value, ignoreCase: true, out var status))
+                return status;
+
+            return ControlSessionStatus.Stopped;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(ControlSessionStatus), intValue))
+                return (ControlSessionStatus)intValue;
+
+            return ControlSessionStatus.Stopped;
+        }
+
+        return ControlSessionStatus.Stopped;
+    }
+
+    public override void Write(Utf8JsonWriter writer, ControlSessionStatus value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
 /// AOT-safe JSON serialization metadata for all persisted models.
 /// </summary>
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter), typeof(TolerantAuthorModeConverter)])]
+    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter), typeof(TolerantAuthorModeConverter), typeof(TolerantControlSessionStatusConverter)])]
 [JsonSerializable(typeof(CopilotdConfig))]
 [JsonSerializable(typeof(DaemonState))]
 [JsonSerializable(typeof(DispatchRule))]
 [JsonSerializable(typeof(DispatchSession))]
+[JsonSerializable(typeof(ControlSessionInfo))]
 [JsonSerializable(typeof(GitHubIssue))]
 [JsonSerializable(typeof(List<GitHubIssue>))]
 [JsonSerializable(typeof(List<GhRepo>))]

@@ -58,6 +58,25 @@ public static class StatusCommand
                 }
 
                 ConsoleOutput.Info($"  Rules:     {config.Rules.Count}");
+
+                // Control session status
+                if (state.ControlSession is not null)
+                {
+                    var controlStatus = state.ControlSession.Status switch
+                    {
+                        ControlSessionStatus.Running => "[green]● Running[/]",
+                        ControlSessionStatus.Starting => "[yellow]◐ Starting[/]",
+                        ControlSessionStatus.Failed => "[red]✕ Failed[/]",
+                        _ => "[grey]○ Stopped[/]",
+                    };
+                    var controlPid = state.ControlSession.ProcessId is { } pid ? $" (PID {pid})" : "";
+                    AnsiConsole.MarkupLine($"  Control:   {controlStatus}{Markup.Escape(controlPid)}");
+                }
+                else if (config.EnableControlSession)
+                {
+                    AnsiConsole.MarkupLine("  Control:   [grey]○ Not started[/]");
+                }
+
                 AnsiConsole.WriteLine();
 
                 // Delegate session list rendering to the shared helper
