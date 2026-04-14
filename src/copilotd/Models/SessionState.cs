@@ -79,6 +79,13 @@ public sealed class DispatchSession
     /// <summary>Name of the rule that triggered this dispatch.</summary>
     public string RuleName { get; set; } = "";
 
+    /// <summary>
+    /// The GitHub login of the issue author at the time of dispatch.
+    /// Used by <see cref="CommentTrustLevel.IssueAuthor"/> and
+    /// <see cref="CommentTrustLevel.IssueAuthorAndCollaborators"/> trust checks.
+    /// </summary>
+    public string? IssueAuthor { get; set; }
+
     /// <summary>Generated UUID used with copilot --resume=&lt;id&gt;.</summary>
     public string CopilotSessionId { get; set; } = "";
 

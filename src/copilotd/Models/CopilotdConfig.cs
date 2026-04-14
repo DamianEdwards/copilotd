@@ -153,6 +153,10 @@ public sealed class DispatchRule
     /// Controls which comment authors can trigger session re-dispatch.
     /// <see cref="CommentTrustLevel.Collaborators"/>: only repo collaborators with write access (default).
     /// <see cref="CommentTrustLevel.All"/>: any commenter can trigger re-dispatch.
+    /// <see cref="CommentTrustLevel.IssueAuthor"/>: only the original issue author.
+    /// <see cref="CommentTrustLevel.Assignees"/>: only current issue assignees.
+    /// <see cref="CommentTrustLevel.IssueAuthorAndCollaborators"/>: issue author or write-access collaborators.
+    /// <see cref="CommentTrustLevel.MatchDispatchRule"/>: commenter must pass the rule's author filtering.
     /// </summary>
     public CommentTrustLevel TrustLevel { get; set; } = CommentTrustLevel.Collaborators;
 
@@ -242,6 +246,21 @@ public enum CommentTrustLevel
 
     /// <summary>Any commenter can trigger re-dispatch (less secure, opt-in).</summary>
     All,
+
+    /// <summary>Only the original issue author can trigger re-dispatch.</summary>
+    IssueAuthor,
+
+    /// <summary>Only current issue assignees can trigger re-dispatch.</summary>
+    Assignees,
+
+    /// <summary>The original issue author or repository collaborators with write access can trigger re-dispatch.</summary>
+    IssueAuthorAndCollaborators,
+
+    /// <summary>
+    /// The commenter must pass the same author filtering conditions as the original dispatch rule
+    /// (e.g., if the rule uses <see cref="AuthorMode.WriteAccess"/>, only write-access users can trigger re-dispatch).
+    /// </summary>
+    MatchDispatchRule,
 }
 
 /// <summary>

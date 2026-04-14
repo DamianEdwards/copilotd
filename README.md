@@ -275,6 +275,17 @@ enforces trust boundaries on comment-triggered re-dispatches:
 - **`trust_level: collaborators`** (default) — only comments from users with write/maintain/admin
   access to the repository trigger re-dispatch. Comments from other users are logged and ignored.
 - **`trust_level: all`** — any non-bot comment triggers re-dispatch (less secure, opt-in).
+- **`trust_level: issueAuthor`** — only comments from the original issue author trigger re-dispatch.
+  Useful for community-filed issues where the reporter may need to provide follow-up clarification.
+- **`trust_level: assignees`** — only comments from current issue assignees trigger re-dispatch.
+  Assignees are checked live (not cached) so changes to assignees take effect on the next poll.
+- **`trust_level: issueAuthorAndCollaborators`** — comments from the original issue author or any
+  user with write/maintain/admin access trigger re-dispatch. Combines community author feedback
+  with maintainer oversight.
+- **`trust_level: matchDispatchRule`** — the commenter must pass the same author filtering conditions
+  used by the dispatch rule (e.g., if the rule uses `author_mode: writeAccess`, only write-access
+  users can trigger re-dispatch; if the rule uses `author_mode: allowed` with a specific author list,
+  only those authors can trigger re-dispatch).
 - **Re-dispatch rate limit** — sessions are limited to `max_redispatches` (default: 10)
   comment-triggered re-dispatches. Use `copilotd session reset` to re-enable after hitting the limit.
 - **Security prompt** — when re-dispatching in response to comments, a security context is
@@ -335,7 +346,7 @@ Stored in `~/.copilotd/`:
 | `extra_prompt` | *(none)* | Additional prompt text appended when this rule triggers |
 | `custom_prompt` | *(none)* | Per-rule custom prompt text (appended to or overrides global custom prompt) |
 | `custom_prompt_mode` | `append` | How rule custom prompt interacts with global: `append` or `override` |
-| `trust_level` | `collaborators` | Which comment authors can trigger session re-dispatch: `collaborators` (write access required) or `all` |
+| `trust_level` | `collaborators` | Which comment authors can trigger session re-dispatch: `collaborators` (write access required), `all`, `issueAuthor`, `assignees`, `issueAuthorAndCollaborators`, or `matchDispatchRule` |
 
 Log files are written to `$TEMP/copilotd/logs/` with daily rollover.
 

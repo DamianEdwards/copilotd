@@ -390,6 +390,46 @@ public sealed class GhCliService
     }
 
     /// <summary>
+    /// Returns the current assignee logins for an issue by querying the GitHub API.
+    /// Returns an empty list if there are no assignees, or null on API failure (so callers
+    /// can distinguish "no assignees" from "couldn't check").
+    /// </summary>
+    public List<string>? GetIssueAssignees(string repo, int issueNumber)
+    {
+        var args = $"issue view {issueNumber} --repo {repo} --json assignees";
+        var (exitCode, output) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query assignees on {Repo}#{Issue}: {Output}", repo, issueNumber, output);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (!doc.RootElement.TryGetProperty("assignees", out var assignees))
+                return [];
+
+            var result = new List<string>();
+            foreach (var assignee in assignees.EnumerateArray())
+            {
+                if (assignee.TryGetProperty("login", out var login))
+                {
+                    var loginStr = login.GetString();
+                    if (loginStr is not null)
+                        result.Add(loginStr);
+                }
+            }
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse assignees JSON for {Repo}#{Issue}", repo, issueNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Checks whether there are new review comments on a pull request since the given timestamp,
     /// excluding comments posted by copilotd itself (identified by <see cref="CommentMarker"/>).
     /// Checks both PR review comments (from formal reviews) and regular PR comments.

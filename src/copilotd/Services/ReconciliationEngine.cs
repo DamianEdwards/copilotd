@@ -303,6 +303,13 @@ public sealed class ReconciliationEngine
         {
             if (state.Sessions.TryGetValue(issueKey, out var existing))
             {
+                // Backfill IssueAuthor for sessions created before this field existed
+                if (existing.IssueAuthor is null && issue.Author is not null)
+                {
+                    existing.IssueAuthor = issue.Author;
+                    existing.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+
                 switch (existing.Status)
                 {
                     case SessionStatus.Running:
@@ -329,14 +336,19 @@ public sealed class ReconciliationEngine
                                 }
 
                                 // Check author trust level
-                                var rule = config.Rules.GetValueOrDefault(existing.RuleName);
-                                var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+                                var trusted = IsCommentTrusted(existing, commentInfo.Author, config, out var trustLevel);
 
-                                if (trustLevel == CommentTrustLevel.Collaborators
-                                    && !_ghCli.HasWriteAccess(existing.Repo, commentInfo.Author))
+                                if (trusted is null)
                                 {
-                                    _logger.LogInformation("Ignoring comment from non-collaborator {Author} on {Key} (trust_level=collaborators)",
-                                        commentInfo.Author, issueKey);
+                                    _logger.LogWarning("Could not evaluate trust for {Author} on {Key} (trust_level={TrustLevel}), will retry next cycle",
+                                        commentInfo.Author, issueKey, trustLevel);
+                                    continue;
+                                }
+
+                                if (trusted == false)
+                                {
+                                    _logger.LogInformation("Ignoring comment from untrusted author {Author} on {Key} (trust_level={TrustLevel})",
+                                        commentInfo.Author, issueKey, trustLevel);
                                     // Advance WaitingSince past this comment so the next poll can find later trusted comments
                                     existing.WaitingSince = commentInfo.CreatedAt;
                                     existing.UpdatedAt = DateTimeOffset.UtcNow;
@@ -395,14 +407,19 @@ public sealed class ReconciliationEngine
                                     }
 
                                     // Check author trust level
-                                    var rule = config.Rules.GetValueOrDefault(existing.RuleName);
-                                    var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+                                    var trusted = IsCommentTrusted(existing, reviewInfo.Author, config, out var trustLevel);
 
-                                    if (trustLevel == CommentTrustLevel.Collaborators
-                                        && !_ghCli.HasWriteAccess(existing.Repo, reviewInfo.Author))
+                                    if (trusted is null)
                                     {
-                                        _logger.LogInformation("Ignoring PR review from non-collaborator {Author} on {Key} (trust_level=collaborators)",
-                                            reviewInfo.Author, issueKey);
+                                        _logger.LogWarning("Could not evaluate trust for {Author} on {Key} (trust_level={TrustLevel}), will retry next cycle",
+                                            reviewInfo.Author, issueKey, trustLevel);
+                                        continue;
+                                    }
+
+                                    if (trusted == false)
+                                    {
+                                        _logger.LogInformation("Ignoring PR review from untrusted author {Author} on {Key} (trust_level={TrustLevel})",
+                                            reviewInfo.Author, issueKey, trustLevel);
                                         // Advance WaitingSince past this review so the next poll can find later trusted reviews
                                         existing.WaitingSince = reviewInfo.CreatedAt;
                                         existing.UpdatedAt = DateTimeOffset.UtcNow;
@@ -439,14 +456,19 @@ public sealed class ReconciliationEngine
                                 }
 
                                 // Check author trust level
-                                var rule = config.Rules.GetValueOrDefault(existing.RuleName);
-                                var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+                                var trusted = IsCommentTrusted(existing, issueCommentInfo.Author, config, out var trustLevel);
 
-                                if (trustLevel == CommentTrustLevel.Collaborators
-                                    && !_ghCli.HasWriteAccess(existing.Repo, issueCommentInfo.Author))
+                                if (trusted is null)
                                 {
-                                    _logger.LogInformation("Ignoring issue comment from non-collaborator {Author} on {Key} while waiting for PR review (trust_level=collaborators)",
-                                        issueCommentInfo.Author, issueKey);
+                                    _logger.LogWarning("Could not evaluate trust for {Author} on {Key} (trust_level={TrustLevel}), will retry next cycle",
+                                        issueCommentInfo.Author, issueKey, trustLevel);
+                                    continue;
+                                }
+
+                                if (trusted == false)
+                                {
+                                    _logger.LogInformation("Ignoring issue comment from untrusted author {Author} on {Key} while waiting for PR review (trust_level={TrustLevel})",
+                                        issueCommentInfo.Author, issueKey, trustLevel);
                                     // Advance WaitingSince past this comment so the next poll can find later trusted comments
                                     existing.WaitingSince = issueCommentInfo.CreatedAt;
                                     existing.UpdatedAt = DateTimeOffset.UtcNow;
@@ -525,6 +547,7 @@ public sealed class ReconciliationEngine
                     Repo = issue.Repo,
                     IssueNumber = issue.Number,
                     RuleName = ruleName,
+                    IssueAuthor = issue.Author,
                     CopilotSessionId = Guid.NewGuid().ToString(),
                     Status = SessionStatus.Pending,
                     CreatedAt = DateTimeOffset.UtcNow,
@@ -602,6 +625,64 @@ public sealed class ReconciliationEngine
         if (skippedByLimit > 0)
         {
             _logger.LogInformation("{Count} session(s) still queued, waiting for instance slots", skippedByLimit);
+        }
+    }
+
+    /// <summary>
+    /// Checks whether a comment author is trusted for re-dispatch based on the rule's trust level.
+    /// Returns true if the comment should trigger re-dispatch, false if it should be ignored,
+    /// null if trust could not be determined (e.g., transient API failure) and the comment should
+    /// be retried on the next poll cycle rather than skipped.
+    /// </summary>
+    private bool? IsCommentTrusted(
+        DispatchSession session,
+        string commentAuthor,
+        CopilotdConfig config,
+        out CommentTrustLevel effectiveTrustLevel)
+    {
+        var rule = config.Rules.GetValueOrDefault(session.RuleName);
+        effectiveTrustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+
+        switch (effectiveTrustLevel)
+        {
+            case CommentTrustLevel.All:
+                return true;
+
+            case CommentTrustLevel.Collaborators:
+                return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
+
+            case CommentTrustLevel.IssueAuthor:
+                return session.IssueAuthor is not null
+                    && string.Equals(session.IssueAuthor, commentAuthor, StringComparison.OrdinalIgnoreCase);
+
+            case CommentTrustLevel.Assignees:
+                var assignees = _ghCli.GetIssueAssignees(session.Repo, session.IssueNumber);
+                if (assignees is null)
+                    return null; // API failure — retry next cycle
+                return assignees.Exists(a => string.Equals(a, commentAuthor, StringComparison.OrdinalIgnoreCase));
+
+            case CommentTrustLevel.IssueAuthorAndCollaborators:
+                if (session.IssueAuthor is not null
+                    && string.Equals(session.IssueAuthor, commentAuthor, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
+
+            case CommentTrustLevel.MatchDispatchRule:
+                if (rule is null)
+                    return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
+                return rule.AuthorMode switch
+                {
+                    // AuthorMode.Any means "no author filtering on dispatch" — but for re-dispatch
+                    // trust, allowing anyone would be a security risk. Fall back to collaborators.
+                    AuthorMode.Any => _ghCli.HasWriteAccess(session.Repo, commentAuthor),
+                    AuthorMode.Allowed => rule.Authors.Contains(commentAuthor, StringComparer.OrdinalIgnoreCase),
+                    AuthorMode.WriteAccess => _ghCli.HasWriteAccess(session.Repo, commentAuthor),
+                    _ => _ghCli.HasWriteAccess(session.Repo, commentAuthor),
+                };
+
+            default:
+                // Unknown trust level — fail-closed to collaborators
+                return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
         }
     }
 
