@@ -12,6 +12,7 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 - **Self-healing state** — reconciles persisted state, live process status, and GitHub issue matches on every poll cycle and at startup
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
 - **Interactive takeover** — join any orchestrated session interactively with `copilotd session join`, then hand it back automatically
+- **Remote control session** — hosts a `copilot --remote` session for remotely managing copilotd via the GitHub remote sessions UI (web & mobile)
 - **Cross-platform** — works on Windows, macOS, and Linux; publishes as native AOT
 
 ## Getting started
@@ -303,6 +304,35 @@ Use `copilotd session join <issue>` to take over any tracked session:
 3. An interactive `copilot --resume=<session_id>` is launched with full terminal access
 4. When you exit, the session is automatically re-queued as **Pending** for orchestrated dispatch
 
+### Control remote session
+
+When the daemon starts, it launches a special `copilot --remote` session that lets you remotely
+monitor and manage copilotd from the [GitHub remote sessions UI](https://docs.github.com/copilot)
+on web and mobile. Through this session you can check daemon status, list sessions, reset stuck
+sessions, and more — all via natural language.
+
+**How it works:**
+
+- The control session is launched automatically on `copilotd run` startup (when `enable_control_session` is `true`)
+- It runs in the context of a clone of the copilotd repo at `<repo_home>/DamianEdwards/copilotd` (cloned automatically if not already present)
+- Tool access is restricted to `copilotd`, `gh`, and `git` commands only — no general shell access
+- If the control session process dies, the daemon automatically relaunches it on the next poll cycle
+- It does not count against the `max_instances` limit
+- It is tracked separately from dispatch sessions and shown in the `copilotd status` output
+
+**Available commands in the control session:**
+
+| Command | Description |
+|---------|-------------|
+| `copilotd status` | Show daemon health, watched repos, and session summary |
+| `copilotd session list [--all]` | List active sessions (use `--all` to include completed/failed) |
+| `copilotd session reset <issue>` | Reset a session for re-dispatch |
+| `copilotd session complete <issue>` | Mark a session as completed |
+| `copilotd rules list` | Show configured dispatch rules |
+| `copilotd config` | Show current configuration |
+
+To disable the control session, set `enable_control_session` to `false` in `~/.copilotd/config.json`.
+
 ### Terminal states and pruning
 
 - **Completed** and **Failed** are terminal states
@@ -327,6 +357,7 @@ Stored in `~/.copilotd/`:
 | `prompt` | *(empty)* | Custom prompt text appended to the built-in prompt |
 | `max_instances` | `3` | Maximum concurrent copilot processes; excess sessions queue as Pending |
 | `max_redispatches` | `10` | Maximum re-dispatches per session via comment/review feedback loops before requiring manual reset |
+| `enable_control_session` | `true` | Launch a control remote session when the daemon starts for remote management via the GitHub remote sessions UI |
 
 ### Rule settings
 
