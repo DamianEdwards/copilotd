@@ -398,12 +398,16 @@ public sealed partial class ProcessManager
     /// allows remote management of copilotd via the GitHub remote sessions UI.
     /// Returns a populated <see cref="ControlSessionInfo"/> on success, or null on failure.
     /// </summary>
-    public ControlSessionInfo? LaunchControlSession(CopilotdConfig config)
+    public ControlSessionInfo? LaunchControlSession(CopilotdConfig config, DaemonState state)
     {
-        // Use ~/.copilotd as the working directory to keep the control session scoped
-        var workingDir = _stateStore.ConfigDir;
-        if (!Directory.Exists(workingDir))
-            workingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        // copilot --remote requires a cloned GitHub repo as the working directory.
+        // Use the first resolved repo path, or try to resolve one from configured rules.
+        var workingDir = ResolveControlSessionWorkingDir(config, state);
+        if (workingDir is null)
+        {
+            _logger.LogError("No cloned GitHub repo found for control session. Configure RepoHome and at least one rule with a repo.");
+            return null;
+        }
 
         var session = new ControlSessionInfo
         {
@@ -564,6 +568,34 @@ public sealed partial class ProcessManager
         }
 
         return string.Join(' ', args);
+    }
+
+    /// <summary>
+    /// Finds a cloned GitHub repo to use as the control session's working directory.
+    /// Prefers cached resolved paths, falls back to resolving from configured rule repos.
+    /// </summary>
+    private string? ResolveControlSessionWorkingDir(CopilotdConfig config, DaemonState state)
+    {
+        // Try cached resolved repo paths first
+        foreach (var path in state.ResolvedRepoPaths.Values)
+        {
+            if (Directory.Exists(path))
+                return path;
+        }
+
+        // Fall back to resolving from configured rules
+        var repoSlugs = config.Rules.Values
+            .SelectMany(r => r.Repos)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var slug in repoSlugs)
+        {
+            var path = _repoResolver.ResolveRepoPath(slug, config, state);
+            if (path is not null && Directory.Exists(path))
+                return path;
+        }
+
+        return null;
     }
 
     private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
