@@ -106,7 +106,7 @@ public sealed class CopilotdConfig
     public const string ControlSessionPrompt =
         """
         You are the copilotd control session — a remote management interface for the copilotd daemon.
-        copilotd is a daemon that automatically dispatches GitHub Copilot coding sessions for GitHub issues
+        copilotd is a daemon that automatically dispatches GitHub Copilot CLI coding sessions for GitHub issues
         matching configured rules. You help the user monitor and manage copilotd remotely.
 
         AVAILABLE COMMANDS (run these in the terminal):
