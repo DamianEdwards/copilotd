@@ -398,14 +398,14 @@ public sealed partial class ProcessManager
     /// allows remote management of copilotd via the GitHub remote sessions UI.
     /// Returns a populated <see cref="ControlSessionInfo"/> on success, or null on failure.
     /// </summary>
-    public ControlSessionInfo? LaunchControlSession(CopilotdConfig config, DaemonState state)
+    public ControlSessionInfo? LaunchControlSession(CopilotdConfig config)
     {
+        // Clone the copilotd repo to <RepoHome>/DamianEdwards/copilotd if needed.
         // copilot --remote requires a cloned GitHub repo as the working directory.
-        // Use the first resolved repo path, or try to resolve one from configured rules.
-        var workingDir = ResolveControlSessionWorkingDir(config, state);
+        var workingDir = EnsureControlSessionRepo(config);
         if (workingDir is null)
         {
-            _logger.LogError("No cloned GitHub repo found for control session. Configure RepoHome and at least one rule with a repo.");
+            _logger.LogError("Cannot launch control session: failed to set up copilotd repo clone");
             return null;
         }
 
@@ -558,7 +558,10 @@ public sealed partial class ProcessManager
         {
             "--remote",
             "-i", $"\"{EscapeArg(prompt)}\"",
-            "--allow-all-tools",
+            // Only allow copilotd, gh, and git commands — no general shell access
+            "--allow-tool=shell(copilotd:*)",
+            "--allow-tool=shell(gh:*)",
+            "--allow-tool=shell(git:*)",
         };
 
         if (!string.IsNullOrWhiteSpace(defaultModel))
@@ -571,31 +574,77 @@ public sealed partial class ProcessManager
     }
 
     /// <summary>
-    /// Finds a cloned GitHub repo to use as the control session's working directory.
-    /// Prefers cached resolved paths, falls back to resolving from configured rule repos.
+    /// The copilotd repo to clone for the control session's working directory.
     /// </summary>
-    private string? ResolveControlSessionWorkingDir(CopilotdConfig config, DaemonState state)
+    private const string ControlSessionRepo = "DamianEdwards/copilotd";
+
+    /// <summary>
+    /// Ensures the copilotd repo is cloned to <c>&lt;RepoHome&gt;/DamianEdwards/copilotd</c>
+    /// for use as the control session's working directory. Clones it if not already present.
+    /// </summary>
+    private string? EnsureControlSessionRepo(CopilotdConfig config)
     {
-        // Try cached resolved repo paths first
-        foreach (var path in state.ResolvedRepoPaths.Values)
+        if (string.IsNullOrEmpty(config.RepoHome))
         {
-            if (Directory.Exists(path))
-                return path;
+            _logger.LogError("RepoHome is not configured; cannot set up control session repo");
+            return null;
         }
 
-        // Fall back to resolving from configured rules
-        var repoSlugs = config.Rules.Values
-            .SelectMany(r => r.Repos)
-            .Distinct(StringComparer.OrdinalIgnoreCase);
+        var repoPath = Path.Combine(config.RepoHome, "DamianEdwards", "copilotd");
 
-        foreach (var slug in repoSlugs)
+        if (Directory.Exists(Path.Combine(repoPath, ".git")))
         {
-            var path = _repoResolver.ResolveRepoPath(slug, config, state);
-            if (path is not null && Directory.Exists(path))
-                return path;
+            _logger.LogDebug("Control session repo already exists at {Path}", repoPath);
+            return repoPath;
         }
 
-        return null;
+        _logger.LogInformation("Cloning {Repo} for control session...", ControlSessionRepo);
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(repoPath)!);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "gh",
+                Arguments = $"repo clone {ControlSessionRepo} \"{repoPath}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                _logger.LogError("Failed to start gh repo clone for control session");
+                return null;
+            }
+
+            process.WaitForExit(TimeSpan.FromSeconds(60));
+
+            if (!process.HasExited)
+            {
+                _logger.LogWarning("gh repo clone timed out for control session");
+                process.Kill(entireProcessTree: true);
+                return null;
+            }
+
+            if (process.ExitCode != 0)
+            {
+                var stderr = process.StandardError.ReadToEnd();
+                _logger.LogError("gh repo clone failed (exit {Code}): {Stderr}", process.ExitCode, stderr);
+                return null;
+            }
+
+            _logger.LogInformation("Cloned {Repo} to {Path}", ControlSessionRepo, repoPath);
+            return repoPath;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception cloning {Repo} for control session", ControlSessionRepo);
+            return null;
+        }
     }
 
     private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)

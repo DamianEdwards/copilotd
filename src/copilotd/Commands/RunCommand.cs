@@ -80,7 +80,7 @@ public static class RunCommand
                                 processManager.TerminateControlSession(state.ControlSession);
 
                             ConsoleOutput.Info("Launching control remote session...");
-                            var controlSession = processManager.LaunchControlSession(config, state);
+                            var controlSession = processManager.LaunchControlSession(config);
                             if (controlSession is not null)
                             {
                                 state.ControlSession = controlSession;
@@ -139,7 +139,7 @@ public static class RunCommand
                                         processManager.TerminateControlSession(state.ControlSession);
 
                                     logger.LogInformation("Relaunching control session...");
-                                    var controlSession = processManager.LaunchControlSession(config, state);
+                                    var controlSession = processManager.LaunchControlSession(config);
                                     if (controlSession is not null)
                                     {
                                         state.ControlSession = controlSession;
