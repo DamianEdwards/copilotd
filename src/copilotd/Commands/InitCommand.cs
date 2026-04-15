@@ -101,9 +101,7 @@ public static class InitCommand
                 // Expand ~ to home directory
                 if (repoHome.StartsWith('~'))
                 {
-                    repoHome = Path.Combine(
-                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                        repoHome[1..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                    repoHome = CopilotdPaths.ExpandUserProfile(repoHome);
                 }
 
                 config.RepoHome = Path.GetFullPath(repoHome);
@@ -312,6 +310,8 @@ public static class InitCommand
                 AnsiConsole.Write(new Rule("[bold green]Configuration Saved[/]").LeftJustified());
                 AnsiConsole.WriteLine();
                 AnsiConsole.MarkupLine($"[grey]Config stored in: {Markup.Escape(stateStore.ConfigDir)}[/]");
+                if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(CopilotdPaths.HomeEnvVar)))
+                    AnsiConsole.MarkupLine($"[grey]{Markup.Escape(CopilotdPaths.HomeEnvVar)} is overriding the default ~/.copilotd location.[/]");
                 AnsiConsole.WriteLine();
 
                 // Summary table

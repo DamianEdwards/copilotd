@@ -81,7 +81,7 @@ copilotd.cmd run            # Windows
 
 Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the project from source via `dotnet run`, passing all arguments through.
 
-Installed copilotd binaries can self-update in the background: the daemon checks for newer releases, downloads and verifies them, then stages the new binary to be installed after the running daemon exits naturally. When running from source or a local repo publish, copilotd suppresses automatic background self-updates by default so local scenario verification is not interrupted by GitHub releases. You can still disable them explicitly with `COPILOTD_DISABLE_SELF_UPDATES=1` or `--disable-self-updates`, and `copilotd update --check` remains available to inspect update availability.
+Installed copilotd binaries can self-update in the background: the daemon checks for newer releases, downloads and verifies them, then stages the new binary to be installed after the running daemon exits naturally. If an installed binary update is interrupted and you restore `copilotd.exe` by rerunning the normal install script, the next copilotd launch will reconcile any leftover `.old`, `.staged`, and `update-state.json` artifacts: it will resume a newer staged update, or discard stale staged state rather than downgrading the restored binary. When running from source or a local repo publish, copilotd suppresses automatic background self-updates by default so local scenario verification is not interrupted by GitHub releases. You can still disable them explicitly with `COPILOTD_DISABLE_SELF_UPDATES=1` or `--disable-self-updates`, and `copilotd update --check` remains available to inspect update availability.
 
 ## Commands
 
@@ -163,7 +163,7 @@ The built-in prompt supports token replacement:
 | `$(issue.milestone)` | Milestone title |
 | `$(pr.id)` | Pull request number (available in PR review re-dispatch prompts) |
 
-Custom prompt text (configured via `custom_prompt` or `~/.copilotd/prompt.md`) is appended after
+Custom prompt text (configured via `custom_prompt` or `~/.copilotd/prompt.md` by default) is appended after
 the built-in prompt with a trailer. Rules can also specify a `custom_prompt` that either appends
 to or overrides the global custom prompt (controlled by `custom_prompt_mode`). Tokens are replaced
 in both the built-in and custom prompt text. Per-rule extra prompts are appended last.
@@ -333,7 +333,7 @@ sessions, and more — all via natural language.
 | `copilotd rules list` | Show configured dispatch rules |
 | `copilotd config` | Show current configuration |
 
-To disable the control session, set `enable_control_session` to `false` in `~/.copilotd/config.json`.
+To disable the control session, set `enable_control_session` to `false` in `~/.copilotd/config.json` (or `COPILOTD_HOME\config.json` when `COPILOTD_HOME` is set).
 
 ### Terminal states and pruning
 
@@ -344,10 +344,12 @@ To disable the control session, set `enable_control_session` to `false` in `~/.c
 
 ## Configuration
 
-Stored in `~/.copilotd/`:
+Stored in `~/.copilotd/` by default. Set `COPILOTD_HOME` to point copilotd at a different state/config directory:
 
 - `config.json` — user-managed settings (repo home, custom prompt, rules)
 - `state.json` — runtime session tracking (auto-managed, self-healing)
+- `update-state.json` — self-update staging and install coordination
+- `prompt.md` — optional global custom prompt text appended to the built-in prompt
 - `.lock` — single-instance guard (present while daemon is running)
 
 ### Config options
@@ -416,7 +418,7 @@ when sessions complete, are reset, or are pruned.
 
 Custom prompt text can be provided at two levels:
 
-- **Global**: via `~/.copilotd/prompt.md` or the `prompt` config property
+- **Global**: via `~/.copilotd/prompt.md` (or `COPILOTD_HOME\prompt.md`) or the `prompt` config property
 - **Per-rule**: via the `custom_prompt` rule setting (set with `--custom-prompt`)
 
 Global custom text is **appended** to the built-in copilotd prompt (not a replacement) with a

@@ -5,7 +5,8 @@ using Microsoft.Extensions.Logging;
 namespace Copilotd.Infrastructure;
 
 /// <summary>
-/// Handles atomic read/write of config.json and state.json under ~/.copilotd.
+/// Handles atomic read/write of config.json and state.json under copilotd's home
+/// directory (defaults to ~/.copilotd, overrideable with COPILOTD_HOME).
 /// Writes use temp-then-rename for crash safety. Corrupt/missing files are
 /// treated as empty (self-healing).
 /// </summary>
@@ -28,8 +29,7 @@ public sealed class StateStore
     public StateStore(ILogger<StateStore> logger)
     {
         _logger = logger;
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        _configDir = Path.Combine(home, ".copilotd");
+        _configDir = CopilotdPaths.GetCopilotdHomeDirectory();
         _configPath = Path.Combine(_configDir, "config.json");
         _statePath = Path.Combine(_configDir, "state.json");
         _updateStatePath = Path.Combine(_configDir, "update-state.json");
@@ -122,7 +122,7 @@ public sealed class StateStore
     // --- Prompt ---
 
     /// <summary>
-    /// Loads the user's custom prompt addition from ~/.copilotd/prompt.md if it exists
+    /// Loads the user's custom prompt addition from the copilotd home directory's prompt.md if it exists
     /// and contains non-default content, falling back to the config's inline Prompt property.
     /// Returns empty string if no custom prompt is configured.
     /// </summary>
@@ -273,7 +273,7 @@ public sealed class StateStore
     // --- Daemon PID tracking ---
 
     /// <summary>
-    /// Writes the current process ID and start time to ~/.copilotd/.pid.
+    /// Writes the current process ID and start time to the copilotd home directory's .pid file.
     /// Used by the stop command to locate and verify the daemon process.
     /// </summary>
     private void WriteDaemonPid()
@@ -441,6 +441,22 @@ public sealed class StateStore
         _updateLockStream?.Dispose();
         _updateLockStream = null;
         try { File.Delete(_updateLockPath); } catch { /* best effort */ }
+    }
+
+    public bool IsUpdateLockHeld()
+    {
+        if (!File.Exists(_updateLockPath))
+            return false;
+
+        try
+        {
+            using var fs = new FileStream(_updateLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            return false;
+        }
+        catch (IOException)
+        {
+            return !IsUpdateLockStale();
+        }
     }
 
     private void WriteUpdateLockInfo()

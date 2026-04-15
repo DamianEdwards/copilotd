@@ -31,7 +31,8 @@ public enum UpdateStatus
 }
 
 /// <summary>
-/// Persisted update state stored at ~/.copilotd/update-state.json.
+/// Persisted update state stored under copilotd's home directory
+/// (defaults to ~/.copilotd/update-state.json, overrideable with COPILOTD_HOME).
 /// Tracks the current self-update lifecycle so the daemon and update command
 /// can coordinate across process boundaries.
 /// </summary>

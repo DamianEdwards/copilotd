@@ -88,9 +88,7 @@ public static class ConfigCommand
                     case "repo_home":
                         if (value.StartsWith('~'))
                         {
-                            value = Path.Combine(
-                                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                                value[1..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                            value = CopilotdPaths.ExpandUserProfile(value);
                         }
                         cfg.RepoHome = Path.GetFullPath(value);
                         ConsoleOutput.Success($"repo_home set to: {cfg.RepoHome}");

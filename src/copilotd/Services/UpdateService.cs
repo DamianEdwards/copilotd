@@ -14,6 +14,11 @@ public sealed record UpdateCheckResult(
     string ReleaseTag,
     bool IsDevBuild);
 
+public sealed record StartupRepairResult(
+    bool Succeeded,
+    string Message,
+    bool RelaunchRequired = false);
+
 /// <summary>
 /// Orchestrates the self-update lifecycle: check → download → verify → stage → install.
 /// </summary>
@@ -75,6 +80,125 @@ public sealed class UpdateService
             state.ErrorMessage = null;
             _stateStore.SaveUpdateState(state);
             return true;
+        }
+        finally
+        {
+            _stateStore.ReleaseUpdateLock();
+        }
+    }
+
+    public async Task<StartupRepairResult?> RepairInterruptedInstallAsync(bool skipProvenance, CancellationToken ct)
+    {
+        if (!_stateStore.TryAcquireUpdateLock())
+        {
+            return new StartupRepairResult(
+                false,
+                "A self-update is already in progress. Wait for it to finish before starting copilotd.");
+        }
+
+        try
+        {
+        var currentExePath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(currentExePath))
+            return null;
+
+        var installDir = Path.GetDirectoryName(currentExePath)!;
+        var binaryName = OperatingSystem.IsWindows() ? "copilotd.exe" : "copilotd";
+        var oldPath = Path.Combine(installDir, $"{binaryName}.old");
+        var defaultStagedPath = Path.Combine(installDir, $"{binaryName}.staged");
+
+        var state = _stateStore.LoadUpdateState();
+        if (state.Status != UpdateStatus.Installing)
+        {
+            if (!File.Exists(oldPath))
+                return null;
+
+            CleanupOldBinary();
+            return File.Exists(oldPath)
+                ? null
+                : new StartupRepairResult(true, "Cleaned up leftover backup binary from a previous self-update.");
+        }
+
+        if (string.IsNullOrWhiteSpace(state.StagedPath))
+        {
+            ClearInterruptedInstallArtifactsCore(defaultStagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the staged path metadata was missing.");
+        }
+
+        var stagedPath = state.StagedPath;
+        if (!File.Exists(stagedPath))
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the staged binary was missing.");
+        }
+
+        var currentVersionString = VersionHelper.GetCurrentVersion();
+        if (currentVersionString is null || !VersionHelper.TryParse(currentVersionString, out var currentVersion))
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the current binary version could not be determined safely.");
+        }
+
+        if (string.IsNullOrWhiteSpace(state.StagedVersion)
+            || !VersionHelper.TryParse(state.StagedVersion, out var stagedVersion))
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the staged version metadata was invalid.");
+        }
+
+        if (stagedVersion.CompareTo(currentVersion) <= 0)
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                $"Discarded stale staged update {state.StagedVersion} because the current binary is already {currentVersionString} or newer.");
+        }
+
+        _logger.LogWarning(
+            "Resuming interrupted self-update install of {StagedVersion} over current binary {CurrentVersion}",
+            state.StagedVersion,
+            currentVersionString);
+
+        using var installWindowLock = _stateStore.TryAcquireInstallWindowLock();
+        if (installWindowLock is null)
+        {
+            return new StartupRepairResult(
+                false,
+                "Another copilotd instance started while startup repair was running. Retry the command after it exits.");
+        }
+
+        var installed = await InstallStagedCoreAsync(
+            skipProvenance,
+            waitForPid: null,
+            waitForStartTime: null,
+            allowDaemonShutdown: true,
+            ct);
+
+        if (installed)
+        {
+            return new StartupRepairResult(
+                true,
+                $"Recovered interrupted self-update install and applied staged version {state.StagedVersion}.",
+                RelaunchRequired: true);
+        }
+
+        var failedState = _stateStore.LoadUpdateState();
+        return new StartupRepairResult(
+            false,
+            $"Detected interrupted self-update install but automatic recovery failed: {failedState.ErrorMessage ?? "unknown error"}.");
         }
         finally
         {
@@ -356,7 +480,9 @@ public sealed class UpdateService
         CancellationToken ct)
     {
         var state = _stateStore.LoadUpdateState();
-        if ((state.Status != UpdateStatus.Staged && state.Status != UpdateStatus.WaitingForExit)
+        if ((state.Status != UpdateStatus.Staged
+             && state.Status != UpdateStatus.WaitingForExit
+             && state.Status != UpdateStatus.Installing)
             || string.IsNullOrEmpty(state.StagedPath))
         {
             _logger.LogWarning("No staged update found to install");
@@ -574,6 +700,49 @@ public sealed class UpdateService
         state.LastAttemptTime = DateTimeOffset.UtcNow;
         _stateStore.SaveUpdateState(state);
         _logger.LogWarning("Update failed (attempt #{Count}): {Message}", state.FailureCount, message);
+    }
+
+    private void ClearInterruptedInstallArtifacts(string stagedPath)
+    {
+        if (!_stateStore.TryAcquireUpdateLock())
+        {
+            _logger.LogWarning("Could not acquire the update lock to clear interrupted install artifacts");
+            return;
+        }
+
+        try
+        {
+            try
+            {
+                if (File.Exists(stagedPath))
+                    File.Delete(stagedPath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to delete stale staged binary '{Path}'", stagedPath);
+            }
+
+            _stateStore.ClearUpdateState();
+        }
+        finally
+        {
+            _stateStore.ReleaseUpdateLock();
+        }
+    }
+
+    private void ClearInterruptedInstallArtifactsCore(string stagedPath)
+    {
+        try
+        {
+            if (File.Exists(stagedPath))
+                File.Delete(stagedPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to delete stale staged binary '{Path}'", stagedPath);
+        }
+
+        _stateStore.ClearUpdateState();
     }
 
     private async Task<bool> WaitForDaemonChainToExitAsync(int initialPid, DateTimeOffset initialStartTime, CancellationToken ct)

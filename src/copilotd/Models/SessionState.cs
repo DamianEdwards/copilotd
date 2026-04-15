@@ -3,7 +3,8 @@ using System.Text.Json.Serialization;
 namespace Copilotd.Models;
 
 /// <summary>
-/// Top-level runtime state persisted to ~/.copilotd/state.json.
+/// Top-level runtime state persisted under copilotd's home directory
+/// (defaults to ~/.copilotd/state.json, overrideable with COPILOTD_HOME).
 /// Self-healing: a missing or corrupt file is treated as empty state.
 /// </summary>
 public sealed class DaemonState

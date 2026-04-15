@@ -15,6 +15,39 @@ public class Program
         {
             var consoleLogLevel = ParseLogLevel(args);
             var services = ConfigureServices(consoleLogLevel);
+            var runtimeContext = services.GetRequiredService<RuntimeContext>();
+            var stateStore = services.GetRequiredService<StateStore>();
+            var updateService = services.GetRequiredService<UpdateService>();
+
+            if (IsStartupRepairCommand(args) && stateStore.IsUpdateLockHeld())
+            {
+                ConsoleOutput.Error("A self-update is already in progress. Wait for it to finish before starting copilotd.");
+                return 1;
+            }
+
+            if (ShouldRunStartupRepair(args, runtimeContext, stateStore)
+                && await updateService.RepairInterruptedInstallAsync(skipProvenance: false, CancellationToken.None) is { } repairResult)
+            {
+                if (!repairResult.Succeeded)
+                {
+                    ConsoleOutput.Error(repairResult.Message);
+                    return 1;
+                }
+
+                ConsoleOutput.Info(repairResult.Message);
+
+                if (repairResult.RelaunchRequired)
+                {
+                    var relaunchExitCode = await RelaunchWithCurrentArgumentsAsync(args, CancellationToken.None);
+                    if (relaunchExitCode is null)
+                    {
+                        ConsoleOutput.Error("Startup repair installed a newer binary, but copilotd could not relaunch the requested command automatically.");
+                        return 1;
+                    }
+
+                    return relaunchExitCode.Value;
+                }
+            }
 
             var rootCommand = new RootCommand("copilotd - GitHub issue dispatch daemon for Copilot CLI");
 
@@ -101,4 +134,68 @@ public class Program
         "error" => LogLevel.Error,
         _ => LogLevel.Information,
     };
+
+    private static bool ShouldRunStartupRepair(string[] args, RuntimeContext runtimeContext, StateStore stateStore)
+    {
+        if (!runtimeContext.SupportsInPlaceSelfUpdate())
+            return false;
+
+        if (stateStore.IsLockHeld())
+            return false;
+
+        if (!IsStartupRepairCommand(args))
+            return false;
+
+        return true;
+    }
+
+    private static bool IsStartupRepairCommand(string[] args)
+    {
+        if (args.Any(IsHelpOrVersionArgument))
+            return false;
+
+        var command = args.FirstOrDefault(a => !a.StartsWith('-'));
+        return string.Equals(command, "run", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(command, "start", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsHelpOrVersionArgument(string arg)
+        => string.Equals(arg, "--help", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "-h", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "-?", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "/?", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "--version", StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<int?> RelaunchWithCurrentArgumentsAsync(string[] args, CancellationToken ct)
+    {
+        var processPath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(processPath))
+            return null;
+
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = processPath,
+                UseShellExecute = false,
+            };
+
+            foreach (var arg in args)
+                psi.ArgumentList.Add(arg);
+
+            var process = System.Diagnostics.Process.Start(psi);
+            if (process is null)
+                return null;
+
+            using (process)
+            {
+                await process.WaitForExitAsync(ct);
+                return process.ExitCode;
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

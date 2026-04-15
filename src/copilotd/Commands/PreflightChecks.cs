@@ -35,7 +35,7 @@ internal static class PreflightChecks
 
         if (!stateStore.ConfigExists())
         {
-            ConsoleOutput.Error("copilotd is not configured. Run 'copilotd init' first.");
+            ConsoleOutput.Error($"copilotd is not configured. Run 'copilotd init' first. Expected config under {CopilotdPaths.GetConfigDirDescription()}.");
             return 1;
         }
 

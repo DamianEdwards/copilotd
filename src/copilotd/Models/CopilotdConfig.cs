@@ -3,7 +3,8 @@ using System.Text.Json.Serialization;
 namespace Copilotd.Models;
 
 /// <summary>
-/// Top-level user-managed configuration persisted to ~/.copilotd/config.json.
+/// Top-level user-managed configuration persisted under copilotd's home directory
+/// (defaults to ~/.copilotd/config.json, overrideable with COPILOTD_HOME).
 /// </summary>
 public sealed class CopilotdConfig
 {
