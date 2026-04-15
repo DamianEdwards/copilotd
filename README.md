@@ -38,11 +38,6 @@ In a terminal:
 gh release download install-scripts -R DamianEdwards/copilotd -p install.sh -O - | bash
 ```
 
-> **Note:** Artifact attestation verification requires `gh attestation verify` support. Pass `--skip-provenance` to skip provenance verification if attestations are not yet available for the release:
-> ```bash
-> gh release download install-scripts -R DamianEdwards/copilotd -p install.sh -O - | bash -s -- --skip-provenance
-> ```
-
 ## Running
 
 Run `copilotd init` to configure watched repos then run `copilotd run` to start the daemon.
