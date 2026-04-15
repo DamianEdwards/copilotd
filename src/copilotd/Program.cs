@@ -57,6 +57,7 @@ public class Program
         serviceCollection.AddSingleton<ReconciliationEngine>();
         serviceCollection.AddSingleton<GitHubReleaseService>();
         serviceCollection.AddSingleton<ProvenanceVerifier>();
+        serviceCollection.AddSingleton<RuntimeContext>();
         serviceCollection.AddSingleton<UpdateService>();
 
         return serviceCollection.BuildServiceProvider();

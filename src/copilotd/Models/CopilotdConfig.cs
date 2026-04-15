@@ -96,10 +96,10 @@ public sealed class CopilotdConfig
         If you have enough information to implement the requested changes:
         - You are already on a new branch created for this issue. Commit your changes here.
         - When your work is complete, push the branch and create a pull request that references the issue (e.g., "Closes #$(issue.id)").
-        - After the pull request is created, run `copilotd session pr <pr-number> $(issue.repo)#$(issue.id)` to enable automatic review feedback handling (replace <pr-number> with the actual PR number).
+        - After the pull request is created, run `$(copilotd.command) session pr <pr-number> $(issue.repo)#$(issue.id)` to enable automatic review feedback handling (replace <pr-number> with the actual PR number).
 
         If you need more information or clarification before proceeding:
-        - Run `copilotd session comment $(issue.repo)#$(issue.id) --message "Your question or findings here"` to post a comment on the issue.
+        - Run `$(copilotd.command) session comment $(issue.repo)#$(issue.id) --message "Your question or findings here"` to post a comment on the issue.
         - This will pause your session until a response is posted on the issue, at which point your session will automatically resume.
         """;
 
@@ -110,21 +110,21 @@ public sealed class CopilotdConfig
         matching configured rules. You help the user monitor and manage copilotd remotely.
 
         AVAILABLE COMMANDS (run these in the terminal):
-        - `copilotd status`                          — Show daemon health, watched repos, and session summary
-        - `copilotd session list [--all]`             — List active sessions (--all includes completed/failed)
-        - `copilotd session list --filter <status>`   — Filter by status: pending, running, completed, failed, orphaned, joined, waitingforfeedback, waitingforreview
-        - `copilotd session reset <issue>`            — Reset a session for re-dispatch (e.g., "org/repo#42")
-        - `copilotd session complete <issue>`         — Mark a session as completed
-        - `copilotd session comment <issue> --message "text"` — Post a comment on the issue and pause the session
-        - `copilotd session pr <pr-number> <issue>`   — Associate a PR with a session for review monitoring
-        - `copilotd rules list`                       — Show configured dispatch rules
-        - `copilotd config`                           — Show current configuration
+        - `$(copilotd.command) status`                          — Show daemon health, watched repos, and session summary
+        - `$(copilotd.command) session list [--all]`             — List active sessions (--all includes completed/failed)
+        - `$(copilotd.command) session list --filter <status>`   — Filter by status: pending, running, completed, failed, orphaned, joined, waitingforfeedback, waitingforreview
+        - `$(copilotd.command) session reset <issue>`            — Reset a session for re-dispatch (e.g., "org/repo#42")
+        - `$(copilotd.command) session complete <issue>`         — Mark a session as completed
+        - `$(copilotd.command) session comment <issue> --message "text"` — Post a comment on the issue and pause the session
+        - `$(copilotd.command) session pr <pr-number> <issue>`   — Associate a PR with a session for review monitoring
+        - `$(copilotd.command) rules list`                       — Show configured dispatch rules
+        - `$(copilotd.command) config`                           — Show current configuration
 
         FORBIDDEN COMMANDS (do NOT run these — they would disrupt the daemon):
-        - `copilotd run` / `copilotd start` / `copilotd stop` — Would interfere with the running daemon
-        - `copilotd update` — Could replace the running binary
-        - `copilotd init` — Interactive setup, not appropriate for remote sessions
-        - `copilotd shutdown-instance` — Internal command, never run directly
+        - `$(copilotd.command) run` / `$(copilotd.command) start` / `$(copilotd.command) stop` — Would interfere with the running daemon
+        - `$(copilotd.command) update` — Could replace the running binary
+        - `$(copilotd.command) init` — Interactive setup, not appropriate for remote sessions
+        - `$(copilotd.command) shutdown-instance` — Internal command, never run directly
 
         SESSION LIFECYCLE:
         Issues matching rules are dispatched as copilot sessions that progress through:

@@ -81,6 +81,8 @@ copilotd.cmd run            # Windows
 
 Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the project from source via `dotnet run`, passing all arguments through.
 
+When running from source or a local repo publish, copilotd suppresses automatic background self-updates by default so local scenario verification is not interrupted by GitHub releases. You can still disable them explicitly with `COPILOTD_DISABLE_SELF_UPDATES=1` or `--disable-self-updates`, and `copilotd update --check` remains available to inspect update availability.
+
 ## Commands
 
 | Command | Description |

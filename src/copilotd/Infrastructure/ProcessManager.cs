@@ -17,12 +17,14 @@ public sealed partial class ProcessManager
 
     private readonly StateStore _stateStore;
     private readonly RepoPathResolver _repoResolver;
+    private readonly RuntimeContext _runtimeContext;
     private readonly ILogger<ProcessManager> _logger;
 
-    public ProcessManager(StateStore stateStore, RepoPathResolver repoResolver, ILogger<ProcessManager> logger)
+    public ProcessManager(StateStore stateStore, RepoPathResolver repoResolver, RuntimeContext runtimeContext, ILogger<ProcessManager> logger)
     {
         _stateStore = stateStore;
         _repoResolver = repoResolver;
+        _runtimeContext = runtimeContext;
         _logger = logger;
     }
 
@@ -41,8 +43,14 @@ public sealed partial class ProcessManager
         }
 
         var customPrompt = _stateStore.LoadCustomPrompt(config);
-        var prompt = BuildPrompt(customPrompt, issue, session, config);
-        var args = BuildArguments(session, prompt, config.Rules.GetValueOrDefault(session.RuleName), repoPath, config.DefaultModel);
+        var prompt = BuildPrompt(customPrompt, issue, session, config, _runtimeContext.GetCopilotdCallbackCommand());
+        var args = BuildArguments(
+            session,
+            prompt,
+            config.Rules.GetValueOrDefault(session.RuleName),
+            repoPath,
+            config.DefaultModel,
+            _runtimeContext.GetExtraAllowedDirectories());
 
         _logger.LogInformation("Launching copilot for {IssueKey} with session {SessionId}", session.IssueKey, session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
@@ -253,8 +261,8 @@ public sealed partial class ProcessManager
     /// </summary>
     private bool TerminateViaShutdownInstance(Process process, int pid)
     {
-        var copilotdPath = Environment.ProcessPath;
-        if (copilotdPath is null)
+        var invocation = _runtimeContext.GetSelfInvocation($"shutdown-instance --pid {pid}");
+        if (invocation is null)
         {
             _logger.LogWarning("Cannot determine copilotd executable path, falling back to kill");
             process.Kill(entireProcessTree: true);
@@ -265,8 +273,8 @@ public sealed partial class ProcessManager
 
         var psi = new ProcessStartInfo
         {
-            FileName = copilotdPath,
-            Arguments = $"shutdown-instance --pid {pid}",
+            FileName = invocation.FileName,
+            Arguments = invocation.Arguments,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
@@ -423,7 +431,9 @@ public sealed partial class ProcessManager
             StartedAt = DateTimeOffset.UtcNow,
         };
 
-        var args = BuildControlSessionArguments(session.CopilotSessionId, CopilotdConfig.ControlSessionPrompt, config.DefaultModel);
+        var prompt = CopilotdConfig.ControlSessionPrompt
+            .Replace("$(copilotd.command)", _runtimeContext.GetCopilotdCallbackCommand(), StringComparison.Ordinal);
+        var args = BuildControlSessionArguments(session.CopilotSessionId, prompt, config.DefaultModel, _runtimeContext);
         _logger.LogInformation("Launching control session {SessionId}", session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
 
@@ -503,23 +513,29 @@ public sealed partial class ProcessManager
     public bool TerminateControlSession(ControlSessionInfo session)
         => TerminateProcess("control session", session.ProcessId, session.ProcessStartTime);
 
-    private static string BuildControlSessionArguments(string sessionId, string prompt, string? defaultModel)
+    private static string BuildControlSessionArguments(string sessionId, string prompt, string? defaultModel, RuntimeContext runtimeContext)
     {
         var args = new List<string>
         {
             "--remote",
             $"--resume={sessionId}",
             "-i", $"\"{EscapeArg(prompt)}\"",
-            // Only allow copilotd, gh, and git commands — no general shell access
-            "--allow-tool=shell(copilotd:*)",
-            "--allow-tool=shell(gh:*)",
-            "--allow-tool=shell(git:*)",
         };
+
+        // Only allow the commands needed to manage the daemon remotely — no general shell access.
+        foreach (var command in runtimeContext.GetControlSessionAllowedShellCommands().Distinct(StringComparer.OrdinalIgnoreCase))
+            args.Add($"--allow-tool=shell({command}:*)");
 
         if (!string.IsNullOrWhiteSpace(defaultModel))
         {
             args.Add("--model");
             args.Add($"\"{EscapeArg(defaultModel)}\"");
+        }
+
+        foreach (var extraDir in runtimeContext.GetExtraAllowedDirectories().Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            args.Add("--add-dir");
+            args.Add($"\"{EscapeArg(extraDir)}\"");
         }
 
         return string.Join(' ', args);
@@ -599,7 +615,7 @@ public sealed partial class ProcessManager
         }
     }
 
-    private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
+    private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand)
     {
         // Use a PR-specific prompt when re-dispatching for review feedback
         var prompt = session.PullRequestNumber is not null
@@ -629,6 +645,7 @@ public sealed partial class ProcessManager
 
         // Replace tokens in the entire prompt (default + custom + extra)
         prompt = prompt
+            .Replace("$(copilotd.command)", copilotdCommand, StringComparison.Ordinal)
             .Replace("$(issue.repo)", issue.Repo)
             .Replace("$(issue.id)", issue.Number.ToString())
             .Replace("$(issue.type)", issue.Type ?? "issue")
@@ -652,8 +669,8 @@ public sealed partial class ProcessManager
             - Address each review comment by making the requested changes.
             - If a review comment includes a suggested change (```suggestion block), apply it directly to the relevant file.
             - After addressing all review feedback, push your changes to update the PR.
-            - Then run `copilotd session pr $(pr.id) $(issue.repo)#$(issue.id)` to continue monitoring for further review feedback.
-            - If the changes are complete and no more reviews are expected, run `copilotd session complete $(issue.repo)#$(issue.id)` instead.
+            - Then run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(issue.id)` to continue monitoring for further review feedback.
+            - If the changes are complete and no more reviews are expected, run `$(copilotd.command) session complete $(issue.repo)#$(issue.id)` instead.
 
             Interacting with the PR:
             - To post a general comment on the PR: `gh pr comment $(pr.id) --repo $(issue.repo) --body "Your comment"`
@@ -662,7 +679,7 @@ public sealed partial class ProcessManager
               gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: "THREAD_ID", body: "Your reply" }) { comment { id } } }'
               ```
               You can find thread IDs by querying: `gh api graphql -f query='{ repository(owner: "OWNER", name: "REPO") { pullRequest(number: $(pr.id)) { reviewThreads(last: 20) { nodes { id isResolved comments(last: 5) { nodes { body author { login } } } } } } } }'`
-            - Do NOT use `copilotd session comment` to post to the issue when in PR review mode. All communication should happen on the PR itself.
+            - Do NOT use `$(copilotd.command) session comment` to post to the issue when in PR review mode. All communication should happen on the PR itself.
             """;
     }
 
@@ -689,7 +706,7 @@ public sealed partial class ProcessManager
         };
     }
 
-    private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule, string repoPath, string? defaultModel)
+    private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule, string repoPath, string? defaultModel, IEnumerable<string> extraAllowedDirectories)
     {
         var args = new List<string>
         {
@@ -725,6 +742,15 @@ public sealed partial class ProcessManager
         // Always add the repo directory as an allowed path
         args.Add("--add-dir");
         args.Add($"\"{EscapeArg(repoPath)}\"");
+
+        var normalizedRepoPath = Path.GetFullPath(repoPath);
+        foreach (var extraDir in extraAllowedDirectories
+                     .Where(dir => !string.Equals(Path.GetFullPath(dir), normalizedRepoPath, StringComparison.OrdinalIgnoreCase))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            args.Add("--add-dir");
+            args.Add($"\"{EscapeArg(extraDir)}\"");
+        }
 
         return string.Join(' ', args);
     }

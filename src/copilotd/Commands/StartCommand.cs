@@ -20,9 +20,14 @@ public static class StartCommand
         var command = new Command("start", "Start the copilotd daemon in the background");
         var intervalOption = new Option<int>("--interval") { Description = "Polling interval in seconds", DefaultValueFactory = _ => 60 };
         var logLevelOption = new Option<string?>("--log-level") { Description = "Set logging level (default: info). Use 'debug' for more detail or 'error' for less." };
+        var disableSelfUpdatesOption = new Option<bool>("--disable-self-updates")
+        {
+            Description = $"Disable automatic background self-updates for the started daemon (also supported via {RuntimeContext.DisableSelfUpdatesEnvVar})."
+        };
 
         command.Options.Add(intervalOption);
         command.Options.Add(logLevelOption);
+        command.Options.Add(disableSelfUpdatesOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -32,9 +37,11 @@ public static class StartCommand
                 var ghCli = services.GetRequiredService<GhCliService>();
                 var copilotCli = services.GetRequiredService<CopilotCliService>();
                 var stateStore = services.GetRequiredService<StateStore>();
+                var runtimeContext = services.GetRequiredService<RuntimeContext>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var logLevel = parseResult.GetValue(logLevelOption);
+                var disableSelfUpdates = parseResult.GetValue(disableSelfUpdatesOption);
 
                 // Pre-flight checks
                 var preflightResult = PreflightChecks.Run(ghCli, copilotCli, stateStore);
@@ -54,9 +61,13 @@ public static class StartCommand
                 {
                     args += $" --log-level {logLevel}";
                 }
+                if (disableSelfUpdates)
+                {
+                    args += " --disable-self-updates";
+                }
 
-                var copilotdPath = Environment.ProcessPath;
-                if (copilotdPath is null)
+                var invocation = runtimeContext.GetSelfInvocation(args);
+                if (invocation is null)
                 {
                     ConsoleOutput.Error("Cannot determine copilotd executable path.");
                     return 1;
@@ -66,11 +77,11 @@ public static class StartCommand
                 int childPid;
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    childPid = LaunchDetachedWindows(copilotdPath, args);
+                    childPid = LaunchDetachedWindows(invocation);
                 }
                 else
                 {
-                    childPid = LaunchDetachedUnix(copilotdPath, args);
+                    childPid = LaunchDetachedUnix(invocation);
                 }
 
                 if (childPid <= 0)
@@ -130,7 +141,7 @@ public static class StartCommand
                     return 1;
                 }
 
-                ConsoleOutput.Success($"copilotd daemon started in background (PID: {childPid}). Use 'copilotd stop' to shut down.");
+                ConsoleOutput.Success($"copilotd daemon started in background (PID: {childPid}). Use '{runtimeContext.GetCopilotdCallbackCommand()} stop' to shut down.");
                 return 0;
             }, logger);
         });
@@ -142,13 +153,13 @@ public static class StartCommand
     /// Windows: use CreateProcessW with CREATE_NEW_CONSOLE to give the daemon its own
     /// console (hidden). This is required for shutdown-instance to attach and send signals.
     /// </summary>
-    private static int LaunchDetachedWindows(string exePath, string args)
+    private static int LaunchDetachedWindows(CommandInvocation invocation)
     {
         var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>() };
         si.dwFlags = STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_HIDE;
 
-        var cmdLine = $"\"{exePath}\" {args}";
+        var cmdLine = invocation.GetCommandLine();
         var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
 
         if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
@@ -167,12 +178,12 @@ public static class StartCommand
     /// Unix: use setsid to create a new session, detaching from the terminal.
     /// Stdin/stdout/stderr are redirected to /dev/null.
     /// </summary>
-    private static int LaunchDetachedUnix(string exePath, string args)
+    private static int LaunchDetachedUnix(CommandInvocation invocation)
     {
         var psi = new ProcessStartInfo
         {
             FileName = "setsid",
-            Arguments = $"\"{exePath}\" {args}",
+            Arguments = invocation.GetCommandLine(),
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -202,8 +213,8 @@ public static class StartCommand
             // setsid not available, fall back to direct launch
             var fallbackPsi = new ProcessStartInfo
             {
-                FileName = exePath,
-                Arguments = args,
+                FileName = invocation.FileName,
+                Arguments = invocation.Arguments,
                 UseShellExecute = false,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,

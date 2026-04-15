@@ -166,7 +166,9 @@ public sealed class StateStore
     /// should be treated as "no custom prompt" rather than appended content.
     /// </summary>
     private static bool IsDefaultPrompt(string content)
-        => NormalizeForComparison(content) == NormalizeForComparison(CopilotdConfig.DefaultPrompt);
+        => GetDefaultPromptVariants()
+            .Select(NormalizeForComparison)
+            .Any(defaultPrompt => NormalizeForComparison(content) == defaultPrompt);
 
     /// <summary>
     /// If the content starts with the default prompt (e.g. a user appended to the old
@@ -175,15 +177,23 @@ public sealed class StateStore
     private static string StripDefaultPromptPrefix(string content)
     {
         var normalizedContent = NormalizeForComparison(content);
-        var normalizedDefault = NormalizeForComparison(CopilotdConfig.DefaultPrompt);
-
-        if (normalizedContent.StartsWith(normalizedDefault, StringComparison.Ordinal))
+        foreach (var defaultPrompt in GetDefaultPromptVariants())
         {
-            var remainder = content.Trim()[CopilotdConfig.DefaultPrompt.Trim().Length..].Trim();
-            return remainder;
+            var normalizedDefault = NormalizeForComparison(defaultPrompt);
+            if (normalizedContent.StartsWith(normalizedDefault, StringComparison.Ordinal))
+            {
+                var remainder = content.Trim()[defaultPrompt.Trim().Length..].Trim();
+                return remainder;
+            }
         }
 
         return content;
+    }
+
+    private static IEnumerable<string> GetDefaultPromptVariants()
+    {
+        yield return CopilotdConfig.DefaultPrompt;
+        yield return CopilotdConfig.DefaultPrompt.Replace("$(copilotd.command)", "copilotd", StringComparison.Ordinal);
     }
 
     private static string NormalizeForComparison(string s)

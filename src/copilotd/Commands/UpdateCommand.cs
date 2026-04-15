@@ -54,6 +54,7 @@ public static class UpdateCommand
             {
                 var updateService = services.GetRequiredService<UpdateService>();
                 var stateStore = services.GetRequiredService<StateStore>();
+                var runtimeContext = services.GetRequiredService<RuntimeContext>();
 
                 var check = parseResult.GetValue(checkOption);
                 var preRelease = parseResult.GetValue(preReleaseOption);
@@ -74,6 +75,12 @@ public static class UpdateCommand
 
                 if (installStaged)
                 {
+                    if (!runtimeContext.SupportsInPlaceSelfUpdate() && runtimeContext.GetUnsupportedSelfUpdateReason() is { } reason)
+                    {
+                        ConsoleOutput.Error(reason);
+                        return 1;
+                    }
+
                     if (dryRun)
                     {
                         ConsoleOutput.Info("[dry-run] Would install staged update.");
@@ -85,6 +92,12 @@ public static class UpdateCommand
                 if (check)
                 {
                     return HandleCheckOnly(updateService, preRelease);
+                }
+
+                if (!runtimeContext.SupportsInPlaceSelfUpdate() && runtimeContext.GetUnsupportedSelfUpdateReason() is { } unsupportedReason)
+                {
+                    ConsoleOutput.Error(unsupportedReason);
+                    return 1;
                 }
 
                 return await HandleFullUpdate(updateService, stateStore, preRelease, skipProvenance, dryRun, ct);

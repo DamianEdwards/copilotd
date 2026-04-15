@@ -24,6 +24,7 @@ public static class StopCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
+                var runtimeContext = services.GetRequiredService<RuntimeContext>();
 
                 // Check if daemon is running
                 if (!stateStore.IsLockHeld())
@@ -37,7 +38,7 @@ public static class StopCommand
                 if (pidInfo is null)
                 {
                     ConsoleOutput.Error("Daemon appears to be running but PID file is missing. Cannot send shutdown signal.");
-                    ConsoleOutput.Info("If the daemon was started with 'copilotd run', press Ctrl+C in that terminal instead.");
+                    ConsoleOutput.Info($"If the daemon was started with '{runtimeContext.GetCopilotdCallbackCommand()} run', press Ctrl+C in that terminal instead.");
                     return 1;
                 }
 
@@ -83,7 +84,7 @@ public static class StopCommand
                     bool terminated;
                     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                     {
-                        terminated = StopDaemonWindows(process, pid);
+                        terminated = StopDaemonWindows(process, pid, runtimeContext);
                     }
                     else
                     {
@@ -120,10 +121,10 @@ public static class StopCommand
     /// Windows: use the shutdown-instance helper to attach to the daemon's console
     /// and send Ctrl+Break/Ctrl+C, triggering Console.CancelKeyPress in the daemon.
     /// </summary>
-    private static bool StopDaemonWindows(Process process, int pid)
+    private static bool StopDaemonWindows(Process process, int pid, RuntimeContext runtimeContext)
     {
-        var copilotdPath = Environment.ProcessPath;
-        if (copilotdPath is null)
+        var invocation = runtimeContext.GetSelfInvocation($"shutdown-instance --pid {pid}");
+        if (invocation is null)
         {
             ConsoleOutput.Warning("Cannot determine copilotd path, forcing termination.");
             return FallbackKill(process);
@@ -131,8 +132,8 @@ public static class StopCommand
 
         var psi = new ProcessStartInfo
         {
-            FileName = copilotdPath,
-            Arguments = $"shutdown-instance --pid {pid}",
+            FileName = invocation.FileName,
+            Arguments = invocation.Arguments,
             UseShellExecute = false,
             CreateNoWindow = true,
         };

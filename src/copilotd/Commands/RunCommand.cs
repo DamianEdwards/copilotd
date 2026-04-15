@@ -15,9 +15,14 @@ public static class RunCommand
         var command = new Command("run", "Start the copilotd daemon");
         var intervalOption = new Option<int>("--interval") { Description = "Polling interval in seconds", DefaultValueFactory = _ => 60 };
         var logLevelOption = new Option<string?>("--log-level") { Description = "Set console logging level (default: info). Use 'debug' for more detail or 'error' for less." };
+        var disableSelfUpdatesOption = new Option<bool>("--disable-self-updates")
+        {
+            Description = $"Disable automatic background self-updates for this daemon run (also supported via {RuntimeContext.DisableSelfUpdatesEnvVar})."
+        };
 
         command.Options.Add(intervalOption);
         command.Options.Add(logLevelOption);
+        command.Options.Add(disableSelfUpdatesOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -29,8 +34,10 @@ public static class RunCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var reconciliation = services.GetRequiredService<ReconciliationEngine>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var runtimeContext = services.GetRequiredService<RuntimeContext>();
 
                 var interval = parseResult.GetValue(intervalOption);
+                var disableSelfUpdates = runtimeContext.IsAutomaticSelfUpdateDisabled(parseResult.GetValue(disableSelfUpdatesOption));
 
                 // Pre-flight checks
                 var preflightResult = PreflightChecks.Run(ghCli, copilotCli, stateStore);
@@ -51,6 +58,8 @@ public static class RunCommand
                 try
                 {
                     ConsoleOutput.Success($"copilotd daemon started (polling every {interval}s). Press Ctrl+C to stop.");
+                    if (disableSelfUpdates && runtimeContext.GetAutomaticSelfUpdateDisableReason(parseResult.GetValue(disableSelfUpdatesOption)) is { } reason)
+                        ConsoleOutput.Info($"Automatic self-updates {reason}.");
 
                     // Startup reconciliation pass
                     var config = stateStore.LoadConfig();
@@ -184,42 +193,43 @@ public static class RunCommand
                                 }
                             }, cts.Token);
 
-                            // Self-update: check for staged update or fire background check
-                            var updateState = stateStore.LoadUpdateState();
-                            if (updateState.Status == UpdateStatus.Staged
-                                && !string.IsNullOrEmpty(updateState.StagedPath)
-                                && File.Exists(updateState.StagedPath))
+                            if (!disableSelfUpdates)
                             {
-                                // Staged update ready — spawn install process and exit daemon
-                                ConsoleOutput.Info($"Staged update {updateState.StagedVersion} detected, initiating install...");
-                                logger.LogInformation("Spawning update installer for staged version {Version}", updateState.StagedVersion);
-                                if (SpawnUpdateInstaller(logger))
+                                // Self-update: check for staged update or fire background check
+                                var updateState = stateStore.LoadUpdateState();
+                                if (updateState.Status == UpdateStatus.Staged
+                                    && !string.IsNullOrEmpty(updateState.StagedPath)
+                                    && File.Exists(updateState.StagedPath))
                                 {
-                                    cts.Cancel();
-                                    break;
-                                }
-                                else
-                                {
+                                    // Staged update ready — spawn install process and exit daemon
+                                    ConsoleOutput.Info($"Staged update {updateState.StagedVersion} detected, initiating install...");
+                                    logger.LogInformation("Spawning update installer for staged version {Version}", updateState.StagedVersion);
+                                    if (SpawnUpdateInstaller(runtimeContext, logger))
+                                    {
+                                        cts.Cancel();
+                                        break;
+                                    }
+
                                     ConsoleOutput.Warning("Failed to spawn update installer, will retry next cycle.");
                                 }
-                            }
 
-                            // Fire non-blocking update check/stage (runs in background, result picked up next cycle)
-                            _ = Task.Run(async () =>
-                            {
-                                try
+                                // Fire non-blocking update check/stage (runs in background, result picked up next cycle)
+                                _ = Task.Run(async () =>
                                 {
-                                    await updateService.CheckAndStageAsync(
-                                        allowPreRelease: false,
-                                        skipProvenance: false,
-                                        cts.Token);
-                                }
-                                catch (OperationCanceledException) { }
-                                catch (Exception ex)
-                                {
-                                    logger.LogDebug(ex, "Background update check failed");
-                                }
-                            }, cts.Token);
+                                    try
+                                    {
+                                        await updateService.CheckAndStageAsync(
+                                            allowPreRelease: false,
+                                            skipProvenance: false,
+                                            cts.Token);
+                                    }
+                                    catch (OperationCanceledException) { }
+                                    catch (Exception ex)
+                                    {
+                                        logger.LogDebug(ex, "Background update check failed");
+                                    }
+                                }, cts.Token);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -283,27 +293,27 @@ public static class RunCommand
     /// Unix: setsid for session detachment, with fallback to direct Process.Start.
     /// Returns true if the process was successfully spawned.
     /// </summary>
-    private static bool SpawnUpdateInstaller(ILogger logger)
+    private static bool SpawnUpdateInstaller(RuntimeContext runtimeContext, ILogger logger)
     {
-        var exePath = Environment.ProcessPath;
-        if (exePath is null)
+        var invocation = runtimeContext.GetSelfInvocation("update --install-staged");
+        if (invocation is null)
         {
             logger.LogError("Cannot determine executable path for update installer");
             return false;
         }
 
-        var commandLine = $"\"{exePath}\" update --install-staged";
+        var commandLine = invocation.GetCommandLine();
         logger.LogDebug("Spawning update installer: {CommandLine}", commandLine);
 
         if (OperatingSystem.IsWindows())
-            return SpawnUpdateInstallerWindows(exePath, logger);
+            return SpawnUpdateInstallerWindows(invocation, logger);
 
-        return SpawnUpdateInstallerUnix(exePath, logger);
+        return SpawnUpdateInstallerUnix(invocation, logger);
     }
 
-    private static bool SpawnUpdateInstallerWindows(string exePath, ILogger logger)
+    private static bool SpawnUpdateInstallerWindows(CommandInvocation invocation, ILogger logger)
     {
-        var commandLine = $"\"{exePath}\" update --install-staged";
+        var commandLine = invocation.GetCommandLine();
 
         var si = new NativeInterop.STARTUPINFO { cb = System.Runtime.InteropServices.Marshal.SizeOf<NativeInterop.STARTUPINFO>() };
         si.dwFlags = NativeInterop.STARTF_USESHOWWINDOW;
@@ -337,13 +347,13 @@ public static class RunCommand
     /// Spawns the update installer as a detached process on Unix using setsid,
     /// mirroring the pattern used by <see cref="StartCommand"/>.
     /// </summary>
-    private static bool SpawnUpdateInstallerUnix(string exePath, ILogger logger)
+    private static bool SpawnUpdateInstallerUnix(CommandInvocation invocation, ILogger logger)
     {
         // Try setsid first for full session detachment
         var psi = new ProcessStartInfo
         {
             FileName = "setsid",
-            Arguments = $"\"{exePath}\" update --install-staged",
+            Arguments = invocation.GetCommandLine(),
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -370,8 +380,8 @@ public static class RunCommand
         // Fallback: direct process launch
         var fallbackPsi = new ProcessStartInfo
         {
-            FileName = exePath,
-            Arguments = "update --install-staged",
+            FileName = invocation.FileName,
+            Arguments = invocation.Arguments,
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
