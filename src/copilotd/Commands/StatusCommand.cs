@@ -71,22 +71,31 @@ public static class StatusCommand
                     };
                     var controlPid = state.ControlSession.ProcessId is { } pid ? $" (PID {pid})" : "";
                     AnsiConsole.MarkupLine($"  Control:   {controlStatus}{Markup.Escape(controlPid)}");
+                    var controlUrl = GitHubRemoteSessionUrl.BuildControl(state.ControlSession, config.CurrentUser)
+                        ?? GetUnavailableRemoteSessionUrlMessage(config.CurrentUser);
+                    ConsoleOutput.Info("  Remote:");
+                    ConsoleOutput.Info($"    {controlUrl}");
                 }
                 else if (config.EnableControlSession)
                 {
                     AnsiConsole.MarkupLine("  Control:   [grey]○ Not started[/]");
                 }
 
-                AnsiConsole.WriteLine();
+                Console.WriteLine();
 
                 // Delegate session list rendering to the shared helper
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return SessionCommand.RenderSessionList(stateStore, processManager, filterValue, showAll);
+                return SessionCommand.RenderSessionList(stateStore, processManager, config, filterValue, showAll);
             }, logger);
         });
 
         return command;
     }
+
+    private static string GetUnavailableRemoteSessionUrlMessage(string? currentUser)
+        => string.IsNullOrWhiteSpace(currentUser)
+            ? "unavailable (run 'copilotd init' to configure current_user)"
+            : "unavailable";
 }

@@ -89,9 +89,9 @@ When running from source or a local repo publish, copilotd suppresses automatic 
 |---------|-------------|
 | `copilotd init` | Interactive first-run wizard (dependency checks with versions, auth, global config, rule setup, repo selection) |
 | `copilotd run` | Start the polling daemon |
-| `copilotd status` | Show daemon health, watched repos, and session list |
-| `copilotd session` | List dispatched sessions (alias for `session list`) |
-| `copilotd session list` | List dispatched sessions with optional filtering |
+| `copilotd status` | Show daemon health, watched repos, the control session URL, and the session list |
+| `copilotd session` | List dispatched sessions and their GitHub remote session URLs (alias for `session list`) |
+| `copilotd session list` | List dispatched sessions with optional filtering and GitHub remote session URLs |
 | `copilotd session join <issue>` | Take over a session interactively |
 | `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
@@ -320,14 +320,14 @@ sessions, and more — all via natural language.
 - Tool access is restricted to `copilotd`, `gh`, and `git` commands only — no general shell access
 - If the control session process dies, the daemon automatically relaunches it on the next poll cycle
 - It does not count against the `max_instances` limit
-- It is tracked separately from dispatch sessions and shown in the `copilotd status` output
+- It is tracked separately from dispatch sessions and shown in the `copilotd status` output, including its GitHub remote session URL
 
 **Available commands in the control session:**
 
 | Command | Description |
 |---------|-------------|
-| `copilotd status` | Show daemon health, watched repos, and session summary |
-| `copilotd session list [--all]` | List active sessions (use `--all` to include completed/failed) |
+| `copilotd status` | Show daemon health, watched repos, the control session URL, and session summary |
+| `copilotd session list [--all]` | List active sessions and remote session URLs (use `--all` to include completed/failed) |
 | `copilotd session reset <issue>` | Reset a session for re-dispatch |
 | `copilotd session complete <issue>` | Mark a session as completed |
 | `copilotd rules list` | Show configured dispatch rules |

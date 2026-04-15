@@ -47,11 +47,12 @@ public static class SessionCommand
 
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var config = stateStore.LoadConfig();
 
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return RenderSessionList(stateStore, processManager, filterValue, showAll);
+                return RenderSessionList(stateStore, processManager, config, filterValue, showAll);
             }, logger);
         });
 
@@ -83,11 +84,12 @@ public static class SessionCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var config = stateStore.LoadConfig();
 
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return RenderSessionList(stateStore, processManager, filterValue, showAll);
+                return RenderSessionList(stateStore, processManager, config, filterValue, showAll);
             }, logger);
         });
 
@@ -576,7 +578,7 @@ public static class SessionCommand
     /// Returns the exit code.
     /// </summary>
     public static int RenderSessionList(StateStore stateStore, ProcessManager processManager,
-        string? filterValue, bool showAll)
+        CopilotdConfig config, string? filterValue, bool showAll)
     {
         var stateChanged = false;
         var state = stateStore.WithStateLock(() =>
@@ -652,9 +654,11 @@ public static class SessionCommand
         }
 
         RenderSessionTable(list);
+        Console.WriteLine();
+        RenderRemoteSessionUrls(list, config.CurrentUser);
 
         ConsoleOutput.Info($"{list.Count} session(s)");
-        AnsiConsole.WriteLine();
+        Console.WriteLine();
         ConsoleOutput.Info("Use 'copilotd session join <issue>' to take over a session interactively.");
 
         return 0;
@@ -712,6 +716,25 @@ public static class SessionCommand
 
         AnsiConsole.Write(table);
     }
+
+    private static void RenderRemoteSessionUrls(List<DispatchSession> sessions, string? currentUser)
+    {
+        ConsoleOutput.Info("Remote session URLs:");
+        foreach (var session in sessions)
+        {
+            var url = GitHubRemoteSessionUrl.Build(session, currentUser)
+                ?? GetUnavailableRemoteSessionUrlMessage(currentUser);
+            ConsoleOutput.Info($"  {session.IssueKey}:");
+            ConsoleOutput.Info($"    {url}");
+        }
+
+        Console.WriteLine();
+    }
+
+    private static string GetUnavailableRemoteSessionUrlMessage(string? currentUser)
+        => string.IsNullOrWhiteSpace(currentUser)
+            ? "unavailable (run 'copilotd init' to configure current_user)"
+            : "unavailable";
 
     public static string FormatTime(DateTimeOffset time)
     {
