@@ -121,15 +121,6 @@ public static class InitCommand
                         .Validate(v => v > 0 ? ValidationResult.Success() : ValidationResult.Error("Must be a positive integer")));
                 AnsiConsole.WriteLine();
 
-                // Delay before self-shutdown after session handoff commands
-                AnsiConsole.MarkupLine("[grey]Seconds to wait before shutting down a session after it calls session comment/pr/complete.[/]");
-                AnsiConsole.MarkupLine("[grey]Set to 0 to shut down immediately.[/]");
-                config.SessionShutdownDelaySeconds = AnsiConsole.Prompt(
-                    new TextPrompt<int>("Session shutdown delay (seconds):")
-                        .DefaultValue(config.SessionShutdownDelaySeconds)
-                        .Validate(v => v >= 0 ? ValidationResult.Success() : ValidationResult.Error("Must be zero or greater")));
-                AnsiConsole.WriteLine();
-
                 // Default model
                 AnsiConsole.MarkupLine("[grey]Optional default model for all sessions (e.g., claude-sonnet-4, o4-mini).[/]");
                 AnsiConsole.MarkupLine("[grey]Leave empty to use the copilot CLI default. Can be overridden per rule.[/]");
@@ -330,7 +321,6 @@ public static class InitCommand
 
                 summaryTable.AddRow("[blue]Repo home[/]", Markup.Escape(config.RepoHome));
                 summaryTable.AddRow("[blue]Max concurrent sessions[/]", Markup.Escape(config.MaxInstances.ToString()));
-                summaryTable.AddRow("[blue]Session shutdown delay[/]", Markup.Escape($"{config.SessionShutdownDelaySeconds} second(s)"));
                 summaryTable.AddRow("[blue]Default model[/]", Markup.Escape(config.DefaultModel ?? "(copilot default)"));
                 summaryTable.AddRow("", "");
                 summaryTable.AddRow("[bold blue]Default Rule[/]", "");
@@ -353,7 +343,6 @@ public static class InitCommand
                 AnsiConsole.MarkupLine("  [blue]copilotd rules update Default --add-repo org/repo[/]      Add another repo to the default rule");
                 AnsiConsole.MarkupLine("  [blue]copilotd rules add MyRule --label bug --yolo[/]           Create a new dispatch rule");
                 AnsiConsole.MarkupLine("  [blue]copilotd config --set max_instances=5[/]                  Change concurrency limit");
-                AnsiConsole.MarkupLine("  [blue]copilotd config --set session_shutdown_delay_seconds=30[/] Configure post-command shutdown delay");
                 AnsiConsole.MarkupLine("  [blue]copilotd config --set default_model=claude-sonnet-4[/]    Set the default model");
                 AnsiConsole.MarkupLine("  [blue]copilotd status[/]                                        Check daemon health and sessions");
                 AnsiConsole.WriteLine();
