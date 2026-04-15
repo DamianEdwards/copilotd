@@ -38,6 +38,7 @@ public static class ConfigCommand
                     table.AddRow("custom_prompt", Markup.Escape(string.IsNullOrEmpty(config.Prompt) ? "(not set)" : config.Prompt));
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
+                    table.AddRow("session_shutdown_delay_seconds", Markup.Escape(config.SessionShutdownDelaySeconds.ToString()));
                     table.AddRow("rules", Markup.Escape($"{config.Rules.Count} rule(s)"));
 
                     if (config.Rules.Count > 0)
@@ -122,9 +123,23 @@ public static class ConfigCommand
                         }
                         break;
 
+                    case "session_shutdown_delay_seconds":
+                    case "shutdown_delay_seconds":
+                        if (int.TryParse(value, out var shutdownDelaySeconds) && shutdownDelaySeconds >= 0)
+                        {
+                            cfg.SessionShutdownDelaySeconds = shutdownDelaySeconds;
+                            ConsoleOutput.Success($"session_shutdown_delay_seconds set to: {shutdownDelaySeconds}");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error("session_shutdown_delay_seconds must be a non-negative integer");
+                            return 1;
+                        }
+                        break;
+
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, max_instances");
+                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, max_instances, session_shutdown_delay_seconds");
                         return 1;
                 }
 

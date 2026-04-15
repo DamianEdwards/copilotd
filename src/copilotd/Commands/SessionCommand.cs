@@ -269,6 +269,7 @@ public static class SessionCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var ghCli = services.GetRequiredService<GhCliService>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var config = stateStore.LoadConfig();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
                 var message = parseResult.GetValue(messageOption)!;
@@ -344,9 +345,8 @@ public static class SessionCommand
                     return 1;
                 }
 
-                processManager.TerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime);
-
                 ConsoleOutput.Success($"Comment posted on {issueKey}. Session is now waiting for feedback.");
+                ScheduleSessionShutdown(processManager, trackedProcess, config);
                 return 0;
             }, logger);
         });
@@ -370,6 +370,7 @@ public static class SessionCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var config = stateStore.LoadConfig();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
                 var trackedProcess = default(TrackedProcessRef);
@@ -411,9 +412,8 @@ public static class SessionCommand
                     return 0;
                 }
 
-                processManager.TerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime);
-
                 ConsoleOutput.Success($"Session for {issueKey} marked as completed.");
+                ScheduleSessionShutdown(processManager, trackedProcess, config);
                 return 0;
             }, logger);
         });
@@ -440,6 +440,7 @@ public static class SessionCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var config = stateStore.LoadConfig();
 
                 var prNumber = parseResult.GetValue(prNumberArg);
                 var issueKey = parseResult.GetValue(issueArg)!;
@@ -483,9 +484,8 @@ public static class SessionCommand
                     return 1;
                 }
 
-                processManager.TerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime);
-
                 ConsoleOutput.Success($"PR #{prNumber} associated with session for {issueKey}. Session is now waiting for review feedback.");
+                ScheduleSessionShutdown(processManager, trackedProcess, config);
                 return 0;
             }, logger);
         });
@@ -721,6 +721,24 @@ public static class SessionCommand
         if (age.TotalHours < 1) return $"{(int)age.TotalMinutes}m ago";
         if (age.TotalDays < 1) return $"{(int)age.TotalHours}h {age.Minutes}m ago";
         return local.ToString("yyyy-MM-dd HH:mm");
+    }
+
+    private static void ScheduleSessionShutdown(ProcessManager processManager, TrackedProcessRef trackedProcess, CopilotdConfig config)
+    {
+        if (!trackedProcess.HasProcess)
+            return;
+
+        var shutdownDelay = TimeSpan.FromSeconds(Math.Max(0, config.SessionShutdownDelaySeconds));
+        processManager.ScheduleTerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime, shutdownDelay);
+
+        if (shutdownDelay > TimeSpan.Zero)
+            ConsoleOutput.Info($"The current copilot session will shut down in {FormatDuration(shutdownDelay)}.");
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        var totalSeconds = (int)Math.Ceiling(duration.TotalSeconds);
+        return totalSeconds == 1 ? "1 second" : $"{totalSeconds} seconds";
     }
 
     private static void RequeueSession(StateStore stateStore, string issueKey)

@@ -42,6 +42,14 @@ public sealed class CopilotdConfig
     public int MaxInstances { get; set; } = 3;
 
     /// <summary>
+    /// Delay, in seconds, before shutting down an orchestrated copilot session after it
+    /// calls <c>session comment</c>, <c>session pr</c>, or <c>session complete</c>.
+    /// Gives the agent time to observe command success and print any follow-up output.
+    /// Default is 15.
+    /// </summary>
+    public int SessionShutdownDelaySeconds { get; set; } = 15;
+
+    /// <summary>
     /// Default model to use for all copilot sessions. When set, <c>--model</c> is
     /// passed to the copilot CLI unless a rule specifies its own model override.
     /// </summary>

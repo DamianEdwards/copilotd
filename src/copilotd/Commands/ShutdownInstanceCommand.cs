@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace Copilotd.Commands;
@@ -24,19 +25,35 @@ public static class ShutdownInstanceCommand
         };
 
         var pidOption = new Option<int>("--pid") { Description = "Process ID to shut down" };
+        var expectedStartOption = new Option<string?>("--expected-start") { Description = "Expected UTC process start time in round-trip format" };
+        var delaySecondsOption = new Option<int>("--delay-seconds") { Description = "Seconds to wait before beginning shutdown" };
         command.Options.Add(pidOption);
+        command.Options.Add(expectedStartOption);
+        command.Options.Add(delaySecondsOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
             var pid = parseResult.GetValue(pidOption);
-            return ShutdownProcess(pid);
+            var expectedStartText = parseResult.GetValue(expectedStartOption);
+            var delaySeconds = parseResult.GetValue(delaySecondsOption);
+            if (delaySeconds < 0)
+                return 1;
+
+            if (!TryParseExpectedStart(expectedStartText, out var expectedStart))
+                return 1;
+
+            return ShutdownProcess(pid, expectedStart, TimeSpan.FromSeconds(delaySeconds));
         });
 
         return command;
     }
 
-    private static int ShutdownProcess(int pid)
+    private static int ShutdownProcess(int pid, DateTimeOffset? expectedStart, TimeSpan shutdownDelay)
     {
+        var effectiveDelay = shutdownDelay < TimeSpan.Zero ? TimeSpan.Zero : shutdownDelay;
+        if (effectiveDelay > TimeSpan.Zero)
+            Thread.Sleep(effectiveDelay);
+
         Process process;
         try
         {
@@ -50,6 +67,13 @@ public static class ShutdownInstanceCommand
 
         try
         {
+            if (expectedStart is { } expectedStartTime)
+            {
+                var actualStart = GetProcessStartTime(process);
+                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStartTime).TotalSeconds) > 5)
+                    return 0;
+            }
+
             if (process.HasExited)
                 return 0;
 
@@ -141,6 +165,31 @@ public static class ShutdownInstanceCommand
         catch
         {
             return 1;
+        }
+    }
+
+    private static bool TryParseExpectedStart(string? text, out DateTimeOffset? expectedStart)
+    {
+        expectedStart = null;
+        if (string.IsNullOrWhiteSpace(text))
+            return true;
+
+        if (!DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
+            return false;
+
+        expectedStart = parsed;
+        return true;
+    }
+
+    private static DateTimeOffset? GetProcessStartTime(Process process)
+    {
+        try
+        {
+            return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
+        }
+        catch
+        {
+            return null;
         }
     }
 

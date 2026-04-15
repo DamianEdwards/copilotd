@@ -236,7 +236,7 @@ public sealed partial class ProcessManager
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                return TerminateViaShutdownInstance(process, pid);
+                return TerminateViaShutdownInstance(process, pid, processStartTime);
             }
             else
             {
@@ -255,13 +255,60 @@ public sealed partial class ProcessManager
     }
 
     /// <summary>
+    /// Schedules a background shutdown helper for a tracked copilot process. This keeps the
+    /// caller responsive while the helper optionally waits before sending shutdown signals.
+    /// Falls back to synchronous termination if the helper cannot be started.
+    /// </summary>
+    public bool ScheduleTerminateProcess(string processLabel, int? processId, DateTimeOffset? processStartTime, TimeSpan shutdownDelay)
+    {
+        if (processId is not { } pid)
+        {
+            _logger.LogDebug("No PID tracked for {ProcessLabel}, nothing to schedule", processLabel);
+            return true;
+        }
+
+        var invocation = GetShutdownInstanceInvocation(pid, processStartTime, shutdownDelay);
+        if (invocation is null)
+        {
+            _logger.LogWarning("Cannot determine copilotd executable path, falling back to synchronous termination");
+            return TerminateProcess(processLabel, processId, processStartTime);
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = invocation.FileName,
+            Arguments = invocation.Arguments,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        try
+        {
+            using var helper = Process.Start(psi);
+            if (helper is null)
+            {
+                _logger.LogWarning("Failed to start shutdown-instance helper for PID {Pid}, falling back to synchronous termination", pid);
+                return TerminateProcess(processLabel, processId, processStartTime);
+            }
+
+            _logger.LogInformation("Scheduled shutdown-instance for {ProcessLabel} (PID {Pid}) with delay {Delay}", processLabel, pid, shutdownDelay);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to schedule shutdown-instance for {ProcessLabel} (PID {Pid}), falling back to synchronous termination", processLabel, pid);
+            return TerminateProcess(processLabel, processId, processStartTime);
+        }
+    }
+
+    /// <summary>
     /// Windows: spawns 'copilotd shutdown-instance --pid PID' which handles the full
     /// graceful shutdown lifecycle (Ctrl+Break → Ctrl+C → Kill) from a separate process
     /// that can safely attach to the target's console.
     /// </summary>
-    private bool TerminateViaShutdownInstance(Process process, int pid)
+    private bool TerminateViaShutdownInstance(Process process, int pid, DateTimeOffset? processStartTime)
     {
-        var invocation = _runtimeContext.GetSelfInvocation($"shutdown-instance --pid {pid}");
+        var invocation = GetShutdownInstanceInvocation(pid, processStartTime, TimeSpan.Zero);
         if (invocation is null)
         {
             _logger.LogWarning("Cannot determine copilotd executable path, falling back to kill");
@@ -322,6 +369,20 @@ public sealed partial class ProcessManager
             process.Kill(entireProcessTree: true);
             return true;
         }
+    }
+
+    private CommandInvocation? GetShutdownInstanceInvocation(int pid, DateTimeOffset? processStartTime, TimeSpan shutdownDelay)
+    {
+        var effectiveDelay = shutdownDelay < TimeSpan.Zero ? TimeSpan.Zero : shutdownDelay;
+
+        var arguments = $"shutdown-instance --pid {pid}";
+        if (processStartTime is { } expectedStart)
+            arguments += $" --expected-start {expectedStart:O}";
+
+        if (effectiveDelay > TimeSpan.Zero)
+            arguments += $" --delay-seconds {(int)Math.Ceiling(effectiveDelay.TotalSeconds)}";
+
+        return _runtimeContext.GetSelfInvocation(arguments);
     }
 
     /// <summary>

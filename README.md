@@ -98,7 +98,7 @@ When running from source or a local repo publish, copilotd suppresses automatic 
 | `copilotd session pr <pr-number> <issue>` | Associate a PR with a session and wait for review feedback (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
-| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `max_instances`) |
+| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `max_instances`, `session_shutdown_delay_seconds`) |
 | `copilotd rules list` | List all dispatch rules |
 | `copilotd rules add <name>` | Add a new dispatch rule |
 | `copilotd rules update <name>` | Update an existing rule |
@@ -358,6 +358,7 @@ Stored in `~/.copilotd/`:
 | `default_model` | *(none)* | Default model passed to copilot via `--model` for all sessions (rule-specific `model` overrides) |
 | `prompt` | *(empty)* | Custom prompt text appended to the built-in prompt |
 | `max_instances` | `3` | Maximum concurrent copilot processes; excess sessions queue as Pending |
+| `session_shutdown_delay_seconds` | `15` | Delay before shutting down an orchestrated session after `session comment`, `session pr`, or `session complete` |
 | `max_redispatches` | `10` | Maximum re-dispatches per session via comment/review feedback loops before requiring manual reset |
 | `enable_control_session` | `true` | Launch a control remote session when the daemon starts for remote management via the GitHub remote sessions UI |
 
