@@ -605,7 +605,7 @@ public sealed partial class ProcessManager
     /// <summary>
     /// The copilotd repo to clone for the control session's working directory.
     /// </summary>
-    private const string ControlSessionRepo = GitHubRemoteSessionUrl.ControlSessionRepo;
+    private const string ControlSessionRepo = GitHubRemoteSessionUrlResolver.ControlSessionRepo;
 
     /// <summary>
     /// Ensures the copilotd repo is cloned to <c>&lt;RepoHome&gt;/DamianEdwards/copilotd</c>

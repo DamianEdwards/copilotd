@@ -33,6 +33,7 @@ public static class StatusCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
 
                 // Daemon status header
                 var daemonRunning = stateStore.IsLockHeld();
@@ -62,6 +63,10 @@ public static class StatusCommand
                 // Control session status
                 if (state.ControlSession is not null)
                 {
+                    var controlLiveness = state.ControlSession.Status == ControlSessionStatus.Running
+                        ? processManager.CheckControlSession(state.ControlSession)
+                        : ProcessLivenessResult.Dead;
+
                     var controlStatus = state.ControlSession.Status switch
                     {
                         ControlSessionStatus.Running => "[green]● Running[/]",
@@ -71,10 +76,14 @@ public static class StatusCommand
                     };
                     var controlPid = state.ControlSession.ProcessId is { } pid ? $" (PID {pid})" : "";
                     AnsiConsole.MarkupLine($"  Control:   {controlStatus}{Markup.Escape(controlPid)}");
-                    var controlUrl = GitHubRemoteSessionUrl.BuildControl(state.ControlSession, config.CurrentUser)
-                        ?? GetUnavailableRemoteSessionUrlMessage(config.CurrentUser);
-                    ConsoleOutput.Info("  Remote:");
-                    ConsoleOutput.Info($"    {controlUrl}");
+
+                    if (controlLiveness == ProcessLivenessResult.Alive)
+                    {
+                        var controlUrl = remoteSessionUrls.TryResolve(state.ControlSession, config.CurrentUser)
+                            ?? "unavailable";
+                        ConsoleOutput.Info("  Remote:");
+                        ConsoleOutput.Info($"    {controlUrl}");
+                    }
                 }
                 else if (config.EnableControlSession)
                 {
@@ -87,15 +96,10 @@ public static class StatusCommand
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return SessionCommand.RenderSessionList(stateStore, processManager, config, filterValue, showAll);
+                return SessionCommand.RenderSessionList(stateStore, processManager, remoteSessionUrls, config, filterValue, showAll);
             }, logger);
         });
 
         return command;
     }
-
-    private static string GetUnavailableRemoteSessionUrlMessage(string? currentUser)
-        => string.IsNullOrWhiteSpace(currentUser)
-            ? "unavailable (run 'copilotd init' to configure current_user)"
-            : "unavailable";
 }
