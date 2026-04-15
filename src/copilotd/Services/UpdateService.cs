@@ -333,6 +333,7 @@ public sealed class UpdateService
                             _logger.LogInformation("A daemon started before deferred install could begin, retrying wait for the active instance");
                         }
 
+                        await Task.Delay(TimeSpan.FromSeconds(1), ct);
                         continue;
                     }
                 }
@@ -748,7 +749,7 @@ public sealed class UpdateService
     {
         try
         {
-            var proc = System.Diagnostics.Process.GetProcessById(pid);
+            using var proc = System.Diagnostics.Process.GetProcessById(pid);
 
             // Verify PID hasn't been reused by comparing start time
             var actualStart = proc.StartTime.ToUniversalTime();
