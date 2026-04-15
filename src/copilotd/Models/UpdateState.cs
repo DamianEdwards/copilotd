@@ -20,6 +20,9 @@ public enum UpdateStatus
     /// <summary>Update binary is downloaded, verified, and staged for install.</summary>
     Staged,
 
+    /// <summary>Install is deferred until the tracked daemon instance exits naturally.</summary>
+    WaitingForExit,
+
     /// <summary>Install of the staged binary is in progress.</summary>
     Installing,
 
@@ -44,6 +47,18 @@ public sealed class UpdateState
 
     /// <summary>Full path to the staged binary (e.g. copilotd.exe.staged).</summary>
     public string? StagedPath { get; set; }
+
+    /// <summary>Daemon PID that a deferred installer should wait for before installing.</summary>
+    public int? WaitForPid { get; set; }
+
+    /// <summary>Expected start time for <see cref="WaitForPid"/>, used to detect PID reuse.</summary>
+    public DateTimeOffset? WaitForStartTime { get; set; }
+
+    /// <summary>PID of the detached deferred installer process, if one is currently tracking the update.</summary>
+    public int? WatcherPid { get; set; }
+
+    /// <summary>Expected start time for <see cref="WatcherPid"/>, used to detect PID reuse.</summary>
+    public DateTimeOffset? WatcherStartTime { get; set; }
 
     /// <summary>GitHub release tag of the release being processed.</summary>
     public string? CurrentReleaseTag { get; set; }

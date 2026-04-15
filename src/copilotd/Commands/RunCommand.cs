@@ -195,22 +195,20 @@ public static class RunCommand
 
                             if (!disableSelfUpdates)
                             {
-                                // Self-update: check for staged update or fire background check
+                                // Self-update: schedule or maintain a deferred installer for any staged update,
+                                // then fire a background check/stage task.
                                 var updateState = stateStore.LoadUpdateState();
-                                if (updateState.Status == UpdateStatus.Staged
-                                    && !string.IsNullOrEmpty(updateState.StagedPath)
-                                    && File.Exists(updateState.StagedPath))
+                                if (UpdateService.HasUsableStagedUpdate(updateState))
                                 {
-                                    // Staged update ready — spawn install process and exit daemon
-                                    ConsoleOutput.Info($"Staged update {updateState.StagedVersion} detected, initiating install...");
-                                    logger.LogInformation("Spawning update installer for staged version {Version}", updateState.StagedVersion);
-                                    if (SpawnUpdateInstaller(runtimeContext, logger))
+                                    if (EnsureDeferredInstallWatcher(updateService, runtimeContext, logger, updateState))
                                     {
-                                        cts.Cancel();
-                                        break;
+                                        if (updateState.Status == UpdateStatus.Staged)
+                                            ConsoleOutput.Info($"Staged update {updateState.StagedVersion} detected. It will install after this daemon exits.");
                                     }
-
-                                    ConsoleOutput.Warning("Failed to spawn update installer, will retry next cycle.");
+                                    else if (updateState.Status == UpdateStatus.Staged)
+                                    {
+                                        ConsoleOutput.Warning("Failed to schedule deferred update installer, will retry next cycle.");
+                                    }
                                 }
 
                                 // Fire non-blocking update check/stage (runs in background, result picked up next cycle)
@@ -287,19 +285,68 @@ public static class RunCommand
     }
 
     /// <summary>
+    /// Ensures a detached <c>copilotd update --install-staged</c> helper is waiting for the
+    /// tracked daemon instance to exit naturally before installing the staged binary.
+    /// If the helper is already running, this is a no-op.
+    /// </summary>
+    private static bool EnsureDeferredInstallWatcher(
+        UpdateService updateService,
+        RuntimeContext runtimeContext,
+        ILogger logger,
+        UpdateState updateState)
+    {
+        if (updateState.Status == UpdateStatus.WaitingForExit
+            && IsTrackedProcessAlive(updateState.WatcherPid, updateState.WatcherStartTime))
+        {
+            return true;
+        }
+
+        var waitTarget = updateState.Status == UpdateStatus.WaitingForExit
+                         && updateState.WaitForPid is { } waitPid
+                         && updateState.WaitForStartTime is { } waitStartTime
+            ? new TrackedProcess(waitPid, waitStartTime)
+            : new TrackedProcess(Environment.ProcessId, GetCurrentProcessStartTime());
+
+        var installer = SpawnUpdateInstaller(runtimeContext, logger, waitTarget.ProcessId, waitTarget.ProcessStartTime);
+        if (installer is null)
+            return false;
+
+        if (!updateService.TryScheduleDeferredInstall(
+                waitTarget.ProcessId,
+                waitTarget.ProcessStartTime,
+                installer.Value.ProcessId,
+                installer.Value.ProcessStartTime))
+        {
+            TryTerminateTrackedProcess(installer.Value, logger);
+            logger.LogWarning(
+                "Deferred installer PID {WatcherPid} was terminated because the update state could not be recorded for daemon PID {WaitPid}",
+                installer.Value.ProcessId,
+                waitTarget.ProcessId);
+            return false;
+        }
+
+        logger.LogInformation(
+            "Deferred installer PID {WatcherPid} is waiting for daemon PID {WaitPid} to exit naturally",
+            installer.Value.ProcessId,
+            waitTarget.ProcessId);
+        return true;
+    }
+
+    /// <summary>
     /// Spawns a detached <c>copilotd update --install-staged</c> process
-    /// that will wait for this daemon to exit, then perform the binary replacement.
+    /// that will wait for the specified daemon PID/start-time pair to exit, then perform the binary replacement.
     /// Windows: CreateProcessW with CREATE_NEW_CONSOLE for proper console isolation.
     /// Unix: setsid for session detachment, with fallback to direct Process.Start.
-    /// Returns true if the process was successfully spawned.
+    /// Returns the spawned installer's PID and start time on success.
     /// </summary>
-    private static bool SpawnUpdateInstaller(RuntimeContext runtimeContext, ILogger logger)
+    private static TrackedProcess? SpawnUpdateInstaller(RuntimeContext runtimeContext, ILogger logger, int waitForPid, DateTimeOffset waitForStartTime)
     {
-        var invocation = runtimeContext.GetSelfInvocation("update --install-staged");
+        var invocation = runtimeContext.GetSelfInvocation(
+            $"update --install-staged --wait-for-pid {waitForPid} --wait-for-start-time {waitForStartTime:O} --passive-wait");
         if (invocation is null)
         {
             logger.LogError("Cannot determine executable path for update installer");
-            return false;
+            return null;
         }
 
         var commandLine = invocation.GetCommandLine();
@@ -311,7 +358,7 @@ public static class RunCommand
         return SpawnUpdateInstallerUnix(invocation, logger);
     }
 
-    private static bool SpawnUpdateInstallerWindows(CommandInvocation invocation, ILogger logger)
+    private static TrackedProcess? SpawnUpdateInstallerWindows(CommandInvocation invocation, ILogger logger)
     {
         var commandLine = invocation.GetCommandLine();
 
@@ -333,21 +380,32 @@ public static class RunCommand
 
         if (success)
         {
+            var startTime = default(DateTimeOffset?);
+            try
+            {
+                using var process = Process.GetProcessById(pi.dwProcessId);
+                startTime = GetProcessStartTime(process);
+            }
+            catch
+            {
+                startTime = DateTimeOffset.UtcNow;
+            }
+
             NativeInterop.CloseHandle(pi.hProcess);
             NativeInterop.CloseHandle(pi.hThread);
             logger.LogInformation("Update installer spawned (PID {Pid})", pi.dwProcessId);
-            return true;
+            return new TrackedProcess(pi.dwProcessId, startTime ?? DateTimeOffset.UtcNow);
         }
 
         logger.LogError("Failed to spawn update installer via CreateProcessW");
-        return false;
+        return null;
     }
 
     /// <summary>
     /// Spawns the update installer as a detached process on Unix using setsid,
     /// mirroring the pattern used by <see cref="StartCommand"/>.
     /// </summary>
-    private static bool SpawnUpdateInstallerUnix(CommandInvocation invocation, ILogger logger)
+    private static TrackedProcess? SpawnUpdateInstallerUnix(CommandInvocation invocation, ILogger logger)
     {
         // Try setsid first for full session detachment
         var psi = new ProcessStartInfo
@@ -366,9 +424,10 @@ public static class RunCommand
             var process = Process.Start(psi);
             if (process is not null)
             {
+                var startTime = GetProcessStartTime(process) ?? DateTimeOffset.UtcNow;
                 process.StandardInput.Close();
                 logger.LogInformation("Update installer spawned via setsid (PID {Pid})", process.Id);
-                return true;
+                return new TrackedProcess(process.Id, startTime);
             }
         }
         catch
@@ -394,9 +453,10 @@ public static class RunCommand
             var process = Process.Start(fallbackPsi);
             if (process is not null)
             {
+                var startTime = GetProcessStartTime(process) ?? DateTimeOffset.UtcNow;
                 process.StandardInput.Close();
                 logger.LogInformation("Update installer spawned (PID {Pid})", process.Id);
-                return true;
+                return new TrackedProcess(process.Id, startTime);
             }
         }
         catch (Exception ex)
@@ -404,6 +464,78 @@ public static class RunCommand
             logger.LogError(ex, "Failed to spawn update installer");
         }
 
-        return false;
+        return null;
     }
+
+    private static bool IsTrackedProcessAlive(int? pid, DateTimeOffset? expectedStartTime)
+    {
+        if (pid is not { } trackedPid || expectedStartTime is not { } expectedStart)
+            return false;
+
+        try
+        {
+            using var process = Process.GetProcessById(trackedPid);
+            var actualStart = GetProcessStartTime(process);
+            if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
+                return false;
+
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TryTerminateTrackedProcess(TrackedProcess trackedProcess, ILogger logger)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(trackedProcess.ProcessId);
+            var actualStart = GetProcessStartTime(process);
+            if (actualStart is not null && Math.Abs((actualStart.Value - trackedProcess.ProcessStartTime).TotalSeconds) > 5)
+                return;
+
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+        }
+        catch (ArgumentException)
+        {
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to terminate deferred installer PID {Pid}", trackedProcess.ProcessId);
+        }
+    }
+
+    private static DateTimeOffset GetCurrentProcessStartTime()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            return GetProcessStartTime(process) ?? DateTimeOffset.UtcNow;
+        }
+        catch
+        {
+            return DateTimeOffset.UtcNow;
+        }
+    }
+
+    private static DateTimeOffset? GetProcessStartTime(Process process)
+    {
+        try
+        {
+            return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private readonly record struct TrackedProcess(int ProcessId, DateTimeOffset ProcessStartTime);
 }

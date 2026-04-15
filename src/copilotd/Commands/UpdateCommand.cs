@@ -40,12 +40,27 @@ public static class UpdateCommand
             Description = "Install a previously staged update binary",
             Hidden = true
         };
+        var waitForPidOption = new Option<int?>("--wait-for-pid")
+        {
+            Hidden = true
+        };
+        var waitForStartTimeOption = new Option<string?>("--wait-for-start-time")
+        {
+            Hidden = true
+        };
+        var passiveWaitOption = new Option<bool>("--passive-wait")
+        {
+            Hidden = true
+        };
 
         command.Options.Add(checkOption);
         command.Options.Add(preReleaseOption);
         command.Options.Add(skipProvenanceOption);
         command.Options.Add(dryRunOption);
         command.Options.Add(installStagedOption);
+        command.Options.Add(waitForPidOption);
+        command.Options.Add(waitForStartTimeOption);
+        command.Options.Add(passiveWaitOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -61,6 +76,33 @@ public static class UpdateCommand
                 var skipProvenance = parseResult.GetValue(skipProvenanceOption);
                 var dryRun = parseResult.GetValue(dryRunOption);
                 var installStaged = parseResult.GetValue(installStagedOption);
+                var waitForPid = parseResult.GetValue(waitForPidOption);
+                var waitForStartTimeRaw = parseResult.GetValue(waitForStartTimeOption);
+                var passiveWait = parseResult.GetValue(passiveWaitOption);
+
+                DateTimeOffset? waitForStartTime = null;
+                if (!string.IsNullOrWhiteSpace(waitForStartTimeRaw))
+                {
+                    if (!DateTimeOffset.TryParse(waitForStartTimeRaw, out var parsedStartTime))
+                    {
+                        ConsoleOutput.Error($"Invalid --wait-for-start-time value: {waitForStartTimeRaw}");
+                        return 1;
+                    }
+
+                    waitForStartTime = parsedStartTime;
+                }
+
+                if ((waitForPid is null) != (waitForStartTime is null))
+                {
+                    ConsoleOutput.Error("--wait-for-pid and --wait-for-start-time must be provided together.");
+                    return 1;
+                }
+
+                if (passiveWait && waitForPid is null)
+                {
+                    ConsoleOutput.Error("--passive-wait requires --wait-for-pid and --wait-for-start-time.");
+                    return 1;
+                }
 
                 var localSource = Environment.GetEnvironmentVariable(UpdateSourceEnvVar);
                 if (!string.IsNullOrEmpty(localSource))
@@ -86,7 +128,7 @@ public static class UpdateCommand
                         ConsoleOutput.Info("[dry-run] Would install staged update.");
                         return 0;
                     }
-                    return await HandleInstallStaged(updateService, stateStore, skipProvenance, ct);
+                    return await HandleInstallStaged(updateService, stateStore, skipProvenance, waitForPid, waitForStartTime, passiveWait, ct);
                 }
 
                 if (check)
@@ -107,10 +149,22 @@ public static class UpdateCommand
         return command;
     }
 
-    private static async Task<int> HandleInstallStaged(UpdateService updateService, StateStore stateStore, bool skipProvenance, CancellationToken ct)
+    private static async Task<int> HandleInstallStaged(
+        UpdateService updateService,
+        StateStore stateStore,
+        bool skipProvenance,
+        int? waitForPid,
+        DateTimeOffset? waitForStartTime,
+        bool passiveWait,
+        CancellationToken ct)
     {
         ConsoleOutput.Info("Installing staged update...");
-        var success = await updateService.InstallStagedAsync(skipProvenance, ct);
+        var success = await updateService.InstallStagedAsync(
+            skipProvenance,
+            waitForPid,
+            waitForStartTime,
+            allowDaemonShutdown: !passiveWait,
+            ct);
         if (success)
         {
             ConsoleOutput.Success("Update installed successfully.");
@@ -191,7 +245,12 @@ public static class UpdateCommand
         // Install directly (for manual invocation, we do it in-process)
         // InstallStagedAsync acquires and releases its own update lock
         ConsoleOutput.Info("Installing update...");
-        var installed = await updateService.InstallStagedAsync(skipProvenance, ct);
+        var installed = await updateService.InstallStagedAsync(
+            skipProvenance,
+            waitForPid: null,
+            waitForStartTime: null,
+            allowDaemonShutdown: true,
+            ct);
         if (!installed)
         {
             var state = stateStore.LoadUpdateState();

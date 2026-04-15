@@ -253,6 +253,23 @@ public sealed class StateStore
         }
     }
 
+    /// <summary>
+    /// Attempts to acquire the daemon lock file without writing daemon PID metadata.
+    /// Used by the staged installer to prevent a new daemon from starting while the
+    /// binary replacement is in progress.
+    /// </summary>
+    public FileStream? TryAcquireInstallWindowLock()
+    {
+        try
+        {
+            return new FileStream(_lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
     // --- Daemon PID tracking ---
 
     /// <summary>
