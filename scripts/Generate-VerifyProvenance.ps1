@@ -226,5 +226,12 @@ if (-not (Test-Path $outputDir))
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 }
 
+$existingOutput = if (Test-Path $OutputPath) { Get-Content -Path $OutputPath -Raw } else { $null }
+if ($existingOutput -ceq $output)
+{
+    Write-Host "verify-provenance.ps1 already up to date at '$OutputPath'"
+    return
+}
+
 Set-Content -Path $OutputPath -Value $output -NoNewline
 Write-Host "Generated verify-provenance.ps1 at '$OutputPath'"
