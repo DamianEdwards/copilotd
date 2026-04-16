@@ -86,7 +86,7 @@ public static class InitCommand
                 AnsiConsole.WriteLine();
 
                 var examplePath = OperatingSystem.IsWindows() ? @"C:\source" : "~/repos";
-                AnsiConsole.MarkupLine($"[grey]This is the root directory where your repos are cloned.[/]");
+                AnsiConsole.MarkupLine("[grey]This is the root directory where your GitHub repos are cloned.[/]");
                 var repoHomePrompt = new TextPrompt<string>($"Enter repo home directory (e.g., {Markup.Escape(examplePath)}):");
                 if (config.RepoHome is not null)
                     repoHomePrompt.DefaultValue(config.RepoHome);
