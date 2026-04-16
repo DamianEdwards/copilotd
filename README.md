@@ -83,23 +83,27 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | Command | Description |
 |---------|-------------|
 | `copilotd init` | Interactive first-run wizard (dependency checks with versions, auth, global config, rule setup, repo selection) |
-| `copilotd run` | Start the polling daemon and print the daemon log folder |
-| `copilotd status` | Show daemon health, watched repos, daemon/control log folders, and the session list |
-| `copilotd session` | List dispatched sessions with their remote session URLs and log folders (alias for `session list`) |
-| `copilotd session list` | List dispatched sessions with optional filtering, remote session URLs, and log folders |
+| `copilotd run` | Start the polling daemon and print the current daemon log folder |
+| `copilotd start` | Start the daemon in the background and print the current daemon log folder |
+| `copilotd stop` | Stop the daemon and print the current daemon log folder |
+| `copilotd status` | Show daemon health, watched repos, the active daemon log folder, and the session list |
+| `copilotd logs` | Print the copilotd logs directory |
+| `copilotd logs clear [--days <n>]` | Clear log files, optionally only those older than the supplied age |
+| `copilotd session` | List dispatched sessions with their remote session URLs (alias for `session list`) |
+| `copilotd session list` | List dispatched sessions with optional filtering and remote session URLs |
 | `copilotd session join <issue>` | Take over a session interactively |
 | `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
 | `copilotd session pr <pr-number> <issue>` | Associate a PR with a session and wait for review feedback (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
-| `copilotd session logs clear <issue>` | Clear the current log folder for a tracked session |
-| `copilotd session logs purge --days <n>` | Purge session log folders older than the supplied age |
 | `copilotd config` | Display current configuration |
 | `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `max_instances`, `session_shutdown_delay_seconds`) |
 | `copilotd rules list` | List all dispatch rules |
 | `copilotd rules add <name>` | Add a new dispatch rule |
 | `copilotd rules update <name>` | Update an existing rule |
 | `copilotd rules delete <name>` | Delete a rule (the `Default` rule cannot be deleted) |
+
+File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Each daemon `run` instance gets its own `daemon_<uuid>` subfolder so its log files stay grouped together, while non-daemon commands log directly in the root logs directory with the same rolling-file behavior.
 
 ### Run options
 

@@ -19,11 +19,8 @@ public sealed class DaemonState
     /// <summary>Timestamp of the last successful poll cycle.</summary>
     public DateTimeOffset? LastPollTime { get; set; }
 
-    /// <summary>When completed-session log retention last ran.</summary>
-    public DateTimeOffset? LastSessionLogPurgeAt { get; set; }
-
     /// <summary>
-    /// Cached resolved local paths for repos, keyed by repo slug ("org/repo").
+     /// Cached resolved local paths for repos, keyed by repo slug ("org/repo").
     /// Populated by <see cref="Infrastructure.RepoPathResolver"/> and validated on each use.
     /// </summary>
     public Dictionary<string, string> ResolvedRepoPaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);

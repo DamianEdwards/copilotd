@@ -35,7 +35,7 @@ public static class RunCommand
                 var reconciliation = services.GetRequiredService<ReconciliationEngine>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
-                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
+                var logFileManager = services.GetRequiredService<LogFileManager>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var disableSelfUpdates = runtimeContext.IsAutomaticSelfUpdateDisabled(parseResult.GetValue(disableSelfUpdatesOption));
@@ -59,7 +59,8 @@ public static class RunCommand
                 try
                 {
                     ConsoleOutput.Success($"copilotd daemon started (polling every {interval}s). Press Ctrl+C to stop.");
-                    ConsoleOutput.Info($"Daemon logs: {sessionLogManager.GetDaemonLogDirectoryForDisplay()}");
+                    if (logFileManager.GetCurrentDaemonLogDirectoryForDisplay() is { } daemonLogDirectory)
+                        ConsoleOutput.Info($"Daemon logs: {daemonLogDirectory}");
                     if (disableSelfUpdates && runtimeContext.GetAutomaticSelfUpdateDisableReason(parseResult.GetValue(disableSelfUpdatesOption)) is { } reason)
                         ConsoleOutput.Info($"Automatic self-updates {reason}.");
 
@@ -123,14 +124,10 @@ public static class RunCommand
                         if (existingControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session already running (PID {existingControlPid}).");
-                            if (!string.IsNullOrWhiteSpace(existingControlSessionId))
-                                ConsoleOutput.Info($"Control session logs: {sessionLogManager.GetSessionLogDirectoryForDisplay(existingControlSessionId)}");
                         }
                         else if (launchedControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session launched (PID {launchedControlPid}).");
-                            if (!string.IsNullOrWhiteSpace(launchedControlSessionId))
-                                ConsoleOutput.Info($"Control session logs: {sessionLogManager.GetSessionLogDirectoryForDisplay(launchedControlSessionId)}");
                         }
                         else if (launchFailed)
                         {

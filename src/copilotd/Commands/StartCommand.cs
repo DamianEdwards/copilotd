@@ -39,7 +39,7 @@ public static class StartCommand
                 var copilotCli = services.GetRequiredService<CopilotCliService>();
                 var stateStore = services.GetRequiredService<StateStore>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
-                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
+                var logFileManager = services.GetRequiredService<LogFileManager>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var logLevel = parseResult.GetValue(logLevelOption);
@@ -95,6 +95,7 @@ public static class StartCommand
                 // Poll until the daemon acquires the lock or the child dies
                 var deadline = DateTime.UtcNow + StartupTimeout;
                 var started = false;
+                string? daemonLogDirectory = null;
 
                 while (DateTime.UtcNow < deadline)
                 {
@@ -123,6 +124,8 @@ public static class StartCommand
                         var pidInfo = stateStore.ReadDaemonPid();
                         if (pidInfo is { } info && info.Pid == childPid)
                         {
+                            if (!string.IsNullOrWhiteSpace(info.LogInstanceId))
+                                daemonLogDirectory = logFileManager.GetDaemonLogDirectoryForDisplay(info.LogInstanceId);
                             started = true;
                             break;
                         }
@@ -144,11 +147,8 @@ public static class StartCommand
                 }
 
                 ConsoleOutput.Success($"copilotd daemon started in background (PID: {childPid}). Use '{runtimeContext.GetCopilotdCallbackCommand()} stop' to shut down.");
-                ConsoleOutput.Info($"Daemon logs: {sessionLogManager.GetDaemonLogDirectoryForDisplay()}");
-
-                var state = stateStore.LoadState();
-                if (state.ControlSession is { Status: ControlSessionStatus.Running or ControlSessionStatus.Starting, CopilotSessionId: { Length: > 0 } controlSessionId })
-                    ConsoleOutput.Info($"Control session logs: {sessionLogManager.GetSessionLogDirectoryForDisplay(controlSessionId)}");
+                if (daemonLogDirectory is not null)
+                    ConsoleOutput.Info($"Daemon logs: {daemonLogDirectory}");
 
                 return 0;
             }, logger);

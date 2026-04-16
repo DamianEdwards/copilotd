@@ -34,10 +34,11 @@ public static class StatusCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
-                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
+                var logFileManager = services.GetRequiredService<LogFileManager>();
 
                 // Daemon status header
                 var daemonRunning = stateStore.IsLockHeld();
+                var daemonInfo = daemonRunning ? stateStore.ReadDaemonPid() : null;
                 var state = stateStore.LoadState();
                 var config = stateStore.LoadConfig();
 
@@ -60,7 +61,8 @@ public static class StatusCommand
                 }
 
                 ConsoleOutput.Info($"  Rules:     {config.Rules.Count}");
-                ConsoleOutput.Info($"  Logs:      {sessionLogManager.GetDaemonLogDirectoryForDisplay()}");
+                if (daemonInfo is { LogInstanceId: { Length: > 0 } daemonLogInstanceId })
+                    ConsoleOutput.Info($"  Logs:      {logFileManager.GetDaemonLogDirectoryForDisplay(daemonLogInstanceId)}");
 
                 // Control session status
                 if (state.ControlSession is not null)
@@ -87,11 +89,6 @@ public static class StatusCommand
                         ConsoleOutput.Info($"    {controlUrl}");
                     }
 
-                    if (!string.IsNullOrWhiteSpace(state.ControlSession.CopilotSessionId))
-                    {
-                        ConsoleOutput.Info("  Control logs:");
-                        ConsoleOutput.Info($"    {sessionLogManager.GetSessionLogDirectoryForDisplay(state.ControlSession.CopilotSessionId)}");
-                    }
                 }
                 else if (config.EnableControlSession)
                 {
@@ -104,7 +101,7 @@ public static class StatusCommand
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return SessionCommand.RenderSessionList(stateStore, processManager, remoteSessionUrls, sessionLogManager, config, filterValue, showAll);
+                return SessionCommand.RenderSessionList(stateStore, processManager, remoteSessionUrls, config, filterValue, showAll);
             }, logger);
         });
 

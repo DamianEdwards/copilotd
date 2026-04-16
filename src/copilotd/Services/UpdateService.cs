@@ -451,7 +451,7 @@ public sealed class UpdateService
                             _logger.LogInformation(
                                 "Daemon PID {Pid} started before deferred install could begin, continuing to wait for it to exit naturally",
                                 nextTarget.Pid);
-                            passiveWaitTarget = nextTarget;
+                            passiveWaitTarget = (nextTarget.Pid, nextTarget.StartTime);
                         }
                         else
                         {
@@ -500,7 +500,7 @@ public sealed class UpdateService
         if (allowDaemonShutdown)
         {
             var daemonPid = waitForPid is not null && waitForStartTime is not null
-                ? (Pid: waitForPid.Value, StartTime: waitForStartTime.Value)
+                ? (Pid: waitForPid.Value, StartTime: waitForStartTime.Value, LogInstanceId: (string?)null)
                 : _stateStore.ReadDaemonPid();
 
             if (daemonPid is not null)
@@ -771,7 +771,7 @@ public sealed class UpdateService
                     continue;
                 }
 
-                currentTarget = activeDaemon.Value;
+                currentTarget = (activeDaemon.Value.Pid, activeDaemon.Value.StartTime);
                 goto ContinueWaiting;
             }
 

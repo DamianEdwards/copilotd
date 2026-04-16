@@ -24,6 +24,7 @@ public static class StopCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
+                var logFileManager = services.GetRequiredService<LogFileManager>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
 
                 // Check if daemon is running
@@ -42,7 +43,10 @@ public static class StopCommand
                     return 1;
                 }
 
-                var (pid, expectedStartTime) = pidInfo.Value;
+                var (pid, expectedStartTime, logInstanceId) = pidInfo.Value;
+                var daemonLogDirectory = !string.IsNullOrWhiteSpace(logInstanceId)
+                    ? logFileManager.GetDaemonLogDirectoryForDisplay(logInstanceId)
+                    : null;
 
                 // Verify the process is alive and matches
                 Process process;
@@ -105,6 +109,8 @@ public static class StopCommand
                     }
 
                     ConsoleOutput.Success("copilotd daemon stopped.");
+                    if (daemonLogDirectory is not null)
+                        ConsoleOutput.Info($"Daemon logs: {daemonLogDirectory}");
                     return 0;
                 }
                 finally
