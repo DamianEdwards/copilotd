@@ -27,13 +27,12 @@ public sealed class RuntimeContext
 
     public bool IsSourceTreeRun => SourceProjectPath is not null;
 
+    private bool UsesDotnetSourceCommand => IsSourceTreeRun && !string.IsNullOrEmpty(SourceProjectPath);
+
     public string GetCopilotdCallbackCommand()
     {
-        if (IsDotnetHosted && !string.IsNullOrEmpty(SourceProjectPath))
+        if (UsesDotnetSourceCommand)
             return $"dotnet run --project \"{SourceProjectPath}\" --";
-
-        if (IsSourceTreeRun && !string.IsNullOrEmpty(ProcessPath))
-            return $"\"{ProcessPath}\"";
 
         return "copilotd";
     }
@@ -46,7 +45,7 @@ public sealed class RuntimeContext
 
     public IEnumerable<string> GetControlSessionAllowedShellCommands()
     {
-        if (IsDotnetHosted && !string.IsNullOrEmpty(SourceProjectPath))
+        if (UsesDotnetSourceCommand)
             yield return "dotnet";
         else
             yield return "copilotd";

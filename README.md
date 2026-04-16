@@ -74,7 +74,7 @@ copilotd.cmd init           # Windows
 copilotd.cmd run            # Windows
 ```
 
-Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the project from source via `dotnet run`, passing all arguments through.
+Convenience scripts `copilotd.sh` and `copilotd.cmd` run the project from source. For the long-lived `run` command they build and execute the generated apphost directly so Ctrl+C reaches `copilotd` cleanly; other commands continue to use `dotnet run`, passing all arguments through.
 
 Installed copilotd binaries can self-update in the background: the daemon checks for newer releases, downloads and verifies them, then stages the new binary to be installed after the running daemon exits naturally. If an installed binary update is interrupted and you restore `copilotd.exe` by rerunning the normal install script, the next copilotd launch will reconcile any leftover `.old`, `.staged`, and `update-state.json` artifacts: it will resume a newer staged update, or discard stale staged state rather than downgrading the restored binary. When running from source or a local repo publish, copilotd suppresses automatic background self-updates by default so local scenario verification is not interrupted by GitHub releases. You can still disable them explicitly with `COPILOTD_DISABLE_SELF_UPDATES=1` or `--disable-self-updates`, and `copilotd update --check` remains available to inspect update availability.
 
