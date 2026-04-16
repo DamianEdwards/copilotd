@@ -351,7 +351,7 @@ Stored in `~/.copilotd/` by default. Set `COPILOTD_HOME` to point copilotd at a 
 - `state.json` — runtime session tracking (auto-managed, self-healing)
 - `update-state.json` — self-update staging and install coordination
 - `prompt.md` — optional global custom prompt text appended to the built-in prompt
-- `logs\` — daemon logs in `logs\daemon\` and per-invocation logs in `logs\`
+- `logs\` — rolling file logs for copilotd commands, with daemon instances isolated under `logs\daemon_<uuid>\`
 - `.lock` — single-instance guard (present while daemon is running)
 
 ### Config options
@@ -388,11 +388,13 @@ Stored in `~/.copilotd/` by default. Set `COPILOTD_HOME` to point copilotd at a 
 
 File logs are written under `~/.copilotd/logs/` by default (or `COPILOTD_HOME\logs\` when `COPILOTD_HOME` is set):
 
-- Daemon logs live in `logs\daemon\`
-- Each control/dispatch session gets its own `logs\<session-uuid>\` folder
+- Each daemon `run` instance writes to its own `logs\daemon_<uuid>\` folder
+- Non-daemon commands write directly under `logs\`
 - Log files roll daily and when they reach 10 MB
-- `copilotd status`, `copilotd session`, `copilotd run`, and `copilotd start` print the relevant log folders
-- Completed session log folders are automatically purged after 30 days, and you can purge older folders manually with `copilotd session logs purge --days <n>`
+- `copilotd run`, `copilotd start`, `copilotd stop`, and `copilotd status` print the active daemon log folder when one is available
+- `copilotd logs` prints the logs root directory
+- `copilotd logs clear --days <n>` removes log files older than the supplied age
+- `copilotd logs clear` prompts for confirmation before clearing all log files except ones currently in use
 
 ## Architecture
 
