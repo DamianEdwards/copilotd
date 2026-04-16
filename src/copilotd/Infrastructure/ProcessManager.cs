@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Copilotd.Commands;
 using Copilotd.Models;
 using Microsoft.Extensions.Logging;
 using static Copilotd.Infrastructure.NativeInterop;
@@ -63,7 +64,7 @@ public sealed partial class ProcessManager
             {
                 // Use CreateProcessW directly to set CREATE_NEW_CONSOLE and
                 // CREATE_NEW_PROCESS_GROUP, ensuring the copilot process gets its own
-                // console and process group. This is required for graceful Ctrl+Break/C
+                // console and process group. This is required for graceful console-control
                 // termination to work without affecting the daemon's console.
                 var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>() };
                 si.dwFlags = STARTF_USESHOWWINDOW;
@@ -303,7 +304,7 @@ public sealed partial class ProcessManager
 
     /// <summary>
     /// Windows: spawns 'copilotd shutdown-instance --pid PID' which handles the full
-    /// graceful shutdown lifecycle (Ctrl+Break → Ctrl+C → Kill) from a separate process
+    /// graceful shutdown lifecycle (Ctrl+C → Ctrl+C → Kill) from a separate process
     /// that can safely attach to the target's console.
     /// </summary>
     private bool TerminateViaShutdownInstance(Process process, int pid, DateTimeOffset? processStartTime)
@@ -340,13 +341,18 @@ public sealed partial class ProcessManager
             // so we just need to wait for it to complete
             if (helper.WaitForExit(TimeSpan.FromSeconds(20)))
             {
-                if (helper.ExitCode == 0)
+                if (ShutdownInstanceCommand.IsSuccessExitCode(helper.ExitCode))
                 {
-                    _logger.LogInformation("Process {Pid} terminated via shutdown-instance", pid);
+                    var outcome = ShutdownInstanceCommand.DescribeExitCode(helper.ExitCode);
+                    if (ShutdownInstanceCommand.UsedFallbackKillExitCode(helper.ExitCode))
+                        _logger.LogWarning("Process {Pid} terminated after shutdown-instance {Outcome}", pid, outcome);
+                    else
+                        _logger.LogInformation("Process {Pid} terminated via shutdown-instance ({Outcome})", pid, outcome);
                     return true;
                 }
 
-                _logger.LogWarning("shutdown-instance exited with code {Code} for PID {Pid}", helper.ExitCode, pid);
+                _logger.LogWarning("shutdown-instance exited with code {Code} ({Outcome}) for PID {Pid}",
+                    helper.ExitCode, ShutdownInstanceCommand.DescribeExitCode(helper.ExitCode), pid);
             }
             else
             {

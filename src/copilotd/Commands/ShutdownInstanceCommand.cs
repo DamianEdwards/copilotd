@@ -3,6 +3,8 @@ using System.CommandLine.Parsing;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Copilotd.Commands;
 
@@ -17,7 +19,7 @@ public static class ShutdownInstanceCommand
     private static readonly TimeSpan SignalDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
 
-    public static Command Create()
+    public static Command Create(IServiceProvider services)
     {
         var command = new Command("shutdown-instance", "Internal: gracefully shut down a copilot process")
         {
@@ -33,26 +35,70 @@ public static class ShutdownInstanceCommand
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
+            var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(ShutdownInstanceCommand).FullName!);
             var pid = parseResult.GetValue(pidOption);
             var expectedStartText = parseResult.GetValue(expectedStartOption);
             var delaySeconds = parseResult.GetValue(delaySecondsOption);
             if (delaySeconds < 0)
-                return 1;
+            {
+                logger.LogWarning("shutdown-instance received invalid negative delay {DelaySeconds} for PID {Pid}", delaySeconds, pid);
+                return (int)ShutdownInstanceExitCode.InvalidArguments;
+            }
 
             if (!TryParseExpectedStart(expectedStartText, out var expectedStart))
-                return 1;
+            {
+                logger.LogWarning("shutdown-instance received invalid expected start '{ExpectedStart}' for PID {Pid}", expectedStartText, pid);
+                return (int)ShutdownInstanceExitCode.InvalidArguments;
+            }
 
-            return ShutdownProcess(pid, expectedStart, TimeSpan.FromSeconds(delaySeconds));
+            try
+            {
+                return (int)ShutdownProcess(pid, expectedStart, TimeSpan.FromSeconds(delaySeconds), logger);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "shutdown-instance failed unexpectedly for PID {Pid}", pid);
+                return (int)ShutdownInstanceExitCode.Failed;
+            }
         });
 
         return command;
     }
 
-    private static int ShutdownProcess(int pid, DateTimeOffset? expectedStart, TimeSpan shutdownDelay)
+    public static bool IsSuccessExitCode(int exitCode)
+        => exitCode == (int)ShutdownInstanceExitCode.AlreadyExited
+            || exitCode == (int)ShutdownInstanceExitCode.ExitedAfterFirstInterrupt
+            || exitCode == (int)ShutdownInstanceExitCode.ExitedAfterSecondInterrupt
+            || exitCode == (int)ShutdownInstanceExitCode.FallbackKill
+            || exitCode == (int)ShutdownInstanceExitCode.StartTimeMismatch;
+
+    public static bool UsedFallbackKillExitCode(int exitCode)
+        => exitCode == (int)ShutdownInstanceExitCode.FallbackKill;
+
+    public static string DescribeExitCode(int exitCode)
+        => exitCode switch
+        {
+            (int)ShutdownInstanceExitCode.AlreadyExited => "already exited",
+            (int)ShutdownInstanceExitCode.ExitedAfterFirstInterrupt => "exited after first interrupt",
+            (int)ShutdownInstanceExitCode.ExitedAfterSecondInterrupt => "exited after second interrupt",
+            (int)ShutdownInstanceExitCode.FallbackKill => "fallback kill",
+            (int)ShutdownInstanceExitCode.StartTimeMismatch => "start time mismatch",
+            (int)ShutdownInstanceExitCode.InvalidArguments => "invalid arguments",
+            (int)ShutdownInstanceExitCode.Failed => "failed",
+            _ => $"unknown exit code {exitCode}"
+        };
+
+    private static ShutdownInstanceExitCode ShutdownProcess(int pid, DateTimeOffset? expectedStart, TimeSpan shutdownDelay, ILogger logger)
     {
         var effectiveDelay = shutdownDelay < TimeSpan.Zero ? TimeSpan.Zero : shutdownDelay;
+        logger.LogInformation("shutdown-instance starting for PID {Pid} with delay {Delay} and expected start {ExpectedStart}",
+            pid, effectiveDelay, expectedStart);
+
         if (effectiveDelay > TimeSpan.Zero)
+        {
+            logger.LogInformation("shutdown-instance waiting {Delay} before signaling PID {Pid}", effectiveDelay, pid);
             Thread.Sleep(effectiveDelay);
+        }
 
         Process process;
         try
@@ -61,8 +107,8 @@ public static class ShutdownInstanceCommand
         }
         catch (ArgumentException)
         {
-            // Already dead
-            return 0;
+            logger.LogInformation("shutdown-instance found PID {Pid} already exited before signaling", pid);
+            return ShutdownInstanceExitCode.AlreadyExited;
         }
 
         try
@@ -71,16 +117,27 @@ public static class ShutdownInstanceCommand
             {
                 var actualStart = GetProcessStartTime(process);
                 if (actualStart is not null && Math.Abs((actualStart.Value - expectedStartTime).TotalSeconds) > 5)
-                    return 0;
+                {
+                    logger.LogWarning("shutdown-instance skipped PID {Pid} due to start time mismatch. Expected {ExpectedStart}, actual {ActualStart}",
+                        pid, expectedStartTime, actualStart);
+                    return ShutdownInstanceExitCode.StartTimeMismatch;
+                }
             }
 
             if (process.HasExited)
-                return 0;
+            {
+                logger.LogInformation("shutdown-instance found PID {Pid} already exited after validation", pid);
+                return ShutdownInstanceExitCode.AlreadyExited;
+            }
 
+            ShutdownInstanceExitCode outcome;
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                return ShutdownWindows(process, pid);
+                outcome = ShutdownWindows(process, pid, logger);
             else
-                return ShutdownUnix(process, pid);
+                outcome = ShutdownUnix(process, pid, logger);
+
+            logger.LogInformation("shutdown-instance completed for PID {Pid} with outcome {Outcome}", pid, outcome);
+            return outcome;
         }
         finally
         {
@@ -89,11 +146,11 @@ public static class ShutdownInstanceCommand
     }
 
     /// <summary>
-    /// Windows: attach to the target's console and send Ctrl+Break, then Ctrl+C.
+    /// Windows: attach to the target's console and send Ctrl+C twice.
     /// This process was launched without the daemon's console, so FreeConsole/AttachConsole
     /// won't disrupt the daemon.
     /// </summary>
-    private static int ShutdownWindows(Process process, int pid)
+    private static ShutdownInstanceExitCode ShutdownWindows(Process process, int pid, ILogger logger)
     {
         // Detach from any inherited console
         FreeConsole();
@@ -103,68 +160,118 @@ public static class ShutdownInstanceCommand
 
         // Attach to the target's console
         if (!AttachConsole((uint)pid))
-            return FallbackKill(process, pid);
+        {
+            logger.LogWarning("shutdown-instance failed to attach to console for PID {Pid} (Win32 error {Error}), falling back to kill",
+                pid, Marshal.GetLastWin32Error());
+            return FallbackKill(process, pid, logger, "attach-console-failed");
+        }
 
         try
         {
-            // First try: Ctrl+Break targeted at the process group (PID)
-            GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, (uint)pid);
+            if (TrySendConsoleSignal(process, pid, logger, CTRL_C_EVENT, 0, "first Ctrl+C", SignalDelay, ShutdownInstanceExitCode.ExitedAfterFirstInterrupt) is { } firstOutcome)
+                return firstOutcome;
 
-            if (process.WaitForExit(SignalDelay))
-                return 0;
-
-            // Second try: Ctrl+C broadcast to all on the console
-            GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
-
-            if (process.WaitForExit(GracefulTimeout))
-                return 0;
+            if (TrySendConsoleSignal(process, pid, logger, CTRL_C_EVENT, 0, "second Ctrl+C", GracefulTimeout, ShutdownInstanceExitCode.ExitedAfterSecondInterrupt) is { } secondOutcome)
+                return secondOutcome;
         }
-        catch
+        catch (Exception ex)
         {
-            // Fall through to kill
+            logger.LogWarning(ex, "shutdown-instance signal sequence failed for PID {Pid}, falling back to kill", pid);
+        }
+        finally
+        {
+            FreeConsole();
         }
 
-        return FallbackKill(process, pid);
+        return FallbackKill(process, pid, logger, "signals-exhausted");
     }
 
     /// <summary>
     /// Unix: send SIGINT, wait, then SIGKILL if needed.
     /// Note: on Unix the daemon calls this logic directly (no helper process needed).
     /// </summary>
-    private static int ShutdownUnix(Process process, int pid)
+    private static ShutdownInstanceExitCode ShutdownUnix(Process process, int pid, ILogger logger)
     {
         try
         {
+            logger.LogInformation("shutdown-instance sending first SIGINT to PID {Pid}", pid);
             sys_kill(pid, SIGINT);
 
             if (process.WaitForExit(SignalDelay))
-                return 0;
+            {
+                logger.LogInformation("PID {Pid} exited after first SIGINT", pid);
+                return ShutdownInstanceExitCode.ExitedAfterFirstInterrupt;
+            }
 
             // Second SIGINT
+            logger.LogInformation("shutdown-instance sending second SIGINT to PID {Pid}", pid);
             sys_kill(pid, SIGINT);
 
             if (process.WaitForExit(GracefulTimeout))
-                return 0;
+            {
+                logger.LogInformation("PID {Pid} exited after second SIGINT", pid);
+                return ShutdownInstanceExitCode.ExitedAfterSecondInterrupt;
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // Fall through to kill
+            logger.LogWarning(ex, "shutdown-instance SIGINT sequence failed for PID {Pid}, falling back to kill", pid);
         }
 
-        return FallbackKill(process, pid);
+        return FallbackKill(process, pid, logger, "signals-exhausted");
     }
 
-    private static int FallbackKill(Process process, int pid)
+    private static ShutdownInstanceExitCode? TrySendConsoleSignal(
+        Process process,
+        int pid,
+        ILogger logger,
+        uint signal,
+        uint processGroupId,
+        string description,
+        TimeSpan waitTime,
+        ShutdownInstanceExitCode successOutcome)
     {
+        logger.LogInformation("shutdown-instance sending {SignalDescription} to PID {Pid}", description, pid);
+
+        if (!GenerateConsoleCtrlEvent(signal, processGroupId))
+        {
+            logger.LogWarning("shutdown-instance failed to send {SignalDescription} to PID {Pid} (Win32 error {Error})",
+                description, pid, Marshal.GetLastWin32Error());
+            return null;
+        }
+
+        if (process.WaitForExit(waitTime))
+        {
+            logger.LogInformation("PID {Pid} exited after {SignalDescription}", pid, description);
+            return successOutcome;
+        }
+
+        logger.LogInformation("PID {Pid} was still running {WaitTime} after {SignalDescription}", pid, waitTime, description);
+        return null;
+    }
+
+    private static ShutdownInstanceExitCode FallbackKill(Process process, int pid, ILogger logger, string reason)
+    {
+        logger.LogWarning("shutdown-instance falling back to kill for PID {Pid} ({Reason})", pid, reason);
+
         try
         {
             if (!process.HasExited)
+            {
                 process.Kill(entireProcessTree: true);
-            return 0;
+                logger.LogWarning("shutdown-instance killed PID {Pid}", pid);
+            }
+            else
+            {
+                logger.LogInformation("shutdown-instance fallback kill found PID {Pid} already exited", pid);
+            }
+
+            return ShutdownInstanceExitCode.FallbackKill;
         }
-        catch
+        catch (Exception ex)
         {
-            return 1;
+            logger.LogError(ex, "shutdown-instance failed to kill PID {Pid}", pid);
+            return ShutdownInstanceExitCode.Failed;
         }
     }
 
@@ -210,7 +317,6 @@ public static class ShutdownInstanceCommand
     private delegate bool ConsoleCtrlHandler(uint dwCtrlType);
 
     private const uint CTRL_C_EVENT = 0;
-    private const uint CTRL_BREAK_EVENT = 1;
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int sys_kill(int pid, int sig);
@@ -218,4 +324,15 @@ public static class ShutdownInstanceCommand
     private const int SIGINT = 2;
 
     #endregion
+
+    private enum ShutdownInstanceExitCode
+    {
+        AlreadyExited = 0,
+        ExitedAfterFirstInterrupt = 1,
+        ExitedAfterSecondInterrupt = 2,
+        FallbackKill = 3,
+        StartTimeMismatch = 4,
+        InvalidArguments = 64,
+        Failed = 65
+    }
 }

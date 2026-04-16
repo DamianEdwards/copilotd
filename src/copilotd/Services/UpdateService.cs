@@ -1,5 +1,6 @@
 using Copilotd.Infrastructure;
 using Copilotd.Models;
+using Copilotd.Commands;
 using Microsoft.Extensions.Logging;
 using NuGet.Versioning;
 
@@ -818,13 +819,18 @@ public sealed class UpdateService
 
             if (helper.WaitForExit(TimeSpan.FromSeconds(20)))
             {
-                if (helper.ExitCode == 0)
+                if (ShutdownInstanceCommand.IsSuccessExitCode(helper.ExitCode))
                 {
-                    _logger.LogInformation("Daemon PID {Pid} terminated via graceful shutdown", pid);
+                    var outcome = ShutdownInstanceCommand.DescribeExitCode(helper.ExitCode);
+                    if (ShutdownInstanceCommand.UsedFallbackKillExitCode(helper.ExitCode))
+                        _logger.LogWarning("Daemon PID {Pid} terminated after shutdown-instance {Outcome}", pid, outcome);
+                    else
+                        _logger.LogInformation("Daemon PID {Pid} terminated via graceful shutdown ({Outcome})", pid, outcome);
                     return true;
                 }
 
-                _logger.LogDebug("shutdown-instance exited with code {Code}", helper.ExitCode);
+                _logger.LogDebug("shutdown-instance exited with code {Code} ({Outcome})",
+                    helper.ExitCode, ShutdownInstanceCommand.DescribeExitCode(helper.ExitCode));
             }
             else
             {

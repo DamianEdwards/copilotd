@@ -119,7 +119,7 @@ public static class StopCommand
 
     /// <summary>
     /// Windows: use the shutdown-instance helper to attach to the daemon's console
-    /// and send Ctrl+Break/Ctrl+C, triggering Console.CancelKeyPress in the daemon.
+    /// and send Ctrl+C twice, triggering Console.CancelKeyPress in the daemon.
     /// </summary>
     private static bool StopDaemonWindows(Process process, int pid, RuntimeContext runtimeContext)
     {
@@ -149,8 +149,12 @@ public static class StopCommand
 
             if (helper.WaitForExit(TimeSpan.FromSeconds(20)))
             {
-                if (helper.ExitCode == 0)
+                if (ShutdownInstanceCommand.IsSuccessExitCode(helper.ExitCode))
+                {
+                    if (ShutdownInstanceCommand.UsedFallbackKillExitCode(helper.ExitCode))
+                        ConsoleOutput.Warning("Daemon required forced termination after graceful shutdown timed out.");
                     return true;
+                }
             }
             else
             {

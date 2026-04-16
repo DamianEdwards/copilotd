@@ -60,7 +60,7 @@ public class Program
             rootCommand.Subcommands.Add(StatusCommand.Create(services));
             rootCommand.Subcommands.Add(SessionCommand.Create(services));
             rootCommand.Subcommands.Add(UpdateCommand.Create(services));
-            rootCommand.Subcommands.Add(ShutdownInstanceCommand.Create());
+            rootCommand.Subcommands.Add(ShutdownInstanceCommand.Create(services));
 
             var parseResult = rootCommand.Parse(args, new ParserConfiguration());
             return await parseResult.InvokeAsync(new InvocationConfiguration());
