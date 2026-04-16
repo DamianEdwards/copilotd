@@ -70,6 +70,7 @@ public static class ShutdownInstanceCommand
             || exitCode == (int)ShutdownInstanceExitCode.ExitedAfterFirstInterrupt
             || exitCode == (int)ShutdownInstanceExitCode.ExitedAfterSecondInterrupt
             || exitCode == (int)ShutdownInstanceExitCode.FallbackKill
+            || exitCode == (int)ShutdownInstanceExitCode.ExitedDuringFallback
             || exitCode == (int)ShutdownInstanceExitCode.StartTimeMismatch;
 
     public static bool UsedFallbackKillExitCode(int exitCode)
@@ -82,6 +83,7 @@ public static class ShutdownInstanceCommand
             (int)ShutdownInstanceExitCode.ExitedAfterFirstInterrupt => "exited after first interrupt",
             (int)ShutdownInstanceExitCode.ExitedAfterSecondInterrupt => "exited after second interrupt",
             (int)ShutdownInstanceExitCode.FallbackKill => "fallback kill",
+            (int)ShutdownInstanceExitCode.ExitedDuringFallback => "exited during fallback",
             (int)ShutdownInstanceExitCode.StartTimeMismatch => "start time mismatch",
             (int)ShutdownInstanceExitCode.InvalidArguments => "invalid arguments",
             (int)ShutdownInstanceExitCode.Failed => "failed",
@@ -263,7 +265,8 @@ public static class ShutdownInstanceCommand
             }
             else
             {
-                logger.LogInformation("shutdown-instance fallback kill found PID {Pid} already exited", pid);
+                logger.LogInformation("shutdown-instance found PID {Pid} already exited during fallback", pid);
+                return ShutdownInstanceExitCode.ExitedDuringFallback;
             }
 
             return ShutdownInstanceExitCode.FallbackKill;
@@ -332,6 +335,7 @@ public static class ShutdownInstanceCommand
         ExitedAfterSecondInterrupt = 2,
         FallbackKill = 3,
         StartTimeMismatch = 4,
+        ExitedDuringFallback = 5,
         InvalidArguments = 64,
         Failed = 65
     }
