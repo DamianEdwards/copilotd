@@ -63,6 +63,78 @@ internal static class NativeInterop
     public const int STARTF_USESHOWWINDOW = 0x00000001;
     public const short SW_HIDE = 0;
 
+    // --- Windows process snapshot APIs ---
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct PROCESSENTRY32
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+
+    public const uint TH32CS_SNAPPROCESS = 0x00000002;
+    public static readonly IntPtr InvalidHandleValue = new(-1);
+
+    public readonly record struct WindowsProcessEntry(int ProcessId, int ParentProcessId, string ExecutableName);
+
+    public static IReadOnlyList<WindowsProcessEntry> EnumerateWindowsProcesses()
+    {
+        if (!OperatingSystem.IsWindows())
+            return [];
+
+        var snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == InvalidHandleValue)
+            return [];
+
+        try
+        {
+            var entry = new PROCESSENTRY32
+            {
+                dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32>()
+            };
+
+            if (!Process32FirstW(snapshot, ref entry))
+                return [];
+
+            var processes = new List<WindowsProcessEntry>();
+            do
+            {
+                processes.Add(new WindowsProcessEntry(
+                    (int)entry.th32ProcessID,
+                    (int)entry.th32ParentProcessID,
+                    entry.szExeFile));
+
+                entry.dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32>();
+            }
+            while (Process32NextW(snapshot, ref entry));
+
+            return processes;
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
+    }
+
     // --- Unix signal APIs ---
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]

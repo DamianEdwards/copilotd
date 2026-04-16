@@ -15,6 +15,8 @@ public sealed partial class ProcessManager
 {
     private static readonly TimeSpan SignalDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan WindowsCopilotChildDiscoveryTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan WindowsCopilotChildDiscoveryPollInterval = TimeSpan.FromMilliseconds(100);
 
     private readonly StateStore _stateStore;
     private readonly RepoPathResolver _repoResolver;
@@ -84,16 +86,11 @@ public sealed partial class ProcessManager
                 session.ProcessId = pi.dwProcessId;
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
-
-                try
+                AssignTrackedWindowsCopilotProcess(session.IssueKey, pi.dwProcessId, tracked =>
                 {
-                    using var proc = Process.GetProcessById(pi.dwProcessId);
-                    session.ProcessStartTime = GetProcessStartTime(proc);
-                }
-                catch
-                {
-                    session.ProcessStartTime = DateTimeOffset.UtcNow;
-                }
+                    session.ProcessId = tracked.ProcessId;
+                    session.ProcessStartTime = tracked.ProcessStartTime;
+                });
 
                 process = null; // Already tracked via PID
             }
@@ -527,16 +524,11 @@ public sealed partial class ProcessManager
                 session.ProcessId = pi.dwProcessId;
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
-
-                try
+                AssignTrackedWindowsCopilotProcess("control session", pi.dwProcessId, tracked =>
                 {
-                    using var proc = Process.GetProcessById(pi.dwProcessId);
-                    session.ProcessStartTime = GetProcessStartTime(proc);
-                }
-                catch
-                {
-                    session.ProcessStartTime = DateTimeOffset.UtcNow;
-                }
+                    session.ProcessId = tracked.ProcessId;
+                    session.ProcessStartTime = tracked.ProcessStartTime;
+                });
             }
             else
             {
@@ -840,6 +832,106 @@ public sealed partial class ProcessManager
         {
             return null;
         }
+    }
+
+    private void AssignTrackedWindowsCopilotProcess(
+        string processLabel,
+        int rootPid,
+        Action<(int ProcessId, DateTimeOffset ProcessStartTime)> assign)
+    {
+        var tracked = TryResolveTrackedWindowsCopilotProcess(rootPid);
+        if (tracked is { } trackedProcess)
+        {
+            assign(trackedProcess);
+
+            if (trackedProcess.ProcessId != rootPid)
+            {
+                _logger.LogDebug(
+                    "Tracking Windows child copilot PID {TrackedPid} instead of bootstrap PID {RootPid} for {ProcessLabel}",
+                    trackedProcess.ProcessId,
+                    rootPid,
+                    processLabel);
+            }
+
+            return;
+        }
+
+        try
+        {
+            using var proc = Process.GetProcessById(rootPid);
+            assign((rootPid, GetProcessStartTime(proc) ?? DateTimeOffset.UtcNow));
+        }
+        catch
+        {
+            assign((rootPid, DateTimeOffset.UtcNow));
+        }
+    }
+
+    private static (int ProcessId, DateTimeOffset ProcessStartTime)? TryResolveTrackedWindowsCopilotProcess(int rootPid)
+    {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
+        var deadline = DateTime.UtcNow + WindowsCopilotChildDiscoveryTimeout;
+
+        while (true)
+        {
+            var trackedPid = FindDeepestWindowsCopilotDescendant(rootPid) ?? rootPid;
+
+            try
+            {
+                using var process = Process.GetProcessById(trackedPid);
+                var startTime = GetProcessStartTime(process) ?? DateTimeOffset.UtcNow;
+                if (trackedPid != rootPid || DateTime.UtcNow >= deadline)
+                    return (trackedPid, startTime);
+            }
+            catch
+            {
+                if (DateTime.UtcNow >= deadline)
+                    return null;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+                return null;
+
+            Thread.Sleep(WindowsCopilotChildDiscoveryPollInterval);
+        }
+    }
+
+    private static int? FindDeepestWindowsCopilotDescendant(int rootPid)
+    {
+        var processes = EnumerateWindowsProcesses();
+        if (processes.Count == 0)
+            return null;
+
+        var childrenByParent = processes
+            .GroupBy(process => process.ParentProcessId)
+            .ToDictionary(group => group.Key, group => group.ToList());
+
+        var bestDepth = -1;
+        int? bestPid = null;
+
+        void Walk(int parentPid, int depth)
+        {
+            if (!childrenByParent.TryGetValue(parentPid, out var children))
+                return;
+
+            foreach (var child in children)
+            {
+                var childDepth = depth + 1;
+                if (string.Equals(child.ExecutableName, "copilot.exe", StringComparison.OrdinalIgnoreCase)
+                    && childDepth > bestDepth)
+                {
+                    bestDepth = childDepth;
+                    bestPid = child.ProcessId;
+                }
+
+                Walk(child.ProcessId, childDepth);
+            }
+        }
+
+        Walk(rootPid, 0);
+        return bestPid;
     }
 
     // ---- Worktree lifecycle ----

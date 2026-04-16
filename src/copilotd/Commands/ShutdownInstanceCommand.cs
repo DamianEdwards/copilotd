@@ -3,6 +3,7 @@ using System.CommandLine.Parsing;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using Copilotd.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -242,13 +243,13 @@ public static class ShutdownInstanceCommand
             return null;
         }
 
-        if (process.WaitForExit(waitTime))
+        if (WaitForProcessTreeExit(process, pid, waitTime))
         {
-            logger.LogInformation("PID {Pid} exited after {SignalDescription}", pid, description);
+            logger.LogInformation("PID {Pid} process tree exited after {SignalDescription}", pid, description);
             return successOutcome;
         }
 
-        logger.LogInformation("PID {Pid} was still running {WaitTime} after {SignalDescription}", pid, waitTime, description);
+        logger.LogInformation("PID {Pid} process tree was still running {WaitTime} after {SignalDescription}", pid, waitTime, description);
         return null;
     }
 
@@ -258,24 +259,100 @@ public static class ShutdownInstanceCommand
 
         try
         {
+            var killedAnyProcess = false;
+
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
                 logger.LogWarning("shutdown-instance killed PID {Pid}", pid);
+                killedAnyProcess = true;
             }
             else
             {
                 logger.LogInformation("shutdown-instance found PID {Pid} already exited during fallback", pid);
-                return ShutdownInstanceExitCode.ExitedDuringFallback;
             }
 
-            return ShutdownInstanceExitCode.FallbackKill;
+            killedAnyProcess |= KillDescendants(pid, logger);
+            return killedAnyProcess ? ShutdownInstanceExitCode.FallbackKill : ShutdownInstanceExitCode.ExitedDuringFallback;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "shutdown-instance failed to kill PID {Pid}", pid);
             return ShutdownInstanceExitCode.Failed;
         }
+    }
+
+    private static bool WaitForProcessTreeExit(Process process, int rootPid, TimeSpan waitTime)
+    {
+        var deadline = DateTime.UtcNow + waitTime;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (process.HasExited && !HasDescendants(rootPid))
+                return true;
+
+            Thread.Sleep(TimeSpan.FromMilliseconds(100));
+        }
+
+        return process.HasExited && !HasDescendants(rootPid);
+    }
+
+    private static bool HasDescendants(int rootPid)
+        => EnumerateDescendantProcessIds(rootPid).Count > 0;
+
+    private static bool KillDescendants(int rootPid, ILogger logger)
+    {
+        var descendantIds = EnumerateDescendantProcessIds(rootPid);
+        var killedAny = false;
+
+        foreach (var descendantPid in descendantIds.AsEnumerable().Reverse())
+        {
+            try
+            {
+                using var descendant = Process.GetProcessById(descendantPid);
+                if (descendant.HasExited)
+                    continue;
+
+                descendant.Kill(entireProcessTree: true);
+                logger.LogWarning("shutdown-instance killed descendant PID {Pid} from root PID {RootPid}", descendantPid, rootPid);
+                killedAny = true;
+            }
+            catch (ArgumentException)
+            {
+            }
+        }
+
+        return killedAny;
+    }
+
+    private static List<int> EnumerateDescendantProcessIds(int rootPid)
+    {
+        var processes = NativeInterop.EnumerateWindowsProcesses();
+        if (processes.Count == 0)
+            return [];
+
+        var childrenByParent = processes
+            .GroupBy(process => process.ParentProcessId)
+            .ToDictionary(group => group.Key, group => group.Select(process => process.ProcessId).ToList());
+
+        var descendants = new List<int>();
+        var pending = new Stack<int>();
+        pending.Push(rootPid);
+
+        while (pending.Count > 0)
+        {
+            var currentPid = pending.Pop();
+            if (!childrenByParent.TryGetValue(currentPid, out var children))
+                continue;
+
+            foreach (var childPid in children)
+            {
+                descendants.Add(childPid);
+                pending.Push(childPid);
+            }
+        }
+
+        return descendants;
     }
 
     private static bool TryParseExpectedStart(string? text, out DateTimeOffset? expectedStart)
