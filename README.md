@@ -351,7 +351,7 @@ Stored in `~/.copilotd/` by default. Set `COPILOTD_HOME` to point copilotd at a 
 - `state.json` — runtime session tracking (auto-managed, self-healing)
 - `update-state.json` — self-update staging and install coordination
 - `prompt.md` — optional global custom prompt text appended to the built-in prompt
-- `logs\` — daemon logs in `logs\daemon\` and per-session logs in `logs\<session-uuid>\`
+- `logs\` — daemon logs in `logs\daemon\` and per-invocation logs in `logs\`
 - `.lock` — single-instance guard (present while daemon is running)
 
 ### Config options
