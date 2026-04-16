@@ -20,14 +20,16 @@ public sealed class StateStore
     private readonly string _stateLockPath;
     private readonly string _updateLockPath;
     private readonly string _pidPath;
+    private readonly SessionLogManager _sessionLogManager;
     private readonly ILogger<StateStore> _logger;
 
     public string ConfigDir => _configDir;
 
     private string PromptPath => Path.Combine(_configDir, "prompt.md");
 
-    public StateStore(ILogger<StateStore> logger)
+    public StateStore(SessionLogManager sessionLogManager, ILogger<StateStore> logger)
     {
+        _sessionLogManager = sessionLogManager;
         _logger = logger;
         _configDir = CopilotdPaths.GetCopilotdHomeDirectory();
         _configPath = Path.Combine(_configDir, "config.json");
@@ -99,6 +101,7 @@ public sealed class StateStore
     {
         var json = JsonSerializer.Serialize(state, CopilotdJsonContext.Default.DaemonState);
         AtomicWrite(_statePath, json);
+        _sessionLogManager.SyncState(state);
         _logger.LogDebug("State saved to {Path}", _statePath);
     }
 

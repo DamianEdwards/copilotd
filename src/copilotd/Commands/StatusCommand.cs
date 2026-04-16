@@ -34,6 +34,7 @@ public static class StatusCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 // Daemon status header
                 var daemonRunning = stateStore.IsLockHeld();
@@ -59,6 +60,7 @@ public static class StatusCommand
                 }
 
                 ConsoleOutput.Info($"  Rules:     {config.Rules.Count}");
+                ConsoleOutput.Info($"  Logs:      {sessionLogManager.GetDaemonLogDirectoryForDisplay()}");
 
                 // Control session status
                 if (state.ControlSession is not null)
@@ -84,6 +86,12 @@ public static class StatusCommand
                         ConsoleOutput.Info("  Remote:");
                         ConsoleOutput.Info($"    {controlUrl}");
                     }
+
+                    if (!string.IsNullOrWhiteSpace(state.ControlSession.CopilotSessionId))
+                    {
+                        ConsoleOutput.Info("  Control logs:");
+                        ConsoleOutput.Info($"    {sessionLogManager.GetSessionLogDirectoryForDisplay(state.ControlSession.CopilotSessionId)}");
+                    }
                 }
                 else if (config.EnableControlSession)
                 {
@@ -96,7 +104,7 @@ public static class StatusCommand
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return SessionCommand.RenderSessionList(stateStore, processManager, remoteSessionUrls, config, filterValue, showAll);
+                return SessionCommand.RenderSessionList(stateStore, processManager, remoteSessionUrls, sessionLogManager, config, filterValue, showAll);
             }, logger);
         });
 

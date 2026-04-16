@@ -35,6 +35,8 @@ public sealed partial class ProcessManager
     /// </summary>
     public DispatchSession? LaunchCopilot(DispatchSession session, CopilotdConfig config, GitHubIssue issue, DaemonState state)
     {
+        using var _ = SessionLogScope.Begin(_logger, session.CopilotSessionId);
+
         // Use worktree path if available, otherwise resolve the main repo path
         var repoPath = session.WorktreePath ?? _repoResolver.ResolveRepoPath(issue.Repo, config, state);
         if (repoPath is null || !Directory.Exists(repoPath))
@@ -496,7 +498,10 @@ public sealed partial class ProcessManager
             CopilotSessionId = Guid.NewGuid().ToString("D"),
             Status = ControlSessionStatus.Starting,
             StartedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
         };
+
+        using var _ = SessionLogScope.Begin(_logger, session.CopilotSessionId);
 
         var prompt = CopilotdConfig.ControlSessionPrompt
             .Replace("$(copilotd.command)", _runtimeContext.GetCopilotdCallbackCommand(), StringComparison.Ordinal);
@@ -564,6 +569,7 @@ public sealed partial class ProcessManager
             }
 
             session.Status = ControlSessionStatus.Running;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
             _logger.LogInformation("Control session launched: PID={Pid}", session.ProcessId);
             return session;
         }

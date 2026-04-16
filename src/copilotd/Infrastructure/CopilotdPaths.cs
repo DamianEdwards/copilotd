@@ -34,4 +34,7 @@ public static class CopilotdPaths
         => Environment.GetEnvironmentVariable(HomeEnvVar) is { Length: > 0 }
             ? $"{GetCopilotdHomeDirectory()} (from {HomeEnvVar})"
             : GetCopilotdHomeDirectory();
+
+    public static string GetLogsDirectory()
+        => Path.Combine(GetCopilotdHomeDirectory(), "logs");
 }

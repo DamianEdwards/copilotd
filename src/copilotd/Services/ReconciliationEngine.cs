@@ -19,17 +19,20 @@ public sealed class ReconciliationEngine
     private readonly ProcessManager _processManager;
     private readonly GhCliService _ghCli;
     private readonly StateStore _stateStore;
+    private readonly SessionLogManager _sessionLogManager;
     private readonly ILogger<ReconciliationEngine> _logger;
 
     public ReconciliationEngine(
         ProcessManager processManager,
         GhCliService ghCli,
         StateStore stateStore,
+        SessionLogManager sessionLogManager,
         ILogger<ReconciliationEngine> logger)
     {
         _processManager = processManager;
         _ghCli = ghCli;
         _stateStore = stateStore;
+        _sessionLogManager = sessionLogManager;
         _logger = logger;
     }
 
@@ -42,6 +45,9 @@ public sealed class ReconciliationEngine
 
         // Step 0: Prune terminal sessions older than 7 days
         PruneTerminalSessions(state);
+
+        // Step 0b: Purge completed-session log folders older than 30 days once per day
+        PurgeCompletedSessionLogsIfDue(state);
 
         // Step 1: Verify all tracked non-terminal sessions against live processes
         VerifyTrackedSessions(state);
@@ -65,6 +71,22 @@ public sealed class ReconciliationEngine
             state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForFeedback),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForReview),
             state.Sessions.Values.Count(s => s.IsTerminal));
+    }
+
+    private void PurgeCompletedSessionLogsIfDue(DaemonState state)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (state.LastSessionLogPurgeAt is { } lastRun && now - lastRun < TimeSpan.FromDays(1))
+            return;
+
+        var purgeResult = _sessionLogManager.PurgeCompletedSessionLogsOlderThan(30, now);
+        foreach (var warning in purgeResult.Warnings)
+            _logger.LogWarning("{Warning}", warning);
+
+        if (purgeResult.DeletedCount > 0)
+            _logger.LogInformation("Purged {Count} completed session log folder(s) older than 30 days", purgeResult.DeletedCount);
+
+        state.LastSessionLogPurgeAt = now;
     }
 
     /// <summary>
@@ -102,6 +124,8 @@ public sealed class ReconciliationEngine
     {
         foreach (var (key, session) in state.Sessions)
         {
+            using var _ = SessionLogScope.Begin(_logger, session.CopilotSessionId);
+
             if (session.IsTerminal)
                 continue;
 
@@ -228,6 +252,8 @@ public sealed class ReconciliationEngine
         var toTerminate = new List<DispatchSession>();
         foreach (var (key, session) in state.Sessions)
         {
+            using var _ = SessionLogScope.Begin(_logger, session.CopilotSessionId);
+
             // Clear CompletedBySession flag when the issue no longer matches rules,
             // so that if the issue re-matches later it will be re-dispatched
             if (session.Status == SessionStatus.Completed && session.CompletedBySession
@@ -287,6 +313,7 @@ public sealed class ReconciliationEngine
         {
             Parallel.ForEach(toTerminate, new ParallelOptions { MaxDegreeOfParallelism = 4 }, session =>
             {
+                using var _ = SessionLogScope.Begin(_logger, session.CopilotSessionId);
                 _processManager.TerminateProcess(session);
             });
 
@@ -303,6 +330,8 @@ public sealed class ReconciliationEngine
         {
             if (state.Sessions.TryGetValue(issueKey, out var existing))
             {
+                using var _ = SessionLogScope.Begin(_logger, existing.CopilotSessionId);
+
                 // Backfill IssueAuthor for sessions created before this field existed
                 if (existing.IssueAuthor is null && issue.Author is not null)
                 {
@@ -545,8 +574,7 @@ public sealed class ReconciliationEngine
             else
             {
                 // New issue, create pending session
-                _logger.LogInformation("New issue {Key} matched by rule '{Rule}', creating pending dispatch", issueKey, ruleName);
-                state.Sessions[issueKey] = new DispatchSession
+                var newSession = new DispatchSession
                 {
                     IssueKey = issueKey,
                     Repo = issue.Repo,
@@ -558,6 +586,10 @@ public sealed class ReconciliationEngine
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow,
                 };
+                state.Sessions[issueKey] = newSession;
+
+                using var _ = SessionLogScope.Begin(_logger, newSession.CopilotSessionId);
+                _logger.LogInformation("New issue {Key} matched by rule '{Rule}', creating pending dispatch", issueKey, ruleName);
             }
         }
     }
@@ -588,6 +620,8 @@ public sealed class ReconciliationEngine
 
         foreach (var session in toDispatch)
         {
+            using var _ = SessionLogScope.Begin(_logger, session.CopilotSessionId);
+
             session.Status = SessionStatus.Dispatching;
             session.UpdatedAt = DateTimeOffset.UtcNow;
 

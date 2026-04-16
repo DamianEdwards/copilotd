@@ -71,16 +71,11 @@ public class Program
     {
         var serviceCollection = new ServiceCollection();
 
-        serviceCollection.AddLogging(builder =>
-        {
-            builder.SetMinimumLevel(LogLevel.Debug);
-            builder.AddProvider(new FileLoggerProvider());
-
-            if (consoleLogLevel is { } level)
-            {
-                builder.AddProvider(new StderrLoggerProvider(level));
-            }
-        });
+        serviceCollection.AddSingleton<SessionLogManager>();
+        serviceCollection.AddLogging(builder => builder.SetMinimumLevel(LogLevel.Debug));
+        serviceCollection.AddSingleton<ILoggerProvider>(sp => new FileLoggerProvider(sp.GetRequiredService<SessionLogManager>()));
+        if (consoleLogLevel is { } level)
+            serviceCollection.AddSingleton<ILoggerProvider>(_ => new StderrLoggerProvider(level));
 
         serviceCollection.AddSingleton<StateStore>();
         serviceCollection.AddSingleton<RepoPathResolver>();

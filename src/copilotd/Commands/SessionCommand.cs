@@ -23,6 +23,7 @@ public static class SessionCommand
         command.Subcommands.Add(CreateCompleteCommand(services));
         command.Subcommands.Add(CreatePrCommand(services));
         command.Subcommands.Add(CreateResetCommand(services));
+        command.Subcommands.Add(CreateLogsCommand(services));
 
         // Default to list behavior when no subcommand is specified
         var filterOption = new Option<string?>("--filter")
@@ -49,11 +50,12 @@ public static class SessionCommand
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
                 var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return RenderSessionList(stateStore, processManager, remoteSessionUrls, config, filterValue, showAll);
+                return RenderSessionList(stateStore, processManager, remoteSessionUrls, sessionLogManager, config, filterValue, showAll);
             }, logger);
         });
 
@@ -87,11 +89,12 @@ public static class SessionCommand
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
                 var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
 
-                return RenderSessionList(stateStore, processManager, remoteSessionUrls, config, filterValue, showAll);
+                return RenderSessionList(stateStore, processManager, remoteSessionUrls, sessionLogManager, config, filterValue, showAll);
             }, logger);
         });
 
@@ -116,6 +119,7 @@ public static class SessionCommand
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
                 var repoResolver = services.GetRequiredService<RepoPathResolver>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
                 string? sessionId = null;
@@ -179,6 +183,7 @@ public static class SessionCommand
                 }
 
                 ConsoleOutput.Success($"Joining session {sessionId} for {issueKey}");
+                PrintSessionLogDirectory(sessionLogManager, sessionId!);
                 if (worktreePath is not null)
                     ConsoleOutput.Info($"Working directory: {worktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)}");
                 ConsoleOutput.Info("Press Ctrl+C to exit the interactive session.");
@@ -274,6 +279,7 @@ public static class SessionCommand
                 var ghCli = services.GetRequiredService<GhCliService>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
                 var message = parseResult.GetValue(messageOption)!;
@@ -350,6 +356,7 @@ public static class SessionCommand
                 }
 
                 ConsoleOutput.Success($"Comment posted on {issueKey}. Session is now waiting for feedback.");
+                PrintSessionLogDirectory(sessionLogManager, expectedSessionId);
                 ScheduleSessionShutdown(processManager, trackedProcess, config);
                 return 0;
             }, logger);
@@ -375,6 +382,7 @@ public static class SessionCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
                 var trackedProcess = default(TrackedProcessRef);
@@ -417,6 +425,11 @@ public static class SessionCommand
                 }
 
                 ConsoleOutput.Success($"Session for {issueKey} marked as completed.");
+                PrintSessionLogDirectory(sessionLogManager, stateStore.WithStateLock(() =>
+                {
+                    var state = stateStore.LoadState();
+                    return state.Sessions.TryGetValue(issueKey, out var session) ? session.CopilotSessionId : null;
+                }, ct));
                 ScheduleSessionShutdown(processManager, trackedProcess, config);
                 return 0;
             }, logger);
@@ -445,6 +458,7 @@ public static class SessionCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var prNumber = parseResult.GetValue(prNumberArg);
                 var issueKey = parseResult.GetValue(issueArg)!;
@@ -489,6 +503,11 @@ public static class SessionCommand
                 }
 
                 ConsoleOutput.Success($"PR #{prNumber} associated with session for {issueKey}. Session is now waiting for review feedback.");
+                PrintSessionLogDirectory(sessionLogManager, stateStore.WithStateLock(() =>
+                {
+                    var state = stateStore.LoadState();
+                    return state.Sessions.TryGetValue(issueKey, out var session) ? session.CopilotSessionId : null;
+                }, ct));
                 ScheduleSessionShutdown(processManager, trackedProcess, config);
                 return 0;
             }, logger);
@@ -514,6 +533,7 @@ public static class SessionCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
                 var pending = false;
@@ -567,6 +587,118 @@ public static class SessionCommand
                 }
 
                 ConsoleOutput.Success($"Session for {issueKey} reset to pending (new session {newSessionId}).");
+                PrintSessionLogDirectory(sessionLogManager, newSessionId);
+                return 0;
+            }, logger);
+        });
+
+        return command;
+    }
+
+    // ---- logs subcommand ----
+
+    private static Command CreateLogsCommand(IServiceProvider services)
+    {
+        var command = new Command("logs", "Manage session log folders");
+        command.Subcommands.Add(CreateLogsClearCommand(services));
+        command.Subcommands.Add(CreateLogsPurgeCommand(services));
+        return command;
+    }
+
+    private static Command CreateLogsClearCommand(IServiceProvider services)
+    {
+        var command = new Command("clear", "Clear the current log folder for a tracked session");
+
+        var issueArg = new Argument<string>("issue") { Description = "Issue key whose current session logs should be cleared (e.g., owner/repo#123)" };
+        command.Arguments.Add(issueArg);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            return await ConsoleOutput.RunWithErrorHandling(async () =>
+            {
+                var stateStore = services.GetRequiredService<StateStore>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
+
+                var issueKey = parseResult.GetValue(issueArg)!;
+                string? sessionId = null;
+                string? errorMessage = null;
+
+                stateStore.WithStateLock(() =>
+                {
+                    var state = stateStore.LoadState();
+                    if (!state.Sessions.TryGetValue(issueKey, out var session))
+                    {
+                        errorMessage = $"No session found for '{issueKey}'.";
+                        return;
+                    }
+
+                    sessionId = session.CopilotSessionId;
+                    sessionLogManager.ClearSessionLogs(sessionId);
+                    sessionLogManager.SyncState(state);
+                }, ct);
+
+                if (errorMessage is not null)
+                {
+                    ConsoleOutput.Error(errorMessage);
+                    return 1;
+                }
+
+                ConsoleOutput.Success($"Cleared logs for {issueKey}.");
+                PrintSessionLogDirectory(sessionLogManager, sessionId);
+                return 0;
+            }, logger);
+        });
+
+        return command;
+    }
+
+    private static Command CreateLogsPurgeCommand(IServiceProvider services)
+    {
+        var command = new Command("purge", "Purge session log folders older than the supplied number of days");
+
+        var daysOption = new Option<int>("--days")
+        {
+            Description = "Delete session log folders older than this many days",
+            Required = true,
+        };
+        command.Options.Add(daysOption);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            return await ConsoleOutput.RunWithErrorHandling(async () =>
+            {
+                var stateStore = services.GetRequiredService<StateStore>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
+
+                var days = parseResult.GetValue(daysOption);
+                if (days <= 0)
+                {
+                    ConsoleOutput.Error("--days must be a positive integer.");
+                    return 1;
+                }
+
+                var activeSessionIds = stateStore.WithStateLock(() =>
+                {
+                    var state = stateStore.LoadState();
+                    var ids = state.Sessions.Values
+                        .Where(session => !session.IsTerminal)
+                        .Select(session => session.CopilotSessionId)
+                        .Where(sessionId => !string.IsNullOrWhiteSpace(sessionId))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                    if (state.ControlSession is { Status: ControlSessionStatus.Running or ControlSessionStatus.Starting, CopilotSessionId: { Length: > 0 } controlSessionId })
+                        ids.Add(controlSessionId);
+
+                    return (IReadOnlySet<string>)ids;
+                }, ct);
+
+                var purgeResult = sessionLogManager.PurgeSessionLogsOlderThan(days, DateTimeOffset.UtcNow, activeSessionIds);
+                foreach (var warning in purgeResult.Warnings)
+                    ConsoleOutput.Warning(warning);
+
+                ConsoleOutput.Success($"Purged {purgeResult.DeletedCount} session log folder(s) older than {days} day(s).");
                 return 0;
             }, logger);
         });
@@ -581,7 +713,7 @@ public static class SessionCommand
     /// Returns the exit code.
     /// </summary>
     public static int RenderSessionList(StateStore stateStore, ProcessManager processManager,
-        GitHubRemoteSessionUrlResolver remoteSessionUrls,
+        GitHubRemoteSessionUrlResolver remoteSessionUrls, SessionLogManager sessionLogManager,
         CopilotdConfig config, string? filterValue, bool showAll)
     {
         var stateChanged = false;
@@ -660,6 +792,7 @@ public static class SessionCommand
         RenderSessionTable(list);
         Console.WriteLine();
         RenderRemoteSessionUrls(list, remoteSessionUrls, config.CurrentUser);
+        RenderSessionLogDirectories(list, sessionLogManager);
 
         ConsoleOutput.Info($"{list.Count} session(s)");
         Console.WriteLine();
@@ -736,6 +869,18 @@ public static class SessionCommand
         Console.WriteLine();
     }
 
+    private static void RenderSessionLogDirectories(List<DispatchSession> sessions, SessionLogManager sessionLogManager)
+    {
+        ConsoleOutput.Info("Session log folders:");
+        foreach (var session in sessions)
+        {
+            ConsoleOutput.Info($"  {session.IssueKey}:");
+            ConsoleOutput.Info($"    {sessionLogManager.GetSessionLogDirectoryForDisplay(session.CopilotSessionId)}");
+        }
+
+        Console.WriteLine();
+    }
+
     private static string GetUnavailableRemoteSessionUrlMessage(DispatchSession session)
         => session.Status switch
         {
@@ -751,6 +896,14 @@ public static class SessionCommand
         if (age.TotalHours < 1) return $"{(int)age.TotalMinutes}m ago";
         if (age.TotalDays < 1) return $"{(int)age.TotalHours}h {age.Minutes}m ago";
         return local.ToString("yyyy-MM-dd HH:mm");
+    }
+
+    private static void PrintSessionLogDirectory(SessionLogManager sessionLogManager, string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+            return;
+
+        ConsoleOutput.Info($"Logs: {sessionLogManager.GetSessionLogDirectoryForDisplay(sessionId)}");
     }
 
     private static void ScheduleSessionShutdown(ProcessManager processManager, TrackedProcessRef trackedProcess, CopilotdConfig config)

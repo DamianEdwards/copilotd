@@ -238,6 +238,7 @@ public sealed class TolerantControlSessionStatusConverter : JsonConverter<Contro
 [JsonSerializable(typeof(List<GhRepo>))]
 [JsonSerializable(typeof(GhAuthStatus))]
 [JsonSerializable(typeof(UpdateState))]
+[JsonSerializable(typeof(SessionLogMetadata))]
 public partial class CopilotdJsonContext : JsonSerializerContext;
 
 /// <summary>

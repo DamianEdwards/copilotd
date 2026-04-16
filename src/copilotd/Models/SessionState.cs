@@ -19,6 +19,9 @@ public sealed class DaemonState
     /// <summary>Timestamp of the last successful poll cycle.</summary>
     public DateTimeOffset? LastPollTime { get; set; }
 
+    /// <summary>When completed-session log retention last ran.</summary>
+    public DateTimeOffset? LastSessionLogPurgeAt { get; set; }
+
     /// <summary>
     /// Cached resolved local paths for repos, keyed by repo slug ("org/repo").
     /// Populated by <see cref="Infrastructure.RepoPathResolver"/> and validated on each use.
@@ -217,4 +220,7 @@ public sealed class ControlSessionInfo
 
     /// <summary>When the control session was last started.</summary>
     public DateTimeOffset? StartedAt { get; set; }
+
+    /// <summary>When the control session status was last updated.</summary>
+    public DateTimeOffset? UpdatedAt { get; set; }
 }

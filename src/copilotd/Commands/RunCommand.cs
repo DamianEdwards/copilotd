@@ -35,6 +35,7 @@ public static class RunCommand
                 var reconciliation = services.GetRequiredService<ReconciliationEngine>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var disableSelfUpdates = runtimeContext.IsAutomaticSelfUpdateDisabled(parseResult.GetValue(disableSelfUpdatesOption));
@@ -58,6 +59,7 @@ public static class RunCommand
                 try
                 {
                     ConsoleOutput.Success($"copilotd daemon started (polling every {interval}s). Press Ctrl+C to stop.");
+                    ConsoleOutput.Info($"Daemon logs: {sessionLogManager.GetDaemonLogDirectoryForDisplay()}");
                     if (disableSelfUpdates && runtimeContext.GetAutomaticSelfUpdateDisableReason(parseResult.GetValue(disableSelfUpdatesOption)) is { } reason)
                         ConsoleOutput.Info($"Automatic self-updates {reason}.");
 
@@ -75,7 +77,9 @@ public static class RunCommand
                     if (config.EnableControlSession)
                     {
                         var existingControlPid = default(int?);
+                        var existingControlSessionId = default(string);
                         var launchedControlPid = default(int?);
+                        var launchedControlSessionId = default(string);
                         var launchFailed = false;
 
                         stateStore.WithStateLock(() =>
@@ -89,6 +93,7 @@ public static class RunCommand
                             if (existingAlive)
                             {
                                 existingControlPid = state.ControlSession!.ProcessId;
+                                existingControlSessionId = state.ControlSession.CopilotSessionId;
                                 return;
                             }
 
@@ -100,10 +105,15 @@ public static class RunCommand
                             {
                                 state.ControlSession = controlSession;
                                 launchedControlPid = controlSession.ProcessId;
+                                launchedControlSessionId = controlSession.CopilotSessionId;
                             }
                             else
                             {
-                                state.ControlSession = new ControlSessionInfo { Status = ControlSessionStatus.Failed };
+                                state.ControlSession = new ControlSessionInfo
+                                {
+                                    Status = ControlSessionStatus.Failed,
+                                    UpdatedAt = DateTimeOffset.UtcNow,
+                                };
                                 launchFailed = true;
                             }
 
@@ -113,10 +123,14 @@ public static class RunCommand
                         if (existingControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session already running (PID {existingControlPid}).");
+                            if (!string.IsNullOrWhiteSpace(existingControlSessionId))
+                                ConsoleOutput.Info($"Control session logs: {sessionLogManager.GetSessionLogDirectoryForDisplay(existingControlSessionId)}");
                         }
                         else if (launchedControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session launched (PID {launchedControlPid}).");
+                            if (!string.IsNullOrWhiteSpace(launchedControlSessionId))
+                                ConsoleOutput.Info($"Control session logs: {sessionLogManager.GetSessionLogDirectoryForDisplay(launchedControlSessionId)}");
                         }
                         else if (launchFailed)
                         {
@@ -174,7 +188,11 @@ public static class RunCommand
                                         }
                                         else
                                         {
-                                            state.ControlSession = new ControlSessionInfo { Status = ControlSessionStatus.Failed };
+                                            state.ControlSession = new ControlSessionInfo
+                                            {
+                                                Status = ControlSessionStatus.Failed,
+                                                UpdatedAt = DateTimeOffset.UtcNow,
+                                            };
                                             logger.LogWarning("Failed to relaunch control session");
                                         }
 
@@ -182,13 +200,14 @@ public static class RunCommand
                                     }
                                 }
                                 else if (state.ControlSession is not null
-                                         && state.ControlSession.Status == ControlSessionStatus.Running)
+                                     && state.ControlSession.Status == ControlSessionStatus.Running)
                                 {
                                     logger.LogInformation("Control session disabled, terminating...");
                                     processManager.TerminateControlSession(state.ControlSession);
                                     state.ControlSession.Status = ControlSessionStatus.Stopped;
                                     state.ControlSession.ProcessId = null;
                                     state.ControlSession.ProcessStartTime = null;
+                                    state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                                     stateStore.SaveState(state);
                                 }
                             }, cts.Token);
@@ -250,6 +269,7 @@ public static class RunCommand
                             state.ControlSession.Status = ControlSessionStatus.Stopped;
                             state.ControlSession.ProcessId = null;
                             state.ControlSession.ProcessStartTime = null;
+                            state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                         }
 
                         var runningSessions = state.Sessions.Values

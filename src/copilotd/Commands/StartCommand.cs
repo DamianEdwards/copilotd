@@ -3,6 +3,7 @@ using System.CommandLine.Parsing;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Copilotd.Infrastructure;
+using Copilotd.Models;
 using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -38,6 +39,7 @@ public static class StartCommand
                 var copilotCli = services.GetRequiredService<CopilotCliService>();
                 var stateStore = services.GetRequiredService<StateStore>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
+                var sessionLogManager = services.GetRequiredService<SessionLogManager>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var logLevel = parseResult.GetValue(logLevelOption);
@@ -142,6 +144,12 @@ public static class StartCommand
                 }
 
                 ConsoleOutput.Success($"copilotd daemon started in background (PID: {childPid}). Use '{runtimeContext.GetCopilotdCallbackCommand()} stop' to shut down.");
+                ConsoleOutput.Info($"Daemon logs: {sessionLogManager.GetDaemonLogDirectoryForDisplay()}");
+
+                var state = stateStore.LoadState();
+                if (state.ControlSession is { Status: ControlSessionStatus.Running or ControlSessionStatus.Starting, CopilotSessionId: { Length: > 0 } controlSessionId })
+                    ConsoleOutput.Info($"Control session logs: {sessionLogManager.GetSessionLogDirectoryForDisplay(controlSessionId)}");
+
                 return 0;
             }, logger);
         });
