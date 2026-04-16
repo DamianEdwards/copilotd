@@ -684,9 +684,10 @@ public sealed partial class ProcessManager
 
     private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand)
     {
-        // Use a PR-specific prompt when re-dispatching for review feedback
-        var prompt = session.PullRequestNumber is not null
-            ? BuildPrReviewPrompt(issue, session)
+        var prompt = session.RedispatchCount > 0
+            ? session.PullRequestNumber is not null && !session.LastRedispatchWasIssueComment
+                ? BuildPrReviewPrompt(issue, session)
+                : CopilotdConfig.IssueFeedbackPrompt
             : CopilotdConfig.DefaultPrompt;
 
         var rule = config.Rules.GetValueOrDefault(session.RuleName);

@@ -546,6 +546,7 @@ public static class SessionCommand
                     ClearTrackedProcess(session);
                     session.RetryCount = 0;
                     session.RedispatchCount = 0;
+                    session.LastRedispatchWasIssueComment = false;
                     session.LastFailureAt = null;
                     session.WaitingSince = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;

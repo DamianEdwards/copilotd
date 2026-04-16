@@ -149,6 +149,13 @@ public sealed class DispatchSession
     public int RedispatchCount { get; set; }
 
     /// <summary>
+    /// True when the most recent feedback-triggered re-dispatch was caused by an issue comment
+    /// rather than a PR review comment. Used to choose the correct resume prompt when the
+    /// session is associated with a pull request.
+    /// </summary>
+    public bool LastRedispatchWasIssueComment { get; set; }
+
+    /// <summary>
     /// Path to the git worktree directory for this session. Null if using the main repo checkout.
     /// </summary>
     public string? WorktreePath { get; set; }

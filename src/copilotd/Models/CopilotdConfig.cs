@@ -112,6 +112,19 @@ public sealed class CopilotdConfig
         - This will pause your session until a response is posted on the issue, at which point your session will automatically resume.
         """;
 
+    public const string IssueFeedbackPrompt =
+        """
+        You are resuming work on issue #$(issue.id) in the $(issue.repo) repository because new comments were posted on the issue.
+        Read the new issue comments carefully and continue from where this session left off.
+
+        Important:
+        - You are resuming the same session on the same branch. Continue the existing work rather than starting over.
+        - Focus on the new issue feedback and make any necessary code or documentation changes.
+        - If you now have enough information to finish the work, commit your changes, push the branch, and create or update the pull request for issue #$(issue.id).
+        - If you need more clarification, post another issue comment with `$(copilotd.command) session comment $(issue.repo)#$(issue.id) --message "Your question or findings here"`.
+        - If you create a pull request, run `$(copilotd.command) session pr <pr-number> $(issue.repo)#$(issue.id)` to switch into PR review monitoring.
+        """;
+
     public const string ControlSessionPrompt =
         """
         You are the copilotd control session — a remote management interface for the copilotd daemon.

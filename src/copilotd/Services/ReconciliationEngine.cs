@@ -360,6 +360,7 @@ public sealed class ReconciliationEngine
                                 // Keep same CopilotSessionId so --resume preserves context
                                 existing.Status = SessionStatus.Pending;
                                 existing.RedispatchCount++;
+                                existing.LastRedispatchWasIssueComment = true;
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
@@ -431,6 +432,7 @@ public sealed class ReconciliationEngine
                                     // Keep same CopilotSessionId so --resume preserves context
                                     existing.Status = SessionStatus.Pending;
                                     existing.RedispatchCount++;
+                                    existing.LastRedispatchWasIssueComment = false;
                                     existing.WaitingSince = null;
                                     existing.ProcessId = null;
                                     existing.ProcessStartTime = null;
@@ -479,6 +481,7 @@ public sealed class ReconciliationEngine
                                     issueCommentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
                                 existing.Status = SessionStatus.Pending;
                                 existing.RedispatchCount++;
+                                existing.LastRedispatchWasIssueComment = true;
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
@@ -499,6 +502,7 @@ public sealed class ReconciliationEngine
                         existing.RetryCount++;
                         existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
+                        existing.LastRedispatchWasIssueComment = false;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
@@ -530,6 +534,7 @@ public sealed class ReconciliationEngine
                         existing.Status = SessionStatus.Pending;
                         existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
+                        existing.LastRedispatchWasIssueComment = false;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
