@@ -136,157 +136,172 @@ public static class RunCommand
                     }
 
                     // Main poll loop
-                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    Console.CancelKeyPress += (_, e) =>
+                    using var cts = new CancellationTokenSource();
+                    var shutdownRequested = false;
+                    ConsoleCancelEventHandler cancelHandler = (_, e) =>
                     {
                         e.Cancel = true;
+                        if (shutdownRequested)
+                            return;
+
+                        shutdownRequested = true;
                         cts.Cancel();
                         ConsoleOutput.Warning("Shutdown requested, finishing current cycle...");
                     };
 
-                    while (!cts.Token.IsCancellationRequested)
+                    Console.CancelKeyPress += cancelHandler;
+
+                    try
                     {
-                        try
+                        while (!cts.Token.IsCancellationRequested)
                         {
-                            await Task.Delay(TimeSpan.FromSeconds(interval), cts.Token);
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            break;
-                        }
-
-                        try
-                        {
-                            // Reload config each cycle for live editing support
-                            config = stateStore.LoadConfig();
-                            stateStore.WithStateLock(() =>
+                            try
                             {
-                                var state = stateStore.LoadState();
+                                await Task.Delay(TimeSpan.FromSeconds(interval), cts.Token);
+                            }
+                            catch (OperationCanceledException) when (cts.Token.IsCancellationRequested)
+                            {
+                                break;
+                            }
 
-                                reconciliation.Reconcile(config, state);
-
-                                if (config.EnableControlSession)
+                            try
+                            {
+                                // Reload config each cycle for live editing support
+                                config = stateStore.LoadConfig();
+                                stateStore.WithStateLock(() =>
                                 {
-                                    var controlAlive = state.ControlSession is not null
-                                        && state.ControlSession.Status == ControlSessionStatus.Running
-                                        && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+                                    var state = stateStore.LoadState();
 
-                                    if (!controlAlive)
+                                    reconciliation.Reconcile(config, state);
+
+                                    if (config.EnableControlSession)
                                     {
-                                        if (state.ControlSession?.ProcessId is not null)
-                                            processManager.TerminateControlSession(state.ControlSession);
+                                        var controlAlive = state.ControlSession is not null
+                                            && state.ControlSession.Status == ControlSessionStatus.Running
+                                            && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
 
-                                        logger.LogInformation("Relaunching control session...");
-                                        var controlSession = processManager.LaunchControlSession(config);
-                                        if (controlSession is not null)
+                                        if (!controlAlive)
                                         {
-                                            state.ControlSession = controlSession;
-                                            logger.LogInformation("Control session relaunched (PID {Pid})", controlSession.ProcessId);
-                                        }
-                                        else
-                                        {
-                                            state.ControlSession = new ControlSessionInfo
+                                            if (state.ControlSession?.ProcessId is not null)
+                                                processManager.TerminateControlSession(state.ControlSession);
+
+                                            logger.LogInformation("Relaunching control session...");
+                                            var controlSession = processManager.LaunchControlSession(config);
+                                            if (controlSession is not null)
                                             {
-                                                Status = ControlSessionStatus.Failed,
-                                                UpdatedAt = DateTimeOffset.UtcNow,
-                                            };
-                                            logger.LogWarning("Failed to relaunch control session");
-                                        }
+                                                state.ControlSession = controlSession;
+                                                logger.LogInformation("Control session relaunched (PID {Pid})", controlSession.ProcessId);
+                                            }
+                                            else
+                                            {
+                                                state.ControlSession = new ControlSessionInfo
+                                                {
+                                                    Status = ControlSessionStatus.Failed,
+                                                    UpdatedAt = DateTimeOffset.UtcNow,
+                                                };
+                                                logger.LogWarning("Failed to relaunch control session");
+                                            }
 
+                                            stateStore.SaveState(state);
+                                        }
+                                    }
+                                    else if (state.ControlSession is not null
+                                         && state.ControlSession.Status == ControlSessionStatus.Running)
+                                    {
+                                        logger.LogInformation("Control session disabled, terminating...");
+                                        processManager.TerminateControlSession(state.ControlSession);
+                                        state.ControlSession.Status = ControlSessionStatus.Stopped;
+                                        state.ControlSession.ProcessId = null;
+                                        state.ControlSession.ProcessStartTime = null;
+                                        state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                                         stateStore.SaveState(state);
                                     }
-                                }
-                                else if (state.ControlSession is not null
-                                     && state.ControlSession.Status == ControlSessionStatus.Running)
-                                {
-                                    logger.LogInformation("Control session disabled, terminating...");
-                                    processManager.TerminateControlSession(state.ControlSession);
-                                    state.ControlSession.Status = ControlSessionStatus.Stopped;
-                                    state.ControlSession.ProcessId = null;
-                                    state.ControlSession.ProcessStartTime = null;
-                                    state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
-                                    stateStore.SaveState(state);
-                                }
-                            }, cts.Token);
-
-                            if (!disableSelfUpdates)
-                            {
-                                // Self-update: schedule or maintain a deferred installer for any staged update,
-                                // then fire a background check/stage task.
-                                var updateState = stateStore.LoadUpdateState();
-                                if (UpdateService.HasUsableStagedUpdate(updateState))
-                                {
-                                    if (EnsureDeferredInstallWatcher(updateService, runtimeContext, logger, updateState))
-                                    {
-                                        if (updateState.Status == UpdateStatus.Staged)
-                                            ConsoleOutput.Info($"Staged update {updateState.StagedVersion} detected. It will install after this daemon exits.");
-                                    }
-                                    else if (updateState.Status == UpdateStatus.Staged)
-                                    {
-                                        ConsoleOutput.Warning("Failed to schedule deferred update installer, will retry next cycle.");
-                                    }
-                                }
-
-                                // Fire non-blocking update check/stage (runs in background, result picked up next cycle)
-                                _ = Task.Run(async () =>
-                                {
-                                    try
-                                    {
-                                        await updateService.CheckAndStageAsync(
-                                            allowPreRelease: false,
-                                            skipProvenance: false,
-                                            cts.Token);
-                                    }
-                                    catch (OperationCanceledException) { }
-                                    catch (Exception ex)
-                                    {
-                                        logger.LogDebug(ex, "Background update check failed");
-                                    }
                                 }, cts.Token);
+
+                                if (!disableSelfUpdates)
+                                {
+                                    // Self-update: schedule or maintain a deferred installer for any staged update,
+                                    // then fire a background check/stage task.
+                                    var updateState = stateStore.LoadUpdateState();
+                                    if (UpdateService.HasUsableStagedUpdate(updateState))
+                                    {
+                                        if (EnsureDeferredInstallWatcher(updateService, runtimeContext, logger, updateState))
+                                        {
+                                            if (updateState.Status == UpdateStatus.Staged)
+                                                ConsoleOutput.Info($"Staged update {updateState.StagedVersion} detected. It will install after this daemon exits.");
+                                        }
+                                        else if (updateState.Status == UpdateStatus.Staged)
+                                        {
+                                            ConsoleOutput.Warning("Failed to schedule deferred update installer, will retry next cycle.");
+                                        }
+                                    }
+
+                                    // Fire non-blocking update check/stage (runs in background, result picked up next cycle)
+                                    _ = Task.Run(async () =>
+                                    {
+                                        try
+                                        {
+                                            await updateService.CheckAndStageAsync(
+                                                allowPreRelease: false,
+                                                skipProvenance: false,
+                                                cts.Token);
+                                        }
+                                        catch (OperationCanceledException) { }
+                                        catch (Exception ex)
+                                        {
+                                            logger.LogDebug(ex, "Background update check failed");
+                                        }
+                                    }, cts.Token);
+                                }
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.LogError(ex, "Error during poll cycle");
-                            ConsoleOutput.Error($"Poll cycle error: {ex.Message}");
-                            // Continue running — only catastrophic errors should exit
+                            catch (Exception ex)
+                            {
+                                logger.LogError(ex, "Error during poll cycle");
+                                ConsoleOutput.Error($"Poll cycle error: {ex.Message}");
+                                // Continue running — only catastrophic errors should exit
+                            }
                         }
                     }
-
-                    // Gracefully terminate running sessions before exit
-                    stateStore.WithStateLock(() =>
+                    finally
                     {
-                        var state = stateStore.LoadState();
+                        Console.CancelKeyPress -= cancelHandler;
 
-                        if (state.ControlSession is not null
-                            && state.ControlSession.Status == ControlSessionStatus.Running)
+                        // Gracefully terminate running sessions before exit. This must ignore the
+                        // Ctrl+C cancellation path so cleanup can complete after shutdown is requested.
+                        stateStore.WithStateLock(() =>
                         {
-                            ConsoleOutput.Info("Shutting down control session...");
-                            processManager.TerminateControlSession(state.ControlSession);
-                            state.ControlSession.Status = ControlSessionStatus.Stopped;
-                            state.ControlSession.ProcessId = null;
-                            state.ControlSession.ProcessStartTime = null;
-                            state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
-                        }
+                            var state = stateStore.LoadState();
 
-                        var runningSessions = state.Sessions.Values
-                            .Where(s => s.Status == SessionStatus.Running)
-                            .ToList();
-                        if (runningSessions.Count > 0)
-                        {
-                            ConsoleOutput.Info($"Shutting down {runningSessions.Count} active copilot session(s)...");
-                            foreach (var session in runningSessions)
+                            if (state.ControlSession is not null
+                                && state.ControlSession.Status == ControlSessionStatus.Running)
                             {
-                                processManager.TerminateProcess(session);
-                                session.Status = SessionStatus.Completed;
-                                session.ProcessId = null;
-                                session.ProcessStartTime = null;
-                                session.UpdatedAt = DateTimeOffset.UtcNow;
+                                ConsoleOutput.Info("Shutting down control session...");
+                                processManager.TerminateControlSession(state.ControlSession);
+                                state.ControlSession.Status = ControlSessionStatus.Stopped;
+                                state.ControlSession.ProcessId = null;
+                                state.ControlSession.ProcessStartTime = null;
+                                state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                             }
-                        }
 
-                        stateStore.SaveState(state);
-                    }, ct);
+                            var runningSessions = state.Sessions.Values
+                                .Where(s => s.Status == SessionStatus.Running)
+                                .ToList();
+                            if (runningSessions.Count > 0)
+                            {
+                                ConsoleOutput.Info($"Shutting down {runningSessions.Count} active copilot session(s)...");
+                                foreach (var session in runningSessions)
+                                {
+                                    processManager.TerminateProcess(session);
+                                    session.Status = SessionStatus.Completed;
+                                    session.ProcessId = null;
+                                    session.ProcessStartTime = null;
+                                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                                }
+                            }
+
+                            stateStore.SaveState(state);
+                        }, CancellationToken.None);
+                    }
 
                     ConsoleOutput.Info("copilotd daemon stopped.");
                     return 0;
