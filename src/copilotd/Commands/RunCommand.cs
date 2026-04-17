@@ -1,10 +1,12 @@
 using System.CommandLine;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
 using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using static Copilotd.Infrastructure.NativeInterop;
 
 namespace Copilotd.Commands;
 
@@ -58,6 +60,12 @@ public static class RunCommand
 
                 try
                 {
+                    if (OperatingSystem.IsWindows() && !SetConsoleCtrlHandler(IntPtr.Zero, false))
+                    {
+                        logger.LogWarning("Failed to re-enable Ctrl+C handling for the daemon console (Win32 error {Error})",
+                            Marshal.GetLastWin32Error());
+                    }
+
                     ConsoleOutput.Success($"copilotd daemon started (polling every {interval}s). Press Ctrl+C to stop.");
                     if (logFileManager.GetCurrentDaemonLogDirectoryForDisplay() is { } daemonLogDirectory)
                         ConsoleOutput.Info($"Daemon logs: {daemonLogDirectory}");
@@ -138,6 +146,7 @@ public static class RunCommand
                     // Main poll loop
                     using var cts = new CancellationTokenSource();
                     var shutdownRequested = false;
+                    var processExitCleanupSuppressed = 0;
                     ConsoleCancelEventHandler cancelHandler = (_, e) =>
                     {
                         e.Cancel = true;
@@ -149,7 +158,16 @@ public static class RunCommand
                         ConsoleOutput.Warning("Shutdown requested, finishing current cycle...");
                     };
 
+                    EventHandler processExitHandler = (_, _) =>
+                    {
+                        if (Interlocked.CompareExchange(ref processExitCleanupSuppressed, 0, 0) != 0)
+                            return;
+
+                        ScheduleProcessExitCleanup(stateStore, processManager, logger);
+                    };
+
                     Console.CancelKeyPress += cancelHandler;
+                    AppDomain.CurrentDomain.ProcessExit += processExitHandler;
 
                     try
                     {
@@ -264,43 +282,13 @@ public static class RunCommand
                     }
                     finally
                     {
+                        Interlocked.Exchange(ref processExitCleanupSuppressed, 1);
                         Console.CancelKeyPress -= cancelHandler;
+                        AppDomain.CurrentDomain.ProcessExit -= processExitHandler;
 
                         // Gracefully terminate running sessions before exit. This must ignore the
                         // Ctrl+C cancellation path so cleanup can complete after shutdown is requested.
-                        stateStore.WithStateLock(() =>
-                        {
-                            var state = stateStore.LoadState();
-
-                            if (state.ControlSession is not null
-                                && state.ControlSession.Status == ControlSessionStatus.Running)
-                            {
-                                ConsoleOutput.Info("Shutting down control session...");
-                                processManager.TerminateControlSession(state.ControlSession);
-                                state.ControlSession.Status = ControlSessionStatus.Stopped;
-                                state.ControlSession.ProcessId = null;
-                                state.ControlSession.ProcessStartTime = null;
-                                state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
-                            }
-
-                            var runningSessions = state.Sessions.Values
-                                .Where(s => s.Status == SessionStatus.Running)
-                                .ToList();
-                            if (runningSessions.Count > 0)
-                            {
-                                ConsoleOutput.Info($"Shutting down {runningSessions.Count} active copilot session(s)...");
-                                foreach (var session in runningSessions)
-                                {
-                                    processManager.TerminateProcess(session);
-                                    session.Status = SessionStatus.Completed;
-                                    session.ProcessId = null;
-                                    session.ProcessStartTime = null;
-                                    session.UpdatedAt = DateTimeOffset.UtcNow;
-                                }
-                            }
-
-                            stateStore.SaveState(state);
-                        }, CancellationToken.None);
+                        CleanupTrackedProcesses(stateStore, processManager, logger);
                     }
 
                     ConsoleOutput.Info("copilotd daemon stopped.");
@@ -314,6 +302,124 @@ public static class RunCommand
         });
 
         return command;
+    }
+
+    private static void CleanupTrackedProcesses(
+        StateStore stateStore,
+        ProcessManager processManager,
+        ILogger logger)
+    {
+        stateStore.WithStateLock(() =>
+        {
+            var state = stateStore.LoadState();
+
+            if (state.ControlSession is not null
+                && state.ControlSession.Status == ControlSessionStatus.Running)
+            {
+                ConsoleOutput.Info("Shutting down control session...");
+                if (processManager.TerminateControlSession(state.ControlSession))
+                {
+                    state.ControlSession.Status = ControlSessionStatus.Stopped;
+                    state.ControlSession.ProcessId = null;
+                    state.ControlSession.ProcessStartTime = null;
+                    state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+                else
+                {
+                    logger.LogWarning("Failed to terminate control session during daemon shutdown; leaving tracked state intact");
+                }
+            }
+
+            var runningSessions = state.Sessions.Values
+                .Where(s => s.Status == SessionStatus.Running)
+                .ToList();
+            if (runningSessions.Count > 0)
+            {
+                ConsoleOutput.Info($"Shutting down {runningSessions.Count} active copilot session(s)...");
+                foreach (var session in runningSessions)
+                {
+                    if (processManager.TerminateProcess(session))
+                    {
+                        session.Status = SessionStatus.Completed;
+                        session.ProcessId = null;
+                        session.ProcessStartTime = null;
+                        session.UpdatedAt = DateTimeOffset.UtcNow;
+                    }
+                    else
+                    {
+                        logger.LogWarning("Failed to terminate session {IssueKey} during daemon shutdown; leaving tracked state intact", session.IssueKey);
+                    }
+                }
+            }
+
+            stateStore.SaveState(state);
+        }, CancellationToken.None);
+    }
+
+    private static void ScheduleProcessExitCleanup(
+        StateStore stateStore,
+        ProcessManager processManager,
+        ILogger logger)
+    {
+        try
+        {
+            var state = stateStore.LoadState();
+            var stateChanged = false;
+
+            if (state.ControlSession is not null
+                && state.ControlSession.Status == ControlSessionStatus.Running)
+            {
+                logger.LogWarning("Process exit detected before normal shutdown cleanup completed; scheduling control session termination");
+                if (processManager.ScheduleTerminateProcess(
+                    "control session",
+                    state.ControlSession.ProcessId,
+                    state.ControlSession.ProcessStartTime,
+                    TimeSpan.Zero))
+                {
+                    state.ControlSession.Status = ControlSessionStatus.Stopped;
+                    state.ControlSession.ProcessId = null;
+                    state.ControlSession.ProcessStartTime = null;
+                    state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateChanged = true;
+                }
+                else
+                {
+                    logger.LogWarning("Failed to schedule control session termination during process exit; leaving tracked state intact");
+                }
+            }
+
+            foreach (var session in state.Sessions.Values.Where(s => s.Status == SessionStatus.Running))
+            {
+                logger.LogWarning("Process exit detected before normal shutdown cleanup completed; scheduling termination for session {IssueKey}", session.IssueKey);
+                if (processManager.ScheduleTerminateProcess(
+                    session.IssueKey,
+                    session.ProcessId,
+                    session.ProcessStartTime,
+                    TimeSpan.Zero))
+                {
+                    session.Status = SessionStatus.Completed;
+                    session.ProcessId = null;
+                    session.ProcessStartTime = null;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateChanged = true;
+                }
+                else
+                {
+                    logger.LogWarning("Failed to schedule termination for session {IssueKey} during process exit; leaving tracked state intact", session.IssueKey);
+                }
+            }
+
+            if (stateChanged)
+                stateStore.SaveState(state);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to schedule process-exit cleanup");
+        }
+        finally
+        {
+            stateStore.ReleaseLock();
+        }
     }
 
     /// <summary>

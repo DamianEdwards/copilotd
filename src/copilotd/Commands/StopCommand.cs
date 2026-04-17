@@ -25,6 +25,7 @@ public static class StopCommand
             {
                 var stateStore = services.GetRequiredService<StateStore>();
                 var logFileManager = services.GetRequiredService<LogFileManager>();
+                var processManager = services.GetRequiredService<ProcessManager>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
 
                 // Check if daemon is running
@@ -107,6 +108,9 @@ public static class StopCommand
                     {
                         await Task.Delay(250, ct);
                     }
+
+                    if (!stateStore.IsLockHeld())
+                        CleanupStoppedDaemonState(stateStore, processManager, logger);
 
                     ConsoleOutput.Success("copilotd daemon stopped.");
                     if (daemonLogDirectory is not null)
@@ -217,6 +221,51 @@ public static class StopCommand
         catch
         {
             return false;
+        }
+    }
+
+    private static void CleanupStoppedDaemonState(
+        StateStore stateStore,
+        ProcessManager processManager,
+        ILogger logger)
+    {
+        try
+        {
+            stateStore.WithStateLock(() =>
+            {
+                var state = stateStore.LoadState();
+
+                if (state.ControlSession is not null
+                    && state.ControlSession.Status == Models.ControlSessionStatus.Running)
+                {
+                    logger.LogInformation("Stop command cleaning up tracked control session after daemon exit");
+                    if (processManager.TerminateControlSession(state.ControlSession))
+                    {
+                        state.ControlSession.Status = Models.ControlSessionStatus.Stopped;
+                        state.ControlSession.ProcessId = null;
+                        state.ControlSession.ProcessStartTime = null;
+                        state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
+                    }
+                }
+
+                foreach (var session in state.Sessions.Values.Where(session => session.Status == Models.SessionStatus.Running))
+                {
+                    logger.LogInformation("Stop command cleaning up tracked session {IssueKey} after daemon exit", session.IssueKey);
+                    if (processManager.TerminateProcess(session))
+                    {
+                        session.Status = Models.SessionStatus.Completed;
+                        session.ProcessId = null;
+                        session.ProcessStartTime = null;
+                        session.UpdatedAt = DateTimeOffset.UtcNow;
+                    }
+                }
+
+                stateStore.SaveState(state);
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            stateStore.ReleaseLock();
         }
     }
 }

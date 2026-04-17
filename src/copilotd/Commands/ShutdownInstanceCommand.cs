@@ -149,7 +149,7 @@ public static class ShutdownInstanceCommand
     }
 
     /// <summary>
-    /// Windows: attach to the target's console and send Ctrl+C twice.
+    /// Windows: attach to the target's console and send Ctrl+Break, then Ctrl+C.
     /// This process was launched without the daemon's console, so FreeConsole/AttachConsole
     /// won't disrupt the daemon.
     /// </summary>
@@ -171,10 +171,10 @@ public static class ShutdownInstanceCommand
 
         try
         {
-            if (TrySendConsoleSignal(process, pid, logger, CTRL_C_EVENT, 0, "first Ctrl+C", SignalDelay, ShutdownInstanceExitCode.ExitedAfterFirstInterrupt) is { } firstOutcome)
+            if (TrySendConsoleSignal(process, pid, logger, CTRL_BREAK_EVENT, unchecked((uint)pid), "Ctrl+Break", SignalDelay, ShutdownInstanceExitCode.ExitedAfterFirstInterrupt) is { } firstOutcome)
                 return firstOutcome;
 
-            if (TrySendConsoleSignal(process, pid, logger, CTRL_C_EVENT, 0, "second Ctrl+C", GracefulTimeout, ShutdownInstanceExitCode.ExitedAfterSecondInterrupt) is { } secondOutcome)
+            if (TrySendConsoleSignal(process, pid, logger, CTRL_C_EVENT, 0, "Ctrl+C", GracefulTimeout, ShutdownInstanceExitCode.ExitedAfterSecondInterrupt) is { } secondOutcome)
                 return secondOutcome;
         }
         catch (Exception ex)
@@ -397,6 +397,7 @@ public static class ShutdownInstanceCommand
     private delegate bool ConsoleCtrlHandler(uint dwCtrlType);
 
     private const uint CTRL_C_EVENT = 0;
+    private const uint CTRL_BREAK_EVENT = 1;
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int sys_kill(int pid, int sig);
