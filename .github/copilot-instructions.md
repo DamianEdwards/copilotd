@@ -6,9 +6,10 @@
 # Build
 dotnet build src/copilotd/copilotd.csproj
 
-# Run from source (passes all args through)
+# Run from source (auto-builds and passes all args through)
 ./copilotd.sh <command>          # macOS/Linux
-copilotd.cmd <command>           # Windows
+.\copilotd.ps1 <command>           # Windows (PowerShell)
+.\copilotd.cmd <command>           # Windows (CMD)
 ```
 
 No test suite exists yet. Verify changes manually via `copilotd status`, `copilotd session list`, and `copilotd run --interval 15 --log-level debug`.
