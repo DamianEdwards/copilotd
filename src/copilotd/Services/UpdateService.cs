@@ -805,7 +805,7 @@ public sealed class UpdateService
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = copilotdPath,
-                Arguments = $"shutdown-instance --pid {pid}",
+                Arguments = $"shutdown-instance --pid {pid} --signal-profile daemon",
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };

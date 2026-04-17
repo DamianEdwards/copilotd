@@ -300,8 +300,8 @@ public sealed partial class ProcessManager
     }
 
     /// <summary>
-    /// Windows: spawns 'copilotd shutdown-instance --pid PID' which handles the full
-    /// graceful shutdown lifecycle (Ctrl+C → Ctrl+C → Kill) from a separate process
+    /// Windows: spawns 'copilotd shutdown-instance --pid PID --signal-profile copilot'
+    /// which handles the full graceful shutdown lifecycle (Ctrl+C → 1s wait → Ctrl+C → Kill) from a separate process
     /// that can safely attach to the target's console.
     /// </summary>
     private bool TerminateViaShutdownInstance(Process process, int pid, DateTimeOffset? processStartTime)
@@ -378,7 +378,7 @@ public sealed partial class ProcessManager
     {
         var effectiveDelay = shutdownDelay < TimeSpan.Zero ? TimeSpan.Zero : shutdownDelay;
 
-        var arguments = $"shutdown-instance --pid {pid}";
+        var arguments = $"shutdown-instance --pid {pid} --signal-profile copilot";
         if (processStartTime is { } expectedStart)
             arguments += $" --expected-start {expectedStart:O}";
 
@@ -899,40 +899,7 @@ public sealed partial class ProcessManager
     }
 
     private static int? FindDeepestWindowsCopilotDescendant(int rootPid)
-    {
-        var processes = EnumerateWindowsProcesses();
-        if (processes.Count == 0)
-            return null;
-
-        var childrenByParent = processes
-            .GroupBy(process => process.ParentProcessId)
-            .ToDictionary(group => group.Key, group => group.ToList());
-
-        var bestDepth = -1;
-        int? bestPid = null;
-
-        void Walk(int parentPid, int depth)
-        {
-            if (!childrenByParent.TryGetValue(parentPid, out var children))
-                return;
-
-            foreach (var child in children)
-            {
-                var childDepth = depth + 1;
-                if (string.Equals(child.ExecutableName, "copilot.exe", StringComparison.OrdinalIgnoreCase)
-                    && childDepth > bestDepth)
-                {
-                    bestDepth = childDepth;
-                    bestPid = child.ProcessId;
-                }
-
-                Walk(child.ProcessId, childDepth);
-            }
-        }
-
-        Walk(rootPid, 0);
-        return bestPid;
-    }
+        => NativeInterop.FindDeepestWindowsDescendantProcessId(rootPid, "copilot.exe");
 
     // ---- Worktree lifecycle ----
 

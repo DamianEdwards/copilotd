@@ -133,7 +133,7 @@ public static class StopCommand
     /// </summary>
     private static bool StopDaemonWindows(Process process, int pid, RuntimeContext runtimeContext)
     {
-        var invocation = runtimeContext.GetSelfInvocation($"shutdown-instance --pid {pid}");
+        var invocation = runtimeContext.GetSelfInvocation($"shutdown-instance --pid {pid} --signal-profile daemon");
         if (invocation is null)
         {
             ConsoleOutput.Warning("Cannot determine copilotd path, forcing termination.");

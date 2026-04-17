@@ -63,12 +63,12 @@ public class Program
             rootCommand.Subcommands.Add(UpdateCommand.Create(services));
             rootCommand.Subcommands.Add(ShutdownInstanceCommand.Create(services));
 
-            var parseResult = rootCommand.Parse(args, new ParserConfiguration());
-            return await parseResult.InvokeAsync(new InvocationConfiguration());
+            var parseResult = rootCommand.Parse(args);
+            return await parseResult.InvokeAsync(new() { ProcessTerminationTimeout = TimeSpan.FromSeconds(30) });
         });
     }
 
-    private static IServiceProvider ConfigureServices(LogLevel? consoleLogLevel, string[] args)
+    private static ServiceProvider ConfigureServices(LogLevel? consoleLogLevel, string[] args)
     {
         var serviceCollection = new ServiceCollection();
         var daemonInstanceId = GetDaemonLogInstanceId(args);

@@ -26,7 +26,7 @@ public static class RunCommand
         command.Options.Add(logLevelOption);
         command.Options.Add(disableSelfUpdatesOption);
 
-        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        command.SetAction(async (parseResult, ct) =>
         {
             var logger = services.GetRequiredService<ILogger<Program>>();
             return await ConsoleOutput.RunWithErrorHandling(async () =>
@@ -143,20 +143,17 @@ public static class RunCommand
                         }
                     }
 
-                    // Main poll loop
-                    using var cts = new CancellationTokenSource();
-                    var shutdownRequested = false;
+                    // Main poll loop. The command action token is already wired to System.CommandLine's
+                    // Ctrl+C handling, so observe it directly instead of waiting on a separate CTS.
+                    var shutdownRequested = 0;
                     var processExitCleanupSuppressed = 0;
-                    ConsoleCancelEventHandler cancelHandler = (_, e) =>
+                    using var shutdownRegistration = ct.Register(() =>
                     {
-                        e.Cancel = true;
-                        if (shutdownRequested)
+                        if (Interlocked.Exchange(ref shutdownRequested, 1) != 0)
                             return;
 
-                        shutdownRequested = true;
-                        cts.Cancel();
                         ConsoleOutput.Warning("Shutdown requested, finishing current cycle...");
-                    };
+                    });
 
                     EventHandler processExitHandler = (_, _) =>
                     {
@@ -166,18 +163,17 @@ public static class RunCommand
                         ScheduleProcessExitCleanup(stateStore, processManager, logger);
                     };
 
-                    Console.CancelKeyPress += cancelHandler;
                     AppDomain.CurrentDomain.ProcessExit += processExitHandler;
 
                     try
                     {
-                        while (!cts.Token.IsCancellationRequested)
+                        while (!ct.IsCancellationRequested)
                         {
                             try
                             {
-                                await Task.Delay(TimeSpan.FromSeconds(interval), cts.Token);
+                                await Task.Delay(TimeSpan.FromSeconds(interval), ct);
                             }
-                            catch (OperationCanceledException) when (cts.Token.IsCancellationRequested)
+                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
                             {
                                 break;
                             }
@@ -234,7 +230,7 @@ public static class RunCommand
                                         state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                                         stateStore.SaveState(state);
                                     }
-                                }, cts.Token);
+                                }, ct);
 
                                 if (!disableSelfUpdates)
                                 {
@@ -262,14 +258,14 @@ public static class RunCommand
                                             await updateService.CheckAndStageAsync(
                                                 allowPreRelease: false,
                                                 skipProvenance: false,
-                                                cts.Token);
+                                                ct);
                                         }
                                         catch (OperationCanceledException) { }
                                         catch (Exception ex)
                                         {
                                             logger.LogDebug(ex, "Background update check failed");
                                         }
-                                    }, cts.Token);
+                                    }, ct);
                                 }
                             }
                             catch (Exception ex)
@@ -283,7 +279,6 @@ public static class RunCommand
                     finally
                     {
                         Interlocked.Exchange(ref processExitCleanupSuppressed, 1);
-                        Console.CancelKeyPress -= cancelHandler;
                         AppDomain.CurrentDomain.ProcessExit -= processExitHandler;
 
                         // Gracefully terminate running sessions before exit. This must ignore the

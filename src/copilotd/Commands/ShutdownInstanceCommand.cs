@@ -3,6 +3,7 @@ using System.CommandLine.Parsing;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using Copilotd.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -17,7 +18,9 @@ namespace Copilotd.Commands;
 /// </summary>
 public static class ShutdownInstanceCommand
 {
-    private static readonly TimeSpan SignalDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DaemonSignalDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan CopilotSignalDelay = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan CopilotGracefulTimeout = TimeSpan.FromSeconds(15) - CopilotSignalDelay;
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
 
     public static Command Create(IServiceProvider services)
@@ -30,9 +33,15 @@ public static class ShutdownInstanceCommand
         var pidOption = new Option<int>("--pid") { Description = "Process ID to shut down" };
         var expectedStartOption = new Option<string?>("--expected-start") { Description = "Expected UTC process start time in round-trip format" };
         var delaySecondsOption = new Option<int>("--delay-seconds") { Description = "Seconds to wait before beginning shutdown" };
+        var signalProfileOption = new Option<string>("--signal-profile")
+        {
+            Description = "Signal profile to use: daemon or copilot",
+            DefaultValueFactory = _ => ShutdownSignalProfile.Daemon.ToString().ToLowerInvariant()
+        };
         command.Options.Add(pidOption);
         command.Options.Add(expectedStartOption);
         command.Options.Add(delaySecondsOption);
+        command.Options.Add(signalProfileOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -40,6 +49,7 @@ public static class ShutdownInstanceCommand
             var pid = parseResult.GetValue(pidOption);
             var expectedStartText = parseResult.GetValue(expectedStartOption);
             var delaySeconds = parseResult.GetValue(delaySecondsOption);
+            var signalProfileText = parseResult.GetValue(signalProfileOption);
             if (delaySeconds < 0)
             {
                 logger.LogWarning("shutdown-instance received invalid negative delay {DelaySeconds} for PID {Pid}", delaySeconds, pid);
@@ -52,9 +62,15 @@ public static class ShutdownInstanceCommand
                 return (int)ShutdownInstanceExitCode.InvalidArguments;
             }
 
+            if (!TryParseSignalProfile(signalProfileText, out var signalProfile))
+            {
+                logger.LogWarning("shutdown-instance received invalid signal profile '{SignalProfile}' for PID {Pid}", signalProfileText, pid);
+                return (int)ShutdownInstanceExitCode.InvalidArguments;
+            }
+
             try
             {
-                return (int)ShutdownProcess(pid, expectedStart, TimeSpan.FromSeconds(delaySeconds), logger);
+                return (int)ShutdownProcess(pid, expectedStart, TimeSpan.FromSeconds(delaySeconds), signalProfile, logger);
             }
             catch (Exception ex)
             {
@@ -91,11 +107,16 @@ public static class ShutdownInstanceCommand
             _ => $"unknown exit code {exitCode}"
         };
 
-    private static ShutdownInstanceExitCode ShutdownProcess(int pid, DateTimeOffset? expectedStart, TimeSpan shutdownDelay, ILogger logger)
+    private static ShutdownInstanceExitCode ShutdownProcess(
+        int pid,
+        DateTimeOffset? expectedStart,
+        TimeSpan shutdownDelay,
+        ShutdownSignalProfile signalProfile,
+        ILogger logger)
     {
         var effectiveDelay = shutdownDelay < TimeSpan.Zero ? TimeSpan.Zero : shutdownDelay;
-        logger.LogInformation("shutdown-instance starting for PID {Pid} with delay {Delay} and expected start {ExpectedStart}",
-            pid, effectiveDelay, expectedStart);
+        logger.LogInformation("shutdown-instance starting for PID {Pid} with delay {Delay}, expected start {ExpectedStart}, and signal profile {SignalProfile}",
+            pid, effectiveDelay, expectedStart, signalProfile);
 
         if (effectiveDelay > TimeSpan.Zero)
         {
@@ -135,7 +156,7 @@ public static class ShutdownInstanceCommand
 
             ShutdownInstanceExitCode outcome;
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                outcome = ShutdownWindows(process, pid, logger);
+                outcome = ShutdownWindows(process, pid, signalProfile, logger);
             else
                 outcome = ShutdownUnix(process, pid, logger);
 
@@ -149,33 +170,46 @@ public static class ShutdownInstanceCommand
     }
 
     /// <summary>
-    /// Windows: attach to the target's console and send Ctrl+Break, then Ctrl+C.
+    /// Windows: attach to the target's console and send signals according to the configured profile.
     /// This process was launched without the daemon's console, so FreeConsole/AttachConsole
     /// won't disrupt the daemon.
     /// </summary>
-    private static ShutdownInstanceExitCode ShutdownWindows(Process process, int pid, ILogger logger)
+    private static ShutdownInstanceExitCode ShutdownWindows(Process process, int pid, ShutdownSignalProfile signalProfile, ILogger logger)
     {
+        var signalTargetPid = ResolveSignalTargetPid(pid, signalProfile, logger);
+
         // Detach from any inherited console
         FreeConsole();
 
-        // Protect ourselves from the signals we're about to send
+        // Protect ourselves from the signals we're about to send.
         SetConsoleCtrlHandler(null, true);
 
         // Attach to the target's console
-        if (!AttachConsole((uint)pid))
+        if (!AttachConsole((uint)signalTargetPid))
         {
             logger.LogWarning("shutdown-instance failed to attach to console for PID {Pid} (Win32 error {Error}), falling back to kill",
-                pid, Marshal.GetLastWin32Error());
+                signalTargetPid, Marshal.GetLastWin32Error());
             return FallbackKill(process, pid, logger, "attach-console-failed");
         }
 
         try
         {
-            if (TrySendConsoleSignal(process, pid, logger, CTRL_BREAK_EVENT, unchecked((uint)pid), "Ctrl+Break", SignalDelay, ShutdownInstanceExitCode.ExitedAfterFirstInterrupt) is { } firstOutcome)
-                return firstOutcome;
+            if (signalProfile == ShutdownSignalProfile.Copilot)
+            {
+                if (TrySendCtrlCInput(process, pid, signalTargetPid, logger, CopilotSignalDelay, ShutdownInstanceExitCode.ExitedAfterFirstInterrupt) is { } firstOutcome)
+                    return firstOutcome;
 
-            if (TrySendConsoleSignal(process, pid, logger, CTRL_C_EVENT, 0, "Ctrl+C", GracefulTimeout, ShutdownInstanceExitCode.ExitedAfterSecondInterrupt) is { } secondOutcome)
-                return secondOutcome;
+                if (TrySendCtrlCInput(process, pid, signalTargetPid, logger, CopilotGracefulTimeout, ShutdownInstanceExitCode.ExitedAfterSecondInterrupt) is { } secondOutcome)
+                    return secondOutcome;
+            }
+            else
+            {
+                if (TrySendConsoleSignal(process, pid, signalTargetPid, logger, CTRL_BREAK_EVENT, unchecked((uint)signalTargetPid), "Ctrl+Break", DaemonSignalDelay, ShutdownInstanceExitCode.ExitedAfterFirstInterrupt) is { } firstOutcome)
+                    return firstOutcome;
+
+                if (TrySendConsoleSignal(process, pid, signalTargetPid, logger, CTRL_C_EVENT, 0, "Ctrl+C", GracefulTimeout, ShutdownInstanceExitCode.ExitedAfterSecondInterrupt) is { } secondOutcome)
+                    return secondOutcome;
+            }
         }
         catch (Exception ex)
         {
@@ -200,7 +234,7 @@ public static class ShutdownInstanceCommand
             logger.LogInformation("shutdown-instance sending first SIGINT to PID {Pid}", pid);
             sys_kill(pid, SIGINT);
 
-            if (process.WaitForExit(SignalDelay))
+            if (process.WaitForExit(DaemonSignalDelay))
             {
                 logger.LogInformation("PID {Pid} exited after first SIGINT", pid);
                 return ShutdownInstanceExitCode.ExitedAfterFirstInterrupt;
@@ -226,7 +260,8 @@ public static class ShutdownInstanceCommand
 
     private static ShutdownInstanceExitCode? TrySendConsoleSignal(
         Process process,
-        int pid,
+        int rootPid,
+        int signalTargetPid,
         ILogger logger,
         uint signal,
         uint processGroupId,
@@ -234,23 +269,111 @@ public static class ShutdownInstanceCommand
         TimeSpan waitTime,
         ShutdownInstanceExitCode successOutcome)
     {
-        logger.LogInformation("shutdown-instance sending {SignalDescription} to PID {Pid}", description, pid);
+        logger.LogInformation("shutdown-instance sending {SignalDescription} to PID {Pid}", description, signalTargetPid);
 
         if (!GenerateConsoleCtrlEvent(signal, processGroupId))
         {
             logger.LogWarning("shutdown-instance failed to send {SignalDescription} to PID {Pid} (Win32 error {Error})",
-                description, pid, Marshal.GetLastWin32Error());
+                description, signalTargetPid, Marshal.GetLastWin32Error());
             return null;
         }
 
-        if (WaitForProcessTreeExit(process, pid, waitTime))
+        if (WaitForProcessTreeExit(process, rootPid, waitTime))
         {
-            logger.LogInformation("PID {Pid} process tree exited after {SignalDescription}", pid, description);
+            logger.LogInformation("PID {Pid} process tree exited after {SignalDescription}", rootPid, description);
             return successOutcome;
         }
 
-        logger.LogInformation("PID {Pid} process tree was still running {WaitTime} after {SignalDescription}", pid, waitTime, description);
+        logger.LogInformation("PID {Pid} process tree was still running {WaitTime} after {SignalDescription}", rootPid, waitTime, description);
         return null;
+    }
+
+    private static ShutdownInstanceExitCode? TrySendCtrlCInput(
+        Process process,
+        int rootPid,
+        int signalTargetPid,
+        ILogger logger,
+        TimeSpan waitTime,
+        ShutdownInstanceExitCode successOutcome)
+    {
+        logger.LogInformation("shutdown-instance sending Ctrl+C to PID {Pid}", signalTargetPid);
+
+        if (!WriteConsoleCtrlCInput(signalTargetPid, logger))
+            return null;
+
+        if (WaitForCopilotShutdown(process, rootPid, waitTime))
+        {
+            logger.LogInformation("PID {Pid} exited after Ctrl+C", rootPid);
+            return successOutcome;
+        }
+
+        logger.LogInformation("PID {Pid} was still running {WaitTime} after Ctrl+C", rootPid, waitTime);
+        return null;
+    }
+
+    private static bool WriteConsoleCtrlCInput(int signalTargetPid, ILogger logger)
+    {
+        using var consoleInputHandle = CreateFileW(
+            "CONIN$",
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero,
+            OPEN_EXISTING,
+            0,
+            IntPtr.Zero);
+
+        if (consoleInputHandle.IsInvalid)
+        {
+            logger.LogWarning("shutdown-instance failed to open console input for PID {Pid} (Win32 error {Error})",
+                signalTargetPid, Marshal.GetLastWin32Error());
+            return false;
+        }
+
+        INPUT_RECORD[] inputRecords =
+        [
+            CreateKeyInputRecord(true, VK_CONTROL, '\0', LEFT_CTRL_PRESSED),
+            CreateKeyInputRecord(true, VK_C, '\u0003', LEFT_CTRL_PRESSED),
+            CreateKeyInputRecord(false, VK_C, '\u0003', LEFT_CTRL_PRESSED),
+            CreateKeyInputRecord(false, VK_CONTROL, '\0', 0),
+        ];
+
+        if (!WriteConsoleInputW(consoleInputHandle, inputRecords, (uint)inputRecords.Length, out var eventsWritten)
+            || eventsWritten != inputRecords.Length)
+        {
+            logger.LogWarning("shutdown-instance failed to write Ctrl+C console input for PID {Pid} (Win32 error {Error})",
+                signalTargetPid, Marshal.GetLastWin32Error());
+            return false;
+        }
+
+        return true;
+    }
+
+    private static INPUT_RECORD CreateKeyInputRecord(bool keyDown, ushort virtualKeyCode, char character, uint controlKeyState) =>
+        new()
+        {
+            EventType = KEY_EVENT,
+            KeyEvent = new KEY_EVENT_RECORD
+            {
+                bKeyDown = keyDown,
+                wRepeatCount = 1,
+                wVirtualKeyCode = virtualKeyCode,
+                wVirtualScanCode = 0,
+                UnicodeChar = character,
+                dwControlKeyState = controlKeyState,
+            }
+        };
+
+    private static int ResolveSignalTargetPid(int pid, ShutdownSignalProfile signalProfile, ILogger logger)
+    {
+        if (signalProfile != ShutdownSignalProfile.Copilot || !OperatingSystem.IsWindows())
+            return pid;
+
+        var childCopilotPid = NativeInterop.FindDeepestWindowsDescendantProcessId(pid, "copilot.exe");
+        if (childCopilotPid is not { } childPid || childPid == pid)
+            return pid;
+
+        logger.LogInformation("shutdown-instance retargeting copilot signals from PID {RootPid} to child copilot PID {ChildPid}", pid, childPid);
+        return childPid;
     }
 
     private static ShutdownInstanceExitCode FallbackKill(Process process, int pid, ILogger logger, string reason)
@@ -297,8 +420,34 @@ public static class ShutdownInstanceCommand
         return process.HasExited && !HasDescendants(rootPid);
     }
 
+    private static bool WaitForCopilotShutdown(Process process, int rootPid, TimeSpan waitTime)
+    {
+        var deadline = DateTime.UtcNow + waitTime;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (process.HasExited && !HasRelevantDescendants(rootPid))
+                return true;
+
+            Thread.Sleep(TimeSpan.FromMilliseconds(100));
+        }
+
+        return process.HasExited && !HasRelevantDescendants(rootPid);
+    }
+
     private static bool HasDescendants(int rootPid)
         => EnumerateDescendantProcessIds(rootPid).Count > 0;
+
+    private static bool HasRelevantDescendants(int rootPid)
+    {
+        var processes = NativeInterop.EnumerateWindowsProcesses();
+        if (processes.Count == 0)
+            return false;
+
+        var descendants = EnumerateDescendantProcessIds(rootPid, processes);
+        return descendants.Any(descendant =>
+            !string.Equals(descendant.ExecutableName, "conhost.exe", StringComparison.OrdinalIgnoreCase));
+    }
 
     private static bool KillDescendants(int rootPid, ILogger logger)
     {
@@ -331,11 +480,23 @@ public static class ShutdownInstanceCommand
         if (processes.Count == 0)
             return [];
 
+        return EnumerateDescendantProcessIds(rootPid, processes)
+            .Select(process => process.ProcessId)
+            .ToList();
+    }
+
+    private static List<NativeInterop.WindowsProcessEntry> EnumerateDescendantProcessIds(
+        int rootPid,
+        IReadOnlyList<NativeInterop.WindowsProcessEntry> processes)
+    {
+        if (processes.Count == 0)
+            return [];
+
         var childrenByParent = processes
             .GroupBy(process => process.ParentProcessId)
-            .ToDictionary(group => group.Key, group => group.Select(process => process.ProcessId).ToList());
+            .ToDictionary(group => group.Key, group => group.ToList());
 
-        var descendants = new List<int>();
+        var descendants = new List<NativeInterop.WindowsProcessEntry>();
         var pending = new Stack<int>();
         pending.Push(rootPid);
 
@@ -348,7 +509,7 @@ public static class ShutdownInstanceCommand
             foreach (var childPid in children)
             {
                 descendants.Add(childPid);
-                pending.Push(childPid);
+                pending.Push(childPid.ProcessId);
             }
         }
 
@@ -366,6 +527,15 @@ public static class ShutdownInstanceCommand
 
         expectedStart = parsed;
         return true;
+    }
+
+    private static bool TryParseSignalProfile(string? text, out ShutdownSignalProfile signalProfile)
+    {
+        if (Enum.TryParse(text, ignoreCase: true, out signalProfile))
+            return true;
+
+        signalProfile = default;
+        return false;
     }
 
     private static DateTimeOffset? GetProcessStartTime(Process process)
@@ -394,15 +564,60 @@ public static class ShutdownInstanceCommand
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern SafeFileHandle CreateFileW(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteConsoleInputW(
+        SafeFileHandle hConsoleInput,
+        [MarshalAs(UnmanagedType.LPArray), In] INPUT_RECORD[] lpBuffer,
+        uint nLength,
+        out uint lpNumberOfEventsWritten);
+
     private delegate bool ConsoleCtrlHandler(uint dwCtrlType);
 
     private const uint CTRL_C_EVENT = 0;
     private const uint CTRL_BREAK_EVENT = 1;
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint GENERIC_WRITE = 0x40000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint OPEN_EXISTING = 3;
+    private const ushort KEY_EVENT = 0x0001;
+    private const ushort VK_CONTROL = 0x11;
+    private const ushort VK_C = 0x43;
+    private const uint LEFT_CTRL_PRESSED = 0x0008;
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int sys_kill(int pid, int sig);
 
     private const int SIGINT = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT_RECORD
+    {
+        public ushort EventType;
+        public KEY_EVENT_RECORD KeyEvent;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEY_EVENT_RECORD
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bKeyDown;
+        public ushort wRepeatCount;
+        public ushort wVirtualKeyCode;
+        public ushort wVirtualScanCode;
+        public char UnicodeChar;
+        public uint dwControlKeyState;
+    }
 
     #endregion
 
@@ -416,5 +631,11 @@ public static class ShutdownInstanceCommand
         ExitedDuringFallback = 5,
         InvalidArguments = 64,
         Failed = 65
+    }
+
+    private enum ShutdownSignalProfile
+    {
+        Daemon,
+        Copilot
     }
 }

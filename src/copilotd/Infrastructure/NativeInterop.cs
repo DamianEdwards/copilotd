@@ -138,6 +138,45 @@ internal static class NativeInterop
         }
     }
 
+    public static int? FindDeepestWindowsDescendantProcessId(int rootPid, string executableName)
+    {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
+        var processes = EnumerateWindowsProcesses();
+        if (processes.Count == 0)
+            return null;
+
+        var childrenByParent = processes
+            .GroupBy(process => process.ParentProcessId)
+            .ToDictionary(group => group.Key, group => group.ToList());
+
+        var bestDepth = -1;
+        int? bestPid = null;
+
+        void Walk(int parentPid, int depth)
+        {
+            if (!childrenByParent.TryGetValue(parentPid, out var children))
+                return;
+
+            foreach (var child in children)
+            {
+                var childDepth = depth + 1;
+                if (string.Equals(child.ExecutableName, executableName, StringComparison.OrdinalIgnoreCase)
+                    && childDepth > bestDepth)
+                {
+                    bestDepth = childDepth;
+                    bestPid = child.ProcessId;
+                }
+
+                Walk(child.ProcessId, childDepth);
+            }
+        }
+
+        Walk(rootPid, 0);
+        return bestPid;
+    }
+
     // --- Unix signal APIs ---
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
