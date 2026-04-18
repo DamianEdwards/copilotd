@@ -13,12 +13,16 @@ namespace Copilotd.Commands;
 
 public static class SessionCommand
 {
+    private const string MinimumCopilotConnectVersion = "1.0.32";
+    internal const string StatusFilterDescription =
+        "Filter sessions by status (pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined (legacy))";
+
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("session", "Manage dispatched copilot sessions");
 
         command.Subcommands.Add(CreateListCommand(services));
-        command.Subcommands.Add(CreateJoinCommand(services));
+        command.Subcommands.Add(CreateConnectCommand(services));
         command.Subcommands.Add(CreateCommentCommand(services));
         command.Subcommands.Add(CreateCompleteCommand(services));
         command.Subcommands.Add(CreatePrCommand(services));
@@ -27,7 +31,7 @@ public static class SessionCommand
         // Default to list behavior when no subcommand is specified
         var filterOption = new Option<string?>("--filter")
         {
-            Description = "Filter sessions by status (pending, dispatching, running, joined, completed, failed, orphaned)"
+            Description = StatusFilterDescription
         };
         command.Options.Add(filterOption);
 
@@ -68,7 +72,7 @@ public static class SessionCommand
 
         var filterOption = new Option<string?>("--filter")
         {
-            Description = "Filter sessions by status (pending, dispatching, running, joined, completed, failed, orphaned)"
+            Description = StatusFilterDescription
         };
         command.Options.Add(filterOption);
 
@@ -98,13 +102,13 @@ public static class SessionCommand
         return command;
     }
 
-    // ---- join subcommand ----
+    // ---- connect subcommand ----
 
-    private static Command CreateJoinCommand(IServiceProvider services)
+    private static Command CreateConnectCommand(IServiceProvider services)
     {
-        var command = new Command("join", "Take over a copilot session interactively");
+        var command = new Command("connect", "Connect to a running remote copilot session interactively");
 
-        var issueArg = new Argument<string>("issue") { Description = "Issue key to join (e.g., owner/repo#123)" };
+        var issueArg = new Argument<string>("issue") { Description = "Issue key to connect (e.g., owner/repo#123)" };
         command.Arguments.Add(issueArg);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
@@ -113,16 +117,18 @@ public static class SessionCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
+                var copilotCli = services.GetRequiredService<CopilotCliService>();
                 var processManager = services.GetRequiredService<ProcessManager>();
+                var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
                 var config = stateStore.LoadConfig();
-                var repoResolver = services.GetRequiredService<RepoPathResolver>();
 
                 var issueKey = parseResult.GetValue(issueArg)!;
+                DispatchSession? sessionSnapshot = null;
                 string? sessionId = null;
+                int? processId = null;
+                string? taskId = null;
+                string? remoteUrl = null;
                 string? worktreePath = null;
-                string? workingDir = null;
-                var priorProcess = default(TrackedProcessRef);
-                var priorStatus = SessionStatus.Pending;
                 string? errorMessage = null;
 
                 stateStore.WithStateLock(() =>
@@ -135,30 +141,36 @@ public static class SessionCommand
                         return;
                     }
 
+                    if (session.IsTerminal)
+                    {
+                        errorMessage = $"Session for '{issueKey}' is already {session.Status.ToString().ToLowerInvariant()}.";
+                        return;
+                    }
+
+                    if (session.Status is not (SessionStatus.Running or SessionStatus.Dispatching))
+                    {
+                        errorMessage = $"Session for '{issueKey}' is not running (current status: {session.Status.ToString().ToLowerInvariant()}).";
+                        return;
+                    }
+
                     if (string.IsNullOrEmpty(session.CopilotSessionId))
                     {
                         errorMessage = $"Session for '{issueKey}' has no copilot session ID.";
                         return;
                     }
 
-                    workingDir = session.WorktreePath ?? repoResolver.ResolveRepoPath(session.Repo, config, state);
-                    if (workingDir is null || !Directory.Exists(workingDir))
-                    {
-                        errorMessage = $"Working directory not found for {session.Repo}. Ensure the repository is cloned under the configured RepoHome directory.";
-                        return;
-                    }
-
                     sessionId = session.CopilotSessionId;
+                    processId = session.ProcessId;
                     worktreePath = session.WorktreePath;
-                    priorStatus = session.Status;
-
-                    if (session.Status is SessionStatus.Running or SessionStatus.Dispatching or SessionStatus.Joined)
-                        priorProcess = CaptureTrackedProcess(session);
-
-                    session.Status = SessionStatus.Joined;
-                    ClearTrackedProcess(session);
-                    session.UpdatedAt = DateTimeOffset.UtcNow;
-                    stateStore.SaveState(state);
+                    sessionSnapshot = new DispatchSession
+                    {
+                        IssueKey = session.IssueKey,
+                        CopilotSessionId = session.CopilotSessionId,
+                        ProcessId = session.ProcessId,
+                        ProcessStartTime = session.ProcessStartTime,
+                        Status = session.Status,
+                        WorktreePath = session.WorktreePath,
+                    };
                 }, ct);
 
                 if (errorMessage is not null)
@@ -169,80 +181,93 @@ public static class SessionCommand
                     return 1;
                 }
 
-                if (priorProcess.HasProcess)
+                if (sessionSnapshot is null)
+                    throw new InvalidOperationException("Session snapshot was not captured.");
+
+                var liveness = processManager.CheckProcess(sessionSnapshot);
+                if (liveness is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused)
                 {
-                    var message = priorStatus is SessionStatus.Joined
-                        ? $"Stopping previously joined interactive session for {issueKey} (PID {priorProcess.ProcessId})..."
-                        : $"Stopping orchestrated session for {issueKey} (PID {priorProcess.ProcessId})...";
-                    ConsoleOutput.Info(message);
-                    processManager.TerminateProcess(priorProcess.Label, priorProcess.ProcessId, priorProcess.ProcessStartTime);
+                    ConsoleOutput.Error($"Session for '{issueKey}' is no longer running.");
+                    ConsoleOutput.Info("Run 'copilotd session list' to refresh the tracked session state and retry once the session is active again.");
+                    return 1;
                 }
 
-                ConsoleOutput.Success($"Joining session {sessionId} for {issueKey}");
-                if (worktreePath is not null)
+                if (!VersionHelper.TryParse(MinimumCopilotConnectVersion, out var minimumVersion))
+                    throw new InvalidOperationException($"Invalid minimum version constant: {MinimumCopilotConnectVersion}");
+
+                var copilotVersionDisplay = copilotCli.GetVersion();
+                if (copilotVersionDisplay is null)
+                {
+                    ConsoleOutput.Error("copilot CLI is not available. Install from: https://docs.github.com/copilot/how-tos/copilot-cli");
+                    return 1;
+                }
+
+                if (!copilotCli.TryGetSemanticVersion(out var installedVersion, out _))
+                {
+                    ConsoleOutput.Error($"Could not determine the installed copilot CLI version from '{copilotVersionDisplay}'. " +
+                        $"'copilotd session connect' requires version {MinimumCopilotConnectVersion} or newer.");
+                    return 1;
+                }
+
+                if (installedVersion < minimumVersion)
+                {
+                    ConsoleOutput.Error($"copilot CLI {copilotVersionDisplay} is too old. " +
+                        $"'copilotd session connect' requires version {MinimumCopilotConnectVersion} or newer.");
+                    return 1;
+                }
+
+                remoteUrl = remoteSessionUrls.TryResolve(sessionSnapshot, config.CurrentUser);
+                taskId = remoteSessionUrls.TryResolveTaskId(sessionSnapshot, config.CurrentUser);
+                if (taskId is null)
+                {
+                    if (remoteUrl is null)
+                    {
+                        ConsoleOutput.Error($"Remote task ID is not yet available for '{issueKey}'. Wait for the remote session URL to appear, then try again.");
+                    }
+                    else
+                    {
+                        ConsoleOutput.Error($"Could not extract a remote task ID from the resolved session URL for '{issueKey}': {remoteUrl}");
+                    }
+
+                    ConsoleOutput.Info("Use 'copilotd session list' to confirm the remote session URL is available.");
+                    return 1;
+                }
+
+                ConsoleOutput.Success($"Connecting to remote session {taskId} for {issueKey}");
+                if (remoteUrl is not null)
+                    ConsoleOutput.Info($"Remote session URL: {remoteUrl}");
+                if (worktreePath is not null && Directory.Exists(worktreePath))
                     ConsoleOutput.Info($"Working directory: {worktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)}");
-                ConsoleOutput.Info("Press Ctrl+C to exit the interactive session.");
+                ConsoleOutput.Info("The orchestrated session will keep running while you are connected.");
+                ConsoleOutput.Info("Press Ctrl+C to disconnect.");
                 Console.WriteLine();
 
-                // Launch copilot interactively — inherit terminal stdin/stdout/stderr
                 var psi = new ProcessStartInfo
                 {
                     FileName = "copilot",
-                    Arguments = $"--resume={sessionId}",
-                    WorkingDirectory = workingDir,
+                    Arguments = $"--connect={taskId}",
                     UseShellExecute = false,
                     RedirectStandardInput = false,
                     RedirectStandardOutput = false,
                     RedirectStandardError = false,
                 };
 
-                Process? interactiveProcess = null;
-                try
+                if (worktreePath is not null && Directory.Exists(worktreePath))
+                    psi.WorkingDirectory = worktreePath;
+
+                using var interactiveProcess = Process.Start(psi);
+                if (interactiveProcess is null)
                 {
-                    interactiveProcess = Process.Start(psi);
-                    if (interactiveProcess is null)
-                    {
-                        ConsoleOutput.Error("Failed to launch copilot.");
-                        RequeueSession(stateStore, issueKey);
-                        return 1;
-                    }
-
-                    // Track the interactive process PID so the daemon can detect
-                    // if it exits (e.g., terminal killed without cleanup)
-                    stateStore.WithStateLock(() =>
-                    {
-                        var state = stateStore.LoadState();
-                        if (state.Sessions.TryGetValue(issueKey, out var tracked))
-                        {
-                            tracked.ProcessId = interactiveProcess.Id;
-                            try { tracked.ProcessStartTime = new DateTimeOffset(interactiveProcess.StartTime.ToUniversalTime(), TimeSpan.Zero); }
-                            catch { tracked.ProcessStartTime = DateTimeOffset.UtcNow; }
-                            stateStore.SaveState(state);
-                        }
-                    }, ct);
-
-                    await interactiveProcess.WaitForExitAsync(ct);
-                    var exitCode = interactiveProcess.ExitCode;
-
-                    Console.WriteLine();
-                    ConsoleOutput.Info($"Interactive session exited (code {exitCode}).");
-                }
-                finally
-                {
-                    if (interactiveProcess is not null)
-                    {
-                        if (!interactiveProcess.HasExited)
-                        {
-                            try { interactiveProcess.Kill(entireProcessTree: true); } catch { }
-                        }
-                        interactiveProcess.Dispose();
-                    }
-
-                    // Always re-queue, even on cancellation or crash
-                    RequeueSession(stateStore, issueKey);
+                    ConsoleOutput.Error("Failed to launch copilot.");
+                    return 1;
                 }
 
-                return 0;
+                await interactiveProcess.WaitForExitAsync();
+                var exitCode = interactiveProcess.ExitCode;
+
+                Console.WriteLine();
+                ConsoleOutput.Info($"Interactive connection exited (code {exitCode}).");
+                return exitCode;
             }, logger);
         });
 
@@ -588,7 +613,7 @@ public static class SessionCommand
         {
             var currentState = stateStore.LoadState();
 
-            // Recover stale Joined sessions — no PID or process dead
+            // Recover legacy Joined sessions — no PID or process dead
             foreach (var (key, s) in currentState.Sessions)
             {
                 if (s.Status != SessionStatus.Joined)
@@ -662,7 +687,7 @@ public static class SessionCommand
 
         ConsoleOutput.Info($"{list.Count} session(s)");
         Console.WriteLine();
-        ConsoleOutput.Info("Use 'copilotd session join <issue>' to take over a session interactively.");
+        ConsoleOutput.Info("Use 'copilotd session connect <issue>' to connect to a running remote session.");
 
         return 0;
     }
@@ -738,7 +763,7 @@ public static class SessionCommand
     private static string GetUnavailableRemoteSessionUrlMessage(DispatchSession session)
         => session.Status switch
         {
-            SessionStatus.Pending or SessionStatus.Dispatching => "not yet available",
+            SessionStatus.Pending or SessionStatus.Dispatching or SessionStatus.Running => "not yet available",
             _ => "unavailable"
         };
 
@@ -768,31 +793,6 @@ public static class SessionCommand
     {
         var totalSeconds = (int)Math.Ceiling(duration.TotalSeconds);
         return totalSeconds == 1 ? "1 second" : $"{totalSeconds} seconds";
-    }
-
-    private static void RequeueSession(StateStore stateStore, string issueKey)
-    {
-        try
-        {
-            stateStore.WithStateLock(() =>
-            {
-                var state = stateStore.LoadState();
-                if (state.Sessions.TryGetValue(issueKey, out var session) &&
-                    session.Status == SessionStatus.Joined)
-                {
-                    session.Status = SessionStatus.Pending;
-                    ClearTrackedProcess(session);
-                    session.UpdatedAt = DateTimeOffset.UtcNow;
-                    stateStore.SaveState(state);
-                    ConsoleOutput.Info("Session re-queued for orchestrated dispatch.");
-                }
-            });
-        }
-        catch
-        {
-            // Best effort — if state save fails, the daemon's safety net
-            // will detect the stale Joined session and reset it
-        }
     }
 
     private static TrackedProcessRef CaptureTrackedProcess(DispatchSession session)

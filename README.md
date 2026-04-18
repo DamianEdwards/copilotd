@@ -11,7 +11,7 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 - **PR review feedback** — sessions that create PRs can wait for review comments and automatically re-dispatch to address feedback
 - **Self-healing state** — reconciles persisted state, live process status, and GitHub issue matches on every poll cycle and at startup
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
-- **Interactive takeover** — join any orchestrated session interactively with `copilotd session join`, then hand it back automatically
+- **Interactive connection** — connect to any running remote-enabled session with `copilotd session connect` without stopping the orchestrated session (requires Copilot CLI 1.0.32+)
 - **Remote control session** — hosts a `copilot --remote` session for remotely managing copilotd via the GitHub remote sessions UI (web & mobile)
 - **Cross-platform** — works on Windows, macOS, and Linux; publishes as native AOT
 
@@ -93,7 +93,7 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd logs clear [--days <n>]` | Clear log files, optionally only those older than the supplied age |
 | `copilotd session` | List dispatched sessions with their remote session URLs (alias for `session list`) |
 | `copilotd session list` | List dispatched sessions with optional filtering and remote session URLs |
-| `copilotd session join <issue>` | Take over a session interactively |
+| `copilotd session connect <issue>` | Connect to a running remote session interactively |
 | `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
 | `copilotd session pr <pr-number> <issue>` | Associate a PR with a session and wait for review feedback (callable from within a copilot session) |
@@ -117,7 +117,7 @@ File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Ea
 ### Status & session options
 
 ```
---filter <status>   Filter by status (pending, running, joined, waitingforfeedback, waitingforreview, completed, failed, orphaned)
+--filter <status>   Filter by status (pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined [legacy])
 --all               Include ended (completed/failed) sessions
 ```
 
@@ -184,15 +184,12 @@ stateDiagram-v2
     Dispatching --> Failed : Launch failed
 
     Running --> Orphaned : Process died
-    Running --> Joined : User takes over
     Running --> Completed : Issue closed/unmatched (auto)
     Running --> WaitingForFeedback : session comment
     Running --> WaitingForReview : session pr
 
     Orphaned --> Pending : Retry (≤3 times)
     Orphaned --> Failed : Max retries exceeded
-
-    Joined --> Pending : User exits
 
     WaitingForFeedback --> Pending : New comment detected
     WaitingForFeedback --> Completed : Issue unmatched
@@ -218,11 +215,9 @@ stateDiagram-v2
 | **Running** | **WaitingForFeedback** | Copilot calls `copilotd session comment` — process exits, session waits for new issue comments |
 | **Running** | **WaitingForReview** | Copilot calls `copilotd session pr <pr-number>` — process exits, session waits for PR review feedback |
 | **Running** | **Orphaned** | Process died unexpectedly (PID gone or reused) |
-| **Running** | **Joined** | User runs `copilotd session join` — process terminated, user takes over |
 | **Orphaned** | **Pending** | Retry eligible (retry count < 3) — exponential backoff: 2^n minutes, capped at 30m |
 | **Orphaned** | **Failed** | Max retries (3) exceeded |
 | **Failed** | **Pending** | Issue still matches and retry count < 3 |
-| **Joined** | **Pending** | User exits interactive session — automatically re-queued for dispatch |
 | **WaitingForFeedback** | **Pending** | New comment detected from a trusted author (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity. Author trust is controlled by `trust_level` rule setting |
 | **WaitingForFeedback** | **Completed** | Issue no longer matches rules while waiting |
 | **WaitingForReview** | **Pending** | New review comment or changes-requested review detected on the PR — re-dispatched with PR review prompt |
@@ -300,14 +295,16 @@ enforces trust boundaries on comment-triggered re-dispatches:
 
 Collaborator permission checks are cached for 15 minutes per user/repo pair to minimize API calls.
 
-### Interactive takeover
+### Interactive connection
 
-Use `copilotd session join <issue>` to take over any tracked session:
+Use `copilotd session connect <issue>` to connect to any tracked session whose remote task URL is available:
 
-1. If the session is currently running, the orchestrated process is gracefully terminated
-2. The session is marked as **Joined** — the daemon won't interfere
-3. An interactive `copilot --resume=<session_id>` is launched with full terminal access
-4. When you exit, the session is automatically re-queued as **Pending** for orchestrated dispatch
+1. copilotd resolves the session's remote GitHub task URL and extracts the taskId required by `copilot --connect`
+2. copilotd verifies the installed Copilot CLI is version `1.0.32` or newer
+3. An interactive `copilot --connect=<task_id>` session is launched in your terminal
+4. The orchestrated session keeps running in the background — no lifecycle state change or re-queue occurs
+
+If the remote session URL has not been discovered yet, `session connect` fails with guidance to retry after the URL appears in `copilotd session list`.
 
 ### Control remote session
 

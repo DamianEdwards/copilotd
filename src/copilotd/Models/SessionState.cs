@@ -56,7 +56,7 @@ public enum SessionStatus
     /// <summary>State says running but process is gone (candidate for re-dispatch).</summary>
     Orphaned,
 
-    /// <summary>User has taken over this session interactively via 'copilotd join'.</summary>
+    /// <summary>Legacy interactive takeover state retained for compatibility with older persisted state.</summary>
     Joined,
 
     /// <summary>

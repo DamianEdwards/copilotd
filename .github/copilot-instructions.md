@@ -28,7 +28,7 @@ State converges through this loop — every inconsistency (crashed process, stal
 
 **Three truth sources** are reconciled each cycle: persisted state (`~/.copilotd/state.json`) → live OS process status → current GitHub issue matches.
 
-**Session lifecycle states:** Pending → Dispatching → Running → Completed/Failed/Orphaned, plus Joined (user-controlled interactive takeover) and WaitingForFeedback (session paused, waiting for new issue comments). `CompletedBySession` flag distinguishes explicit copilot completion from automatic (issue unmatched) completion.
+**Session lifecycle states:** Pending → Dispatching → Running → Completed/Failed/Orphaned, plus WaitingForFeedback (session paused, waiting for new issue comments) and WaitingForReview. `Joined` is a legacy compatibility state from older versions that used local interactive takeover. `CompletedBySession` flag distinguishes explicit copilot completion from automatic (issue unmatched) completion.
 
 ## Key Conventions
 
@@ -89,5 +89,5 @@ All user-facing output goes through `ConsoleOutput` (wraps Spectre.Console). Alw
 Commands follow a consistent pattern:
 - Static class with `public static Command Create(IServiceProvider services)`
 - Services resolved from DI inside the `SetAction` handler
-- Sub-commands (e.g., `rules list`, `session join`) are separate `Command` instances added to the parent's `Subcommands`
+- Sub-commands (e.g., `rules list`, `session connect`) are separate `Command` instances added to the parent's `Subcommands`
 - Shared rendering logic is extracted as public static methods (e.g., `SessionCommand.RenderSessionList`)

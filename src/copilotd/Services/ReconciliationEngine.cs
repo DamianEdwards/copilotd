@@ -112,8 +112,8 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.WaitingForFeedback or SessionStatus.WaitingForReview)
                 continue;
 
-            // For Joined sessions, check if the interactive process is still alive.
-            // If it exited (e.g., terminal killed without cleanup), reset to Pending.
+            // Legacy Joined sessions come from older copilotd versions that launched
+            // a local interactive takeover process. If that process is gone, reset to Pending.
             if (session.Status is SessionStatus.Joined)
             {
                 if (session.ProcessId is null)

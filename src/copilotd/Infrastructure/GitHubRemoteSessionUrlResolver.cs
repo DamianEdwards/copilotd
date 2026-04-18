@@ -31,10 +31,18 @@ public sealed class GitHubRemoteSessionUrlResolver
     }
 
     public string? TryResolve(DispatchSession session, string? currentUser)
-        => TryResolve(session.CopilotSessionId, session.ProcessId, currentUser);
+        => session.ProcessId is { } pid && session.Status is SessionStatus.Dispatching or SessionStatus.Running
+            ? TryResolveFromCurrentProcess(session.CopilotSessionId, pid, currentUser)
+            : TryResolve(session.CopilotSessionId, session.ProcessId, currentUser);
 
     public string? TryResolve(ControlSessionInfo session, string? currentUser)
         => TryResolve(session.CopilotSessionId, session.ProcessId, currentUser);
+
+    public string? TryResolveTaskId(DispatchSession session, string? currentUser)
+        => TryExtractTaskId(TryResolve(session, currentUser), out var taskId) ? taskId : null;
+
+    public string? TryResolveTaskId(ControlSessionInfo session, string? currentUser)
+        => TryResolveTaskId(session.CopilotSessionId, session.ProcessId, currentUser);
 
     public string? TryResolve(string? sessionId, int? processId, string? currentUser)
     {
@@ -73,6 +81,38 @@ public sealed class GitHubRemoteSessionUrlResolver
         return null;
     }
 
+    private string? TryResolveFromCurrentProcess(string? sessionId, int processId, string? currentUser)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || !Directory.Exists(_logDir))
+            return null;
+
+        foreach (var logPath in EnumerateProcessLogFiles(processId))
+        {
+            try
+            {
+                var resolved = TryResolveFromLog(logPath, sessionId, currentUser);
+                if (resolved is not null)
+                    return resolved;
+            }
+            catch (IOException ex)
+            {
+                _logger.LogDebug(ex, "Failed reading Copilot log {Path}", logPath);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogDebug(ex, "Access denied reading Copilot log {Path}", logPath);
+            }
+        }
+
+        return null;
+    }
+
+    public string? TryResolveTaskId(string? sessionId, int? processId, string? currentUser)
+    {
+        var url = TryResolve(sessionId, processId, currentUser);
+        return TryExtractTaskId(url, out var taskId) ? taskId : null;
+    }
+
     private string? TryResolveFromSessionState(string sessionId, string? currentUser)
     {
         var eventsPath = Path.Combine(_sessionStateDir, sessionId, "events.jsonl");
@@ -95,7 +135,7 @@ public sealed class GitHubRemoteSessionUrlResolver
 
         if (processId is { } pid)
         {
-            foreach (var path in Directory.EnumerateFiles(_logDir, $"process-*-{pid}.log", SearchOption.TopDirectoryOnly))
+            foreach (var path in EnumerateProcessLogFiles(pid))
             {
                 if (yielded.Add(path))
                     yield return path;
@@ -112,6 +152,12 @@ public sealed class GitHubRemoteSessionUrlResolver
                 yield return path;
         }
     }
+
+    private IEnumerable<string> EnumerateProcessLogFiles(int processId)
+        => new DirectoryInfo(_logDir)
+            .EnumerateFiles($"process-*-{processId}.log", SearchOption.TopDirectoryOnly)
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .Select(file => file.FullName);
 
     private string? TryResolveFromLog(string logPath, string sessionId, string? currentUser)
     {
@@ -203,6 +249,31 @@ public sealed class GitHubRemoteSessionUrlResolver
 
         url = candidate;
         return true;
+    }
+
+    private static bool TryExtractTaskId(string? url, out string? taskId)
+    {
+        taskId = null;
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+
+        var segments = uri.AbsolutePath
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        for (var i = 0; i < segments.Length - 1; i++)
+        {
+            if (!string.Equals(segments[i], "tasks", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var candidate = Uri.UnescapeDataString(segments[i + 1]);
+            if (string.IsNullOrWhiteSpace(candidate))
+                return false;
+
+            taskId = candidate;
+            return true;
+        }
+
+        return false;
     }
 
     private static string AppendAuthorQuery(string url, string? currentUser)

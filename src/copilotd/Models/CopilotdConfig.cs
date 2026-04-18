@@ -134,7 +134,7 @@ public sealed class CopilotdConfig
         AVAILABLE COMMANDS (run these in the terminal):
         - `$(copilotd.command) status`                          — Show daemon health, watched repos, and session summary
         - `$(copilotd.command) session list [--all]`             — List active sessions (--all includes completed/failed)
-        - `$(copilotd.command) session list --filter <status>`   — Filter by status: pending, running, completed, failed, orphaned, joined, waitingforfeedback, waitingforreview
+        - `$(copilotd.command) session list --filter <status>`   — Filter by status: pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined (legacy)
         - `$(copilotd.command) session reset <issue>`            — Reset a session for re-dispatch (e.g., "org/repo#42")
         - `$(copilotd.command) session complete <issue>`         — Mark a session as completed
         - `$(copilotd.command) session comment <issue> --message "text"` — Post a comment on the issue and pause the session
@@ -151,8 +151,9 @@ public sealed class CopilotdConfig
         SESSION LIFECYCLE:
         Issues matching rules are dispatched as copilot sessions that progress through:
         Pending → Dispatching → Running → Completed/Failed
-        Sessions can also be: Orphaned (process died), Joined (user took over),
-        WaitingForFeedback (paused for issue comments), or WaitingForReview (monitoring PR reviews).
+        Sessions can also be: Orphaned (process died), WaitingForFeedback (paused for issue comments),
+        or WaitingForReview (monitoring PR reviews). Joined may still appear as a legacy state from
+        older copilotd versions that used local interactive takeover.
 
         GUIDELINES:
         - Always start by running `copilotd status` to understand the current state

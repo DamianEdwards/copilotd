@@ -16,7 +16,7 @@ public static class StatusCommand
 
         var filterOption = new Option<string?>("--filter")
         {
-            Description = "Filter sessions by status (pending, dispatching, running, joined, completed, failed, orphaned)"
+            Description = SessionCommand.StatusFilterDescription
         };
         command.Options.Add(filterOption);
 

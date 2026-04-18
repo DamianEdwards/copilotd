@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
+using Copilotd.Infrastructure;
 using Microsoft.Extensions.Logging;
+using NuGet.Versioning;
 
 namespace Copilotd.Services;
 
@@ -8,6 +11,9 @@ namespace Copilotd.Services;
 /// </summary>
 public sealed class CopilotCliService
 {
+    private static readonly Regex VersionTokenPattern = new(
+        @"\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly ILogger<CopilotCliService> _logger;
 
     public CopilotCliService(ILogger<CopilotCliService> logger)
@@ -49,6 +55,32 @@ public sealed class CopilotCliService
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Attempts to parse the installed copilot CLI version as SemVer, handling
+    /// decorated version strings like "GitHub Copilot CLI 1.0.32.".
+    /// </summary>
+    public bool TryGetSemanticVersion(out NuGetVersion version, out string? versionDisplay)
+    {
+        versionDisplay = GetVersion();
+        if (versionDisplay is null)
+        {
+            version = default!;
+            return false;
+        }
+
+        if (VersionHelper.TryParse(versionDisplay, out version))
+            return true;
+
+        var match = VersionTokenPattern.Match(versionDisplay);
+        if (!match.Success)
+        {
+            version = default!;
+            return false;
+        }
+
+        return VersionHelper.TryParse(match.Value, out version);
     }
 
     /// <summary>
