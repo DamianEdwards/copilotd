@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Copilotd.Models;
 using Microsoft.Extensions.Logging;
@@ -16,6 +17,7 @@ public sealed class GitHubRemoteSessionUrlResolver
         @"^\d{4}-\d{2}-\d{2}T\S+\s\[(?:INFO|DEBUG)\]\s(?:RemoteSessionExporter: active with session [^:]+:\s+|Remote session active \(steerable\):\s+|Remote session export active \(not steerable\):\s+)(https://github\.com/\S+)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly string _logDir;
+    private readonly string _sessionStateDir;
     private readonly ILogger<GitHubRemoteSessionUrlResolver> _logger;
 
     public const string ControlSessionRepo = "DamianEdwards/copilotd";
@@ -25,6 +27,7 @@ public sealed class GitHubRemoteSessionUrlResolver
         _logger = logger;
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         _logDir = Path.Combine(home, ".copilot", "logs");
+        _sessionStateDir = Path.Combine(home, ".copilot", "session-state");
     }
 
     public string? TryResolve(DispatchSession session, string? currentUser)
@@ -35,7 +38,14 @@ public sealed class GitHubRemoteSessionUrlResolver
 
     public string? TryResolve(string? sessionId, int? processId, string? currentUser)
     {
-        if (string.IsNullOrWhiteSpace(sessionId) || !Directory.Exists(_logDir))
+        if (string.IsNullOrWhiteSpace(sessionId))
+            return null;
+
+        var sessionStateUrl = TryResolveFromSessionState(sessionId, currentUser);
+        if (sessionStateUrl is not null)
+            return sessionStateUrl;
+
+        if (!Directory.Exists(_logDir))
             return null;
 
         foreach (var logPath in EnumerateCandidateLogFiles(processId))
@@ -54,9 +64,29 @@ public sealed class GitHubRemoteSessionUrlResolver
             {
                 _logger.LogDebug(ex, "Access denied reading Copilot log {Path}", logPath);
             }
+            catch (JsonException ex)
+            {
+                _logger.LogDebug(ex, "Failed parsing Copilot session state from {Path}", logPath);
+            }
         }
 
         return null;
+    }
+
+    private string? TryResolveFromSessionState(string sessionId, string? currentUser)
+    {
+        var eventsPath = Path.Combine(_sessionStateDir, sessionId, "events.jsonl");
+        if (!File.Exists(eventsPath))
+            return null;
+
+        string? resolvedUrl = null;
+        foreach (var line in ReadLinesShared(eventsPath))
+        {
+            if (TryExtractRemoteTaskUrlFromEvent(line, out var url))
+                resolvedUrl = AppendAuthorQuery(url!, currentUser);
+        }
+
+        return resolvedUrl;
     }
 
     private IEnumerable<string> EnumerateCandidateLogFiles(int? processId)
@@ -87,7 +117,7 @@ public sealed class GitHubRemoteSessionUrlResolver
     {
         var matchedSession = false;
 
-        foreach (var line in File.ReadLines(logPath, Encoding.UTF8))
+        foreach (var line in ReadLinesShared(logPath))
         {
             if (!matchedSession && LineReferencesSession(line, sessionId))
             {
@@ -100,6 +130,19 @@ public sealed class GitHubRemoteSessionUrlResolver
         }
 
         return null;
+    }
+
+    private static IEnumerable<string> ReadLinesShared(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+
+        while (reader.ReadLine() is { } line)
+            yield return line;
     }
 
     private static bool LineReferencesSession(string line, string sessionId)
@@ -132,6 +175,34 @@ public sealed class GitHubRemoteSessionUrlResolver
 
         url = match.Groups[1].Value;
         return url.Contains("/tasks/", StringComparison.Ordinal);
+    }
+
+    private static bool TryExtractRemoteTaskUrlFromEvent(string line, out string? url)
+    {
+        url = null;
+
+        using var document = JsonDocument.Parse(line);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("type", out var typeElement)
+            || !string.Equals(typeElement.GetString(), "session.info", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!root.TryGetProperty("data", out var dataElement)
+            || !dataElement.TryGetProperty("infoType", out var infoTypeElement)
+            || !string.Equals(infoTypeElement.GetString(), "remote", StringComparison.Ordinal)
+            || !dataElement.TryGetProperty("url", out var urlElement))
+        {
+            return false;
+        }
+
+        var candidate = urlElement.GetString();
+        if (string.IsNullOrWhiteSpace(candidate) || !candidate.Contains("/tasks/", StringComparison.Ordinal))
+            return false;
+
+        url = candidate;
+        return true;
     }
 
     private static string AppendAuthorQuery(string url, string? currentUser)

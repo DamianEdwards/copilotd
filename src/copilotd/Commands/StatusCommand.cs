@@ -39,7 +39,28 @@ public static class StatusCommand
                 // Daemon status header
                 var daemonRunning = stateStore.IsLockHeld();
                 var daemonInfo = daemonRunning ? stateStore.ReadDaemonPid() : null;
-                var state = stateStore.LoadState();
+                var recoveredStaleControlSession = false;
+                var controlLiveness = ProcessLivenessResult.Dead;
+                var state = stateStore.WithStateLock(() =>
+                {
+                    var currentState = stateStore.LoadState();
+
+                    if (currentState.ControlSession?.Status == ControlSessionStatus.Running)
+                    {
+                        controlLiveness = processManager.CheckControlSession(currentState.ControlSession);
+                        if (controlLiveness is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused)
+                        {
+                            currentState.ControlSession.Status = ControlSessionStatus.Stopped;
+                            currentState.ControlSession.ProcessId = null;
+                            currentState.ControlSession.ProcessStartTime = null;
+                            currentState.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
+                            stateStore.SaveState(currentState);
+                            recoveredStaleControlSession = true;
+                        }
+                    }
+
+                    return currentState;
+                }, ct);
                 var config = stateStore.LoadConfig();
 
                 AnsiConsole.MarkupLine(daemonRunning
@@ -67,9 +88,8 @@ public static class StatusCommand
                 // Control session status
                 if (state.ControlSession is not null)
                 {
-                    var controlLiveness = state.ControlSession.Status == ControlSessionStatus.Running
-                        ? processManager.CheckControlSession(state.ControlSession)
-                        : ProcessLivenessResult.Dead;
+                    if (recoveredStaleControlSession)
+                        ConsoleOutput.Warning("Recovered stale control session -> Stopped");
 
                     var controlStatus = state.ControlSession.Status switch
                     {

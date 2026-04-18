@@ -12,6 +12,9 @@ namespace Copilotd.Commands;
 
 public static class RunCommand
 {
+    private static readonly TimeSpan RemoteUrlResolveTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan RemoteUrlResolvePollInterval = TimeSpan.FromMilliseconds(500);
+
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("run", "Start the copilotd daemon");
@@ -38,6 +41,7 @@ public static class RunCommand
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
                 var logFileManager = services.GetRequiredService<LogFileManager>();
+                var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var disableSelfUpdates = runtimeContext.IsAutomaticSelfUpdateDisabled(parseResult.GetValue(disableSelfUpdatesOption));
@@ -96,8 +100,12 @@ public static class RunCommand
                             var state = stateStore.LoadState();
 
                             var existingAlive = state.ControlSession is not null
-                                && state.ControlSession.Status == ControlSessionStatus.Running
-                                && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+                                && IsControlSessionHealthy(
+                                    state.ControlSession,
+                                    processManager,
+                                    remoteSessionUrls,
+                                    config.CurrentUser,
+                                    DateTimeOffset.UtcNow);
 
                             if (existingAlive)
                             {
@@ -132,10 +140,22 @@ public static class RunCommand
                         if (existingControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session already running (PID {existingControlPid}).");
+                            await WriteControlSessionRemoteUrlAsync(
+                                remoteSessionUrls,
+                                existingControlSessionId,
+                                existingControlPid,
+                                config.CurrentUser,
+                                ct);
                         }
                         else if (launchedControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session launched (PID {launchedControlPid}).");
+                            await WriteControlSessionRemoteUrlAsync(
+                                remoteSessionUrls,
+                                launchedControlSessionId,
+                                launchedControlPid,
+                                config.CurrentUser,
+                                ct);
                         }
                         else if (launchFailed)
                         {
@@ -191,13 +211,25 @@ public static class RunCommand
                                     if (config.EnableControlSession)
                                     {
                                         var controlAlive = state.ControlSession is not null
-                                            && state.ControlSession.Status == ControlSessionStatus.Running
-                                            && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+                                            && IsControlSessionHealthy(
+                                                state.ControlSession,
+                                                processManager,
+                                                remoteSessionUrls,
+                                                config.CurrentUser,
+                                                DateTimeOffset.UtcNow);
 
                                         if (!controlAlive)
                                         {
                                             if (state.ControlSession?.ProcessId is not null)
+                                            {
+                                                if (state.ControlSession.Status == ControlSessionStatus.Running
+                                                    && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive)
+                                                {
+                                                    logger.LogWarning("Control session is alive but has no resolvable remote URL; relaunching");
+                                                }
+
                                                 processManager.TerminateControlSession(state.ControlSession);
+                                            }
 
                                             logger.LogInformation("Relaunching control session...");
                                             var controlSession = processManager.LaunchControlSession(config);
@@ -297,6 +329,62 @@ public static class RunCommand
         });
 
         return command;
+    }
+
+    private static async Task WriteControlSessionRemoteUrlAsync(
+        GitHubRemoteSessionUrlResolver remoteSessionUrls,
+        string? sessionId,
+        int? processId,
+        string? currentUser,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+            return;
+
+        var url = remoteSessionUrls.TryResolve(sessionId, processId, currentUser);
+        var deadline = DateTimeOffset.UtcNow + RemoteUrlResolveTimeout;
+
+        while (url is null && DateTimeOffset.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(RemoteUrlResolvePollInterval, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            url = remoteSessionUrls.TryResolve(sessionId, processId, currentUser);
+        }
+
+        ConsoleOutput.Info("Remote:");
+        ConsoleOutput.Info($"  {url ?? "unavailable"}");
+    }
+
+    private static bool IsControlSessionHealthy(
+        ControlSessionInfo session,
+        ProcessManager processManager,
+        GitHubRemoteSessionUrlResolver remoteSessionUrls,
+        string? currentUser,
+        DateTimeOffset now)
+    {
+        if (session.Status != ControlSessionStatus.Running)
+            return false;
+
+        if (processManager.CheckControlSession(session) != ProcessLivenessResult.Alive)
+            return false;
+
+        if (remoteSessionUrls.TryResolve(session, currentUser) is not null)
+            return true;
+
+        return !HasRemoteUrlResolutionTimedOut(session, now);
+    }
+
+    private static bool HasRemoteUrlResolutionTimedOut(ControlSessionInfo session, DateTimeOffset now)
+    {
+        var startedAt = session.StartedAt ?? session.UpdatedAt;
+        return startedAt is { } started && now - started >= RemoteUrlResolveTimeout;
     }
 
     private static void CleanupTrackedProcesses(
