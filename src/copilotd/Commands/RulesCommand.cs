@@ -20,9 +20,9 @@ public static class RulesCommand
 
         // Default to list behavior when no subcommand is specified
         var repoOption = new Option<string?>("--repo") { Description = "Filter rules by repository" };
-        var userOption = new Option<string?>("--user") { Description = "Filter rules by user condition", Arity = ArgumentArity.ZeroOrOne };
+        var assigneeOption = new Option<string?>("--assignee") { Description = "Filter rules by assignee condition", Arity = ArgumentArity.ZeroOrOne };
         command.Options.Add(repoOption);
-        command.Options.Add(userOption);
+        command.Options.Add(assigneeOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -35,10 +35,10 @@ public static class RulesCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var config = stateStore.LoadConfig();
                 var repoFilter = parseResult.GetValue(repoOption);
-                var userFilter = parseResult.GetValue(userOption);
-                var userFlagPresent = parseResult.GetResult(userOption) is not null;
+                var assigneeFilter = parseResult.GetValue(assigneeOption);
+                var assigneeFlagPresent = parseResult.GetResult(assigneeOption) is not null;
 
-                return RenderRulesList(config, repoFilter, userFilter, userFlagPresent);
+                return RenderRulesList(config, repoFilter, assigneeFilter, assigneeFlagPresent);
             }, logger);
         });
 
@@ -49,9 +49,9 @@ public static class RulesCommand
     {
         var command = new Command("list", "List dispatch rules");
         var repoOption = new Option<string?>("--repo") { Description = "Filter rules by repository" };
-        var userOption = new Option<string?>("--user") { Description = "Filter rules by user condition", Arity = ArgumentArity.ZeroOrOne };
+        var assigneeOption = new Option<string?>("--assignee") { Description = "Filter rules by assignee condition", Arity = ArgumentArity.ZeroOrOne };
         command.Options.Add(repoOption);
-        command.Options.Add(userOption);
+        command.Options.Add(assigneeOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -61,27 +61,27 @@ public static class RulesCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var config = stateStore.LoadConfig();
                 var repoFilter = parseResult.GetValue(repoOption);
-                var userFilter = parseResult.GetValue(userOption);
-                var userFlagPresent = parseResult.GetResult(userOption) is not null;
+                var assigneeFilter = parseResult.GetValue(assigneeOption);
+                var assigneeFlagPresent = parseResult.GetResult(assigneeOption) is not null;
 
-                return RenderRulesList(config, repoFilter, userFilter, userFlagPresent);
+                return RenderRulesList(config, repoFilter, assigneeFilter, assigneeFlagPresent);
             }, logger);
         });
 
         return command;
     }
 
-    private static int RenderRulesList(CopilotdConfig config, string? repoFilter, string? userFilter, bool userFlagPresent)
+    private static int RenderRulesList(CopilotdConfig config, string? repoFilter, string? assigneeFilter, bool assigneeFlagPresent)
     {
         var rules = config.Rules.AsEnumerable();
 
         if (repoFilter is not null)
             rules = rules.Where(r => r.Value.Repos.Contains(repoFilter, StringComparer.OrdinalIgnoreCase));
 
-        if (userFlagPresent)
+        if (assigneeFlagPresent)
         {
-            if (userFilter is not null)
-                rules = rules.Where(r => string.Equals(r.Value.User, userFilter, StringComparison.OrdinalIgnoreCase));
+            if (assigneeFilter is not null)
+                rules = rules.Where(r => string.Equals(r.Value.User, assigneeFilter, StringComparison.OrdinalIgnoreCase));
             else
                 rules = rules.Where(r => r.Value.User is not null);
         }
@@ -150,7 +150,7 @@ public static class RulesCommand
     {
         var command = new Command("add", "Add a new dispatch rule");
         var nameArg = new Argument<string>("name");
-        var userOption = new Option<string?>("--user") { Description = "User condition" };
+        var assigneeOption = new Option<string?>("--assignee") { Description = "Assignee condition" };
         var labelOption = new Option<string[]>("--label") { Description = "Label condition (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
         var milestoneOption = new Option<string?>("--milestone") { Description = "Milestone condition" };
         var typeOption = new Option<string?>("--type") { Description = "Issue type condition" };
@@ -167,7 +167,7 @@ public static class RulesCommand
         var anyAuthorOption = new Option<bool>("--any-author") { Description = "Allow issues from any author (default)" };
 
         command.Arguments.Add(nameArg);
-        command.Options.Add(userOption);
+        command.Options.Add(assigneeOption);
         command.Options.Add(labelOption);
         command.Options.Add(milestoneOption);
         command.Options.Add(typeOption);
@@ -201,7 +201,7 @@ public static class RulesCommand
 
                 var rule = new DispatchRule
                 {
-                    User = parseResult.GetValue(userOption),
+                    User = parseResult.GetValue(assigneeOption),
                     Labels = [.. parseResult.GetValue(labelOption) ?? []],
                     Milestone = parseResult.GetValue(milestoneOption),
                     Type = parseResult.GetValue(typeOption),
@@ -251,7 +251,7 @@ public static class RulesCommand
     {
         var command = new Command("update", "Update an existing dispatch rule");
         var nameArg = new Argument<string>("name");
-        var userOption = new Option<string?>("--user") { Description = "Update user condition" };
+        var assigneeOption = new Option<string?>("--assignee") { Description = "Update assignee condition" };
         var addLabelOption = new Option<string[]>("--add-label") { Description = "Add a label condition", AllowMultipleArgumentsPerToken = true };
         var deleteLabelOption = new Option<string[]>("--delete-label") { Description = "Remove a label condition", AllowMultipleArgumentsPerToken = true };
         var milestoneOption = new Option<string?>("--milestone") { Description = "Update milestone condition" };
@@ -271,7 +271,7 @@ public static class RulesCommand
         var anyAuthorOption = new Option<bool>("--any-author") { Description = "Allow issues from any author (clears author list)" };
 
         command.Arguments.Add(nameArg);
-        command.Options.Add(userOption);
+        command.Options.Add(assigneeOption);
         command.Options.Add(addLabelOption);
         command.Options.Add(deleteLabelOption);
         command.Options.Add(milestoneOption);
@@ -306,8 +306,8 @@ public static class RulesCommand
                     return 1;
                 }
 
-                if (parseResult.GetResult(userOption) is not null)
-                    rule.User = parseResult.GetValue(userOption);
+                if (parseResult.GetResult(assigneeOption) is not null)
+                    rule.User = parseResult.GetValue(assigneeOption);
 
                 var addLabels = parseResult.GetValue(addLabelOption) ?? [];
                 var deleteLabels = parseResult.GetValue(deleteLabelOption) ?? [];
