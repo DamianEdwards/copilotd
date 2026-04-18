@@ -29,6 +29,9 @@ internal static class NativeInterop
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool SetConsoleCtrlHandler(IntPtr handlerRoutine, bool add);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandler? handlerRoutine, bool add);
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct STARTUPINFO
     {
@@ -65,6 +68,13 @@ internal static class NativeInterop
     public const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
     public const int STARTF_USESHOWWINDOW = 0x00000001;
     public const short SW_HIDE = 0;
+    public const uint CTRL_C_EVENT = 0;
+    public const uint CTRL_BREAK_EVENT = 1;
+    public const uint CTRL_CLOSE_EVENT = 2;
+    public const uint CTRL_LOGOFF_EVENT = 5;
+    public const uint CTRL_SHUTDOWN_EVENT = 6;
+
+    public delegate bool ConsoleCtrlHandler(uint dwCtrlType);
 
     // --- Windows process snapshot APIs ---
 

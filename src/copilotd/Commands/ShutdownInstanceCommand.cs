@@ -411,13 +411,13 @@ public static class ShutdownInstanceCommand
 
         while (DateTime.UtcNow < deadline)
         {
-            if (process.HasExited && !HasDescendants(rootPid))
+            if (process.HasExited && !HasRelevantDescendants(rootPid))
                 return true;
 
             Thread.Sleep(TimeSpan.FromMilliseconds(100));
         }
 
-        return process.HasExited && !HasDescendants(rootPid);
+        return process.HasExited && !HasRelevantDescendants(rootPid);
     }
 
     private static bool WaitForCopilotShutdown(Process process, int rootPid, TimeSpan waitTime)
@@ -434,9 +434,6 @@ public static class ShutdownInstanceCommand
 
         return process.HasExited && !HasRelevantDescendants(rootPid);
     }
-
-    private static bool HasDescendants(int rootPid)
-        => EnumerateDescendantProcessIds(rootPid).Count > 0;
 
     private static bool HasRelevantDescendants(int rootPid)
     {
