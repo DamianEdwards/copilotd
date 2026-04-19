@@ -27,7 +27,7 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 In a PowerShell terminal:
 
 ```PowerShell
-iex (gh release download install-scripts -R DamianEdwards/copilotd -p install.ps1 -O - | Out-String)
+irm https://copilotd.damianedwards.dev/install.ps1 | iex
 ```
 
 ### Install on macOS & Linux
@@ -35,7 +35,13 @@ iex (gh release download install-scripts -R DamianEdwards/copilotd -p install.ps
 In a terminal:
 
 ```bash
-gh release download install-scripts -R DamianEdwards/copilotd -p install.sh -O - | bash
+curl -sSL https://copilotd.damianedwards.dev/install.sh | bash
+```
+
+or
+
+```bash
+wget -qO- https://copilotd.damianedwards.dev/install.sh | bash
 ```
 
 ## Running
