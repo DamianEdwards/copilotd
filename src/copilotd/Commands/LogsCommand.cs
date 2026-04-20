@@ -12,6 +12,7 @@ public static class LogsCommand
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("logs", "Show or clear copilotd log files");
+        command.Aliases.Add("log");
         command.Subcommands.Add(CreateClearCommand(services));
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>

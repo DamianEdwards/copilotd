@@ -13,6 +13,7 @@ public static class RulesCommand
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("rules", "Manage dispatch rules");
+        command.Aliases.Add("rule");
         command.Subcommands.Add(CreateList(services));
         command.Subcommands.Add(CreateAdd(services));
         command.Subcommands.Add(CreateUpdate(services));
@@ -149,6 +150,8 @@ public static class RulesCommand
     private static Command CreateAdd(IServiceProvider services)
     {
         var command = new Command("add", "Add a new dispatch rule");
+        command.Aliases.Add("new");
+        command.Aliases.Add("create");
         var nameArg = new Argument<string>("name");
         var assigneeOption = new Option<string?>("--assignee") { Description = "Assignee condition" };
         var labelOption = new Option<string[]>("--label") { Description = "Label condition (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
@@ -250,6 +253,7 @@ public static class RulesCommand
     private static Command CreateUpdate(IServiceProvider services)
     {
         var command = new Command("update", "Update an existing dispatch rule");
+        command.Aliases.Add("edit");
         var nameArg = new Argument<string>("name");
         var assigneeOption = new Option<string?>("--assignee") { Description = "Update assignee condition" };
         var addLabelOption = new Option<string[]>("--add-label") { Description = "Add a label condition", AllowMultipleArgumentsPerToken = true };

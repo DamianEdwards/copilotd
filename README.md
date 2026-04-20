@@ -95,9 +95,9 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd start` | Start the daemon in the background and print the current daemon log folder |
 | `copilotd stop` | Stop the daemon and print the current daemon log folder |
 | `copilotd status` | Show daemon health, watched repos, the active daemon log folder, and the session list |
-| `copilotd logs` | Print the copilotd logs directory |
+| `copilotd logs` | Print the copilotd logs directory (`copilotd log` also works) |
 | `copilotd logs clear [--days <n>]` | Clear log files, optionally only those older than the supplied age |
-| `copilotd session` | List dispatched sessions with their remote session URLs (alias for `session list`) |
+| `copilotd session` | List dispatched sessions with their remote session URLs (`copilotd sessions` also works; default alias for `session list`) |
 | `copilotd session list` | List dispatched sessions with optional filtering and remote session URLs |
 | `copilotd session connect <issue>` | Connect to a running remote session interactively |
 | `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
@@ -106,9 +106,9 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
 | `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `max_instances`, `session_shutdown_delay_seconds`) |
-| `copilotd rules list` | List all dispatch rules |
-| `copilotd rules add <name>` | Add a new dispatch rule |
-| `copilotd rules update <name>` | Update an existing rule |
+| `copilotd rules list` | List all dispatch rules (`copilotd rule list` also works) |
+| `copilotd rules add <name>` | Add a new dispatch rule (`copilotd rule create <name>` and `copilotd rule new <name>` also work) |
+| `copilotd rules update <name>` | Update an existing rule (`copilotd rule edit <name>` also works) |
 | `copilotd rules delete <name>` | Delete a rule (the `Default` rule cannot be deleted) |
 
 File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Each daemon `run` instance gets its own `daemon_<uuid>` subfolder so its log files stay grouped together, while non-daemon commands log directly in the root logs directory with the same rolling-file behavior.
@@ -130,6 +130,8 @@ File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Ea
 ### Rules options
 
 Rules support conditions (`--assignee`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). All conditions are logical AND.
+
+Aliases: `rule` for `rules`, `create`/`new` for `add`, and `edit` for `update`.
 
 ```bash
 # Add a rule

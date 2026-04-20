@@ -20,6 +20,7 @@ public static class SessionCommand
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("session", "Manage dispatched copilot sessions");
+        command.Aliases.Add("sessions");
 
         command.Subcommands.Add(CreateListCommand(services));
         command.Subcommands.Add(CreateConnectCommand(services));
