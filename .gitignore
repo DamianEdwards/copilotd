@@ -52,6 +52,7 @@ artifacts/
 .vs/
 .vscode/
 .idea/
+.control-session/
 *.swp
 *~
 
