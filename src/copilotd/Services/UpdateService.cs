@@ -334,8 +334,9 @@ public sealed class UpdateService
                 }
             }
 
-            // Verify provenance of archive before extraction (skip for dev builds)
-            if (!update.IsDevBuild && !skipProvenance)
+            // On Windows, Authenticode applies to the extracted executable rather than the ZIP container.
+            // Keep archive verification for Unix platforms where provenance is tied to the downloaded asset.
+            if (!OperatingSystem.IsWindows() && !update.IsDevBuild && !skipProvenance)
             {
                 var (archiveTrustOk, archiveTrustErr) = await _provenanceVerifier.VerifyBinaryTrustAsync(archivePath, ct);
                 if (!archiveTrustOk)

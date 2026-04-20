@@ -156,13 +156,16 @@ public sealed class ProvenanceVerifier
 
             var psi = new ProcessStartInfo
             {
-                FileName = "powershell.exe",
+                FileName = GetWindowsPowerShellPath(),
                 Arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{scriptPath}\" -BinaryPath \"{binaryPath}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            // When copilotd is launched from pwsh, the parent process can carry PowerShell 7
+            // module paths that make Windows PowerShell 5.1 autoload the wrong security module.
+            psi.Environment["PSModulePath"] = GetWindowsPowerShellModulePath();
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(VerifyTimeout);
@@ -326,6 +329,34 @@ public sealed class ProvenanceVerifier
             _logger.LogError(ex, "Failed to read embedded verification script");
             return null;
         }
+    }
+
+    private static string GetWindowsPowerShellPath()
+    {
+        var candidatePath = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        return File.Exists(candidatePath) ? candidatePath : "powershell.exe";
+    }
+
+    private static string GetWindowsPowerShellModulePath()
+    {
+        var modulePaths = new List<string>();
+
+        var documentsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (!string.IsNullOrWhiteSpace(documentsPath))
+            modulePaths.Add(Path.Combine(documentsPath, "WindowsPowerShell", "Modules"));
+
+        var programFilesPath = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrWhiteSpace(programFilesPath))
+            modulePaths.Add(Path.Combine(programFilesPath, "WindowsPowerShell", "Modules"));
+
+        if (!string.IsNullOrWhiteSpace(Environment.SystemDirectory))
+            modulePaths.Add(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "Modules"));
+
+        return string.Join(
+            Path.PathSeparator,
+            modulePaths
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase));
     }
 
     private static string ParseExpectedHash(string[] lines, string assetName)
