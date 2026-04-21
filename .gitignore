@@ -53,6 +53,7 @@ artifacts/
 .vscode/
 .idea/
 .control-session/
+.copilotd-home/
 *.swp
 *~
 

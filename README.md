@@ -70,7 +70,9 @@ Run `copilotd --help` for other commands.
 # Clone and build
 git clone https://github.com/DamianEdwards/copilotd.git
 cd copilotd
-dotnet build
+./build.sh               # macOS/Linux
+.\build.ps1              # Windows PowerShell / pwsh
+build.cmd                # Windows cmd.exe
 
 # First-run setup (checks dependencies, prompts for config)
 ./copilotd.sh init          # macOS/Linux
@@ -83,7 +85,7 @@ copilotd.cmd init           # Windows cmd.exe
 copilotd.cmd run            # Windows cmd.exe
 ```
 
-Convenience scripts `copilotd.sh`, `copilotd.ps1`, and `copilotd.cmd` run the project from source. For the long-lived `run` command they build and execute the generated apphost directly so Ctrl+C reaches `copilotd` cleanly. On Windows, use `copilotd.ps1` from PowerShell and `copilotd.cmd` from cmd.exe; other commands continue to use `dotnet run`, passing all arguments through.
+Convenience scripts `copilotd.sh`, `copilotd.ps1`, and `copilotd.cmd` run the project from source without rebuilding on every invocation. They default `COPILOTD_HOME` to a repo-local `.copilotd-home` folder so source runs stay isolated from a global install, while still honoring an explicitly configured `COPILOTD_HOME`. For the long-lived `run` command they execute the existing generated apphost directly so Ctrl+C reaches `copilotd` cleanly. Build it first with `build.sh`, `build.ps1`, or `build.cmd`. On Windows, use `copilotd.ps1` from PowerShell and `copilotd.cmd` from cmd.exe; other commands continue to use `dotnet run --no-build`, passing all arguments through.
 
 Installed copilotd binaries can self-update in the background: the daemon checks for newer releases, downloads and verifies them, then stages the new binary to be installed after the running daemon exits naturally. If an installed binary update is interrupted and you restore `copilotd.exe` by rerunning the normal install script, the next copilotd launch will reconcile any leftover `.old`, `.staged`, and `update-state.json` artifacts: it will resume a newer staged update, or discard stale staged state rather than downgrading the restored binary. When running from source or a local repo publish, copilotd suppresses automatic background self-updates by default so local scenario verification is not interrupted by GitHub releases. You can still disable them explicitly with `COPILOTD_DISABLE_SELF_UPDATES=1` or `--disable-self-updates`, and `copilotd update --check` remains available to inspect update availability.
 
@@ -356,6 +358,8 @@ To disable the control session, set `enable_control_session` to `false` in `~/.c
 ## Configuration
 
 Stored in `~/.copilotd/` by default. Set `COPILOTD_HOME` to point copilotd at a different state/config directory:
+
+When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copilotd.cmd`, the helper script defaults `COPILOTD_HOME` to a repo-local `.copilotd-home` directory unless you already set `COPILOTD_HOME` yourself.
 
 - `config.json` — user-managed settings (repo home, custom prompt, rules)
 - `state.json` — runtime session tracking (auto-managed, self-healing)
