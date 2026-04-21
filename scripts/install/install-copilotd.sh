@@ -568,25 +568,89 @@ get_shell_profile() {
     esac
 }
 
-ensure_path_contains() {
+try_symlink_to_existing_path_dir() {
+    local binary_path="$1"
+    local binary_name
+    binary_name=$(basename "$binary_path")
+
+    # Only attempt on Linux — macOS has no standard user-writable PATH directory
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        log_verbose "Skipping symlink strategy (not Linux)."
+        return 1
+    fi
+
+    # Well-known user bin directories, in preference order
+    local candidate_dirs=("${HOME}/.local/bin" "${HOME}/bin")
+
+    for candidate in "${candidate_dirs[@]}"; do
+        if ! echo ":${PATH}:" | grep -q ":${candidate}:"; then
+            log_verbose "'$candidate' is not on PATH; skipping."
+            continue
+        fi
+
+        if [[ ! -d "$candidate" ]]; then
+            log_verbose "'$candidate' is on PATH but does not exist; creating it."
+            if ! mkdir -p "$candidate" 2>/dev/null; then
+                log_verbose "Failed to create '$candidate'; skipping."
+                continue
+            fi
+        fi
+
+        local link_path="${candidate}/${binary_name}"
+
+        # If something already exists at the link path, handle it
+        if [[ -e "$link_path" || -L "$link_path" ]]; then
+            if [[ -L "$link_path" ]]; then
+                local existing_target
+                existing_target=$(readlink -f "$link_path" 2>/dev/null || readlink "$link_path")
+                local resolved_binary
+                resolved_binary=$(readlink -f "$binary_path" 2>/dev/null || readlink "$binary_path" || echo "$binary_path")
+                if [[ "$existing_target" == "$resolved_binary" ]]; then
+                    log_verbose "Symlink '$link_path' already points to '$binary_path'."
+                    echo "copilotd is available via existing symlink '$link_path'."
+                    return 0
+                fi
+                log_verbose "Updating symlink '$link_path' (was '$existing_target', now '$binary_path')."
+                if ! ln -sf "$binary_path" "$link_path" 2>/dev/null; then
+                    log_verbose "Failed to update symlink '$link_path'; skipping."
+                    continue
+                fi
+            else
+                # Regular file or directory — don't overwrite
+                log_verbose "'$link_path' exists and is not a symlink; skipping."
+                continue
+            fi
+        else
+            if ! ln -s "$binary_path" "$link_path" 2>/dev/null; then
+                log_verbose "Failed to create symlink '$link_path'; skipping."
+                continue
+            fi
+        fi
+
+        echo "Created symlink '$link_path' → '$binary_path'."
+        echo "copilotd is available in your current shell session."
+        return 0
+    done
+
+    log_verbose "No suitable existing PATH directory found for symlink."
+    return 1
+}
+
+ensure_path_in_profile() {
     local entry="$1"
 
-    # Check current session PATH
+    # Check if already on PATH (profile may already handle it)
     if echo ":${PATH}:" | grep -q ":${entry}:"; then
         log_verbose "'$entry' is already in the current session PATH."
         return 1
     fi
 
-    # Update current session
-    export PATH="${entry}:${PATH}"
-
     # Update shell profile
     local profile
     profile=$(get_shell_profile)
 
-    if [[ -f "$profile" ]] && grep -q "$entry" "$profile" 2>/dev/null; then
+    if [[ -f "$profile" ]] && grep -Fq "$entry" "$profile" 2>/dev/null; then
         log_verbose "'$entry' is already in '$profile'."
-        echo "Added '$entry' to current session PATH."
         return 0
     fi
 
@@ -600,14 +664,53 @@ ensure_path_contains() {
         path_line="export PATH=\"${entry}:\$PATH\""
     fi
 
+    local profile_dir
+    profile_dir=$(dirname "$profile")
+    if [[ ! -d "$profile_dir" ]]; then
+        mkdir -p "$profile_dir" 2>/dev/null || true
+    fi
+
     {
         echo ""
         echo "# Added by copilotd installer"
         echo "$path_line"
     } >> "$profile"
 
-    echo "Added '$entry' to current session PATH."
-    echo "Added '$entry' to '$profile' (will take effect in new terminal sessions)."
+    echo "Added '$entry' to '$profile' for future terminal sessions."
+    return 0
+}
+
+ensure_path_contains() {
+    local install_dir="$1"
+    local binary_path="${install_dir}/copilotd"
+    local already_on_path=false
+
+    # Check if already on PATH
+    if echo ":${PATH}:" | grep -q ":${install_dir}:"; then
+        log_verbose "'$install_dir' is already in the current session PATH."
+        already_on_path=true
+    fi
+
+    # Always ensure profile is updated for future sessions
+    ensure_path_in_profile "$install_dir" || true
+
+    if [[ "$already_on_path" == true ]]; then
+        return 0
+    fi
+
+    # Strategy 1 (Linux): symlink into a directory already on PATH
+    if try_symlink_to_existing_path_dir "$binary_path"; then
+        return 0
+    fi
+
+    # Strategy 2: print instructions for current session
+    local profile
+    profile=$(get_shell_profile)
+    echo ""
+    echo "To use copilotd in this terminal session, run:"
+    echo "  source ${profile}"
+    echo ""
+    echo "Or open a new terminal session."
     return 0
 }
 
