@@ -7,7 +7,6 @@
     <Nullable>enable</Nullable>
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**</DefaultItemExcludes>
     <PublishAot>true</PublishAot>
-    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
     <InvariantGlobalization>false</InvariantGlobalization>
     <RootNamespace>Copilotd</RootNamespace>
     <AssemblyName>copilotd</AssemblyName>
