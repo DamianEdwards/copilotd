@@ -134,6 +134,7 @@ public sealed class CopilotdConfig
         AVAILABLE COMMANDS (run these in the terminal):
         - `$(copilotd.command) status`                          — Show daemon health, watched repos, and session summary
         - `$(copilotd.command) session list [--all]`             — List active sessions (--all includes completed/failed)
+        - `$(copilotd.command) session info <issue>`             — Show detailed information for a tracked session
         - `$(copilotd.command) session list --filter <status>`   — Filter by status: pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined (legacy)
         - `$(copilotd.command) session reset <issue>`            — Reset a session for re-dispatch (e.g., "org/repo#42")
         - `$(copilotd.command) session complete <issue>`         — Mark a session as completed

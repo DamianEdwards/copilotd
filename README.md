@@ -54,6 +54,7 @@ The `init` command is an interactive wizard that walks you through:
 3. **Global settings** — max concurrent sessions, default model
 4. **Default rule** — author filtering, required labels, tool permissions (yolo/allow-all-tools/allow-all-urls), model override
 5. **Repository selection** — pick which repos to watch (shows clone status)
+6. **Folder trust checks** — for cloned repos, prompts to add the repo path and daemon worktree root to Copilot's trusted folders when needed for unattended dispatch
 
 After setup, a configuration summary and concrete next-step commands are displayed.
 
@@ -99,6 +100,7 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd logs clear [--days <n>]` | Clear log files, optionally only those older than the supplied age |
 | `copilotd session` | List dispatched sessions with their remote session URLs (`copilotd sessions` also works; default alias for `session list`) |
 | `copilotd session list` | List dispatched sessions with optional filtering and remote session URLs |
+| `copilotd session info <issue>` | Show detailed diagnostic information for a tracked session, including failure details when available |
 | `copilotd session connect <issue>` | Connect to a running remote session interactively |
 | `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
@@ -336,6 +338,7 @@ sessions, and more — all via natural language.
 |---------|-------------|
 | `copilotd status` | Show daemon health, watched repos, the control session URL, and session summary |
 | `copilotd session list [--all]` | List active sessions and remote session URLs (use `--all` to include completed/failed) |
+| `copilotd session info <issue>` | Show detailed information for one tracked session |
 | `copilotd session reset <issue>` | Reset a session for re-dispatch |
 | `copilotd session complete <issue>` | Mark a session as completed |
 | `copilotd rules list` | Show configured dispatch rules |

@@ -124,6 +124,12 @@ public sealed class DispatchSession
     public DateTimeOffset? LastFailureAt { get; set; }
 
     /// <summary>
+    /// Optional diagnostic detail explaining why the session most recently failed.
+    /// Shown by <c>copilotd session info</c> when available.
+    /// </summary>
+    public string? FailureDetail { get; set; }
+
+    /// <summary>
     /// True when the session was explicitly marked complete by the copilot session itself
     /// (via 'copilotd session complete'). Prevents automatic re-dispatch even if the issue
     /// still matches rules.

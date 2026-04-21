@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.CommandLine.Help;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
+using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
@@ -191,8 +192,12 @@ public static class RulesCommand
             var logger = services.GetRequiredService<ILogger<Program>>();
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
+                var copilotCli = services.GetRequiredService<CopilotCliService>();
+                var copilotTrust = services.GetRequiredService<CopilotTrustService>();
+                var repoResolver = services.GetRequiredService<RepoPathResolver>();
                 var stateStore = services.GetRequiredService<StateStore>();
                 var config = stateStore.LoadConfig();
+                var state = stateStore.LoadState();
 
                 var name = parseResult.GetValue(nameArg)!;
 
@@ -241,6 +246,13 @@ public static class RulesCommand
                 }
 
                 config.Rules[name] = rule;
+                CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                    copilotTrust,
+                    repoResolver,
+                    copilotCli,
+                    config,
+                    state,
+                    rule.Repos);
                 stateStore.SaveConfig(config);
                 ConsoleOutput.Success($"Rule '{name}' added.");
                 return 0;
@@ -299,8 +311,12 @@ public static class RulesCommand
             var logger = services.GetRequiredService<ILogger<Program>>();
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
+                var copilotCli = services.GetRequiredService<CopilotCliService>();
+                var copilotTrust = services.GetRequiredService<CopilotTrustService>();
+                var repoResolver = services.GetRequiredService<RepoPathResolver>();
                 var stateStore = services.GetRequiredService<StateStore>();
                 var config = stateStore.LoadConfig();
+                var state = stateStore.LoadState();
 
                 var name = parseResult.GetValue(nameArg)!;
 
@@ -398,6 +414,17 @@ public static class RulesCommand
                 if (rule.Authors.Count > 0 && rule.AuthorMode == AuthorMode.Any)
                 {
                     rule.AuthorMode = AuthorMode.Allowed;
+                }
+
+                if (addRepos.Length > 0)
+                {
+                    CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                        copilotTrust,
+                        repoResolver,
+                        copilotCli,
+                        config,
+                        state,
+                        addRepos);
                 }
 
                 stateStore.SaveConfig(config);

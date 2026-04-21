@@ -22,7 +22,10 @@ public static class InitCommand
             {
                 var ghCli = services.GetRequiredService<GhCliService>();
                 var copilotCli = services.GetRequiredService<CopilotCliService>();
+                var copilotTrust = services.GetRequiredService<CopilotTrustService>();
                 var stateStore = services.GetRequiredService<StateStore>();
+                var repoResolver = services.GetRequiredService<RepoPathResolver>();
+                var state = stateStore.LoadState();
 
                 // ── Phase 1: Dependencies & Auth ──────────────────────────
                 AnsiConsole.Write(new Rule("[bold blue]Dependencies & Authentication[/]").LeftJustified());
@@ -258,7 +261,6 @@ public static class InitCommand
                 else
                 {
                     // Check which repos are cloned locally under RepoHome (single scan, not per-repo)
-                    var repoResolver = services.GetRequiredService<RepoPathResolver>();
                     var cloneStatus = repoResolver.BuildCloneStatusMap(repos, config);
 
                     var clonedCount = cloneStatus.Values.Count(v => v);
@@ -301,6 +303,13 @@ public static class InitCommand
                     }
 
                     defaultRule.Repos = selected;
+                    CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                        copilotTrust,
+                        repoResolver,
+                        copilotCli,
+                        config,
+                        state,
+                        selected);
                 }
                 AnsiConsole.WriteLine();
 

@@ -35,6 +35,12 @@ public static class CopilotdPaths
             ? $"{GetCopilotdHomeDirectory()} (from {HomeEnvVar})"
             : GetCopilotdHomeDirectory();
 
+    public static string GetCopilotHomeDirectory()
+        => Path.Combine(GetUserProfileDirectory(), ".copilot");
+
+    public static string GetCopilotConfigPath()
+        => Path.Combine(GetCopilotHomeDirectory(), "config.json");
+
     public static string GetLogsDirectory()
         => Path.Combine(GetCopilotdHomeDirectory(), "logs");
 }

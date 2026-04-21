@@ -1,5 +1,6 @@
 using System.CommandLine;
 using Copilotd.Infrastructure;
+using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
@@ -20,6 +21,9 @@ public static class ConfigCommand
             var logger = services.GetRequiredService<ILogger<Program>>();
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
+                var copilotCli = services.GetRequiredService<CopilotCliService>();
+                var copilotTrust = services.GetRequiredService<CopilotTrustService>();
+                var repoResolver = services.GetRequiredService<RepoPathResolver>();
                 var stateStore = services.GetRequiredService<StateStore>();
                 var setValue = parseResult.GetValue(setOption);
 
@@ -91,6 +95,16 @@ public static class ConfigCommand
                             value = CopilotdPaths.ExpandUserProfile(value);
                         }
                         cfg.RepoHome = Path.GetFullPath(value);
+                        CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                            copilotTrust,
+                            repoResolver,
+                            copilotCli,
+                            cfg,
+                            stateStore.LoadState(),
+                            cfg.Rules.Values
+                                .SelectMany(rule => rule.Repos)
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList());
                         ConsoleOutput.Success($"repo_home set to: {cfg.RepoHome}");
                         break;
 

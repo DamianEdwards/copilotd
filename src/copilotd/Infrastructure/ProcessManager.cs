@@ -121,6 +121,7 @@ public sealed partial class ProcessManager
             }
 
             session.Status = SessionStatus.Running;
+            session.FailureDetail = null;
             session.UpdatedAt = DateTimeOffset.UtcNow;
             session.LastVerifiedAt = DateTimeOffset.UtcNow;
 

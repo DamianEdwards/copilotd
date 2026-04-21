@@ -23,6 +23,7 @@ public static class SessionCommand
         command.Aliases.Add("sessions");
 
         command.Subcommands.Add(CreateListCommand(services));
+        command.Subcommands.Add(CreateInfoCommand(services));
         command.Subcommands.Add(CreateConnectCommand(services));
         command.Subcommands.Add(CreateCommentCommand(services));
         command.Subcommands.Add(CreateCompleteCommand(services));
@@ -97,6 +98,59 @@ public static class SessionCommand
                 var showAll = parseResult.GetValue(allOption);
 
                 return RenderSessionList(stateStore, processManager, remoteSessionUrls, config, filterValue, showAll);
+            }, logger);
+        });
+
+        return command;
+    }
+
+    // ---- info subcommand ----
+
+    private static Command CreateInfoCommand(IServiceProvider services)
+    {
+        var command = new Command("info", "Show detailed information for a tracked session");
+
+        var issueArg = new Argument<string>("issue") { Description = "Issue key to inspect (e.g., owner/repo#123)" };
+        command.Arguments.Add(issueArg);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            return await ConsoleOutput.RunWithErrorHandling(async () =>
+            {
+                var stateStore = services.GetRequiredService<StateStore>();
+                var processManager = services.GetRequiredService<ProcessManager>();
+                var repoResolver = services.GetRequiredService<RepoPathResolver>();
+                var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
+                var config = stateStore.LoadConfig();
+                var issueKey = parseResult.GetValue(issueArg)!;
+
+                DispatchSession? session = null;
+                stateStore.WithStateLock(() =>
+                {
+                    var state = stateStore.LoadState();
+                    if (state.Sessions.TryGetValue(issueKey, out var existing))
+                        session = CreateSessionSnapshot(existing);
+                }, ct);
+
+                if (session is null)
+                {
+                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
+                    ConsoleOutput.Info("Use 'copilotd session list --all' to see all tracked sessions.");
+                    return 1;
+                }
+
+                var liveness = session.Status is SessionStatus.Dispatching or SessionStatus.Running or SessionStatus.Joined
+                    ? processManager.CheckProcess(session)
+                    : (ProcessLivenessResult?)null;
+
+                var remoteUrl = remoteSessionUrls.TryResolve(session, config.CurrentUser);
+                var remoteTaskId = remoteSessionUrls.TryResolveTaskId(session, config.CurrentUser);
+                var state = stateStore.LoadState();
+                var repoPath = repoResolver.ResolveRepoPath(session.Repo, config, state);
+
+                RenderSessionInfo(session, repoPath, remoteUrl, remoteTaskId, liveness);
+                return 0;
             }, logger);
         });
 
@@ -363,6 +417,7 @@ public static class SessionCommand
 
                     trackedProcess = CaptureTrackedProcess(session);
                     session.Status = SessionStatus.WaitingForFeedback;
+                    session.FailureDetail = null;
                     session.WaitingSince = DateTimeOffset.UtcNow;
                     ClearTrackedProcess(session);
                     session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -424,6 +479,7 @@ public static class SessionCommand
 
                     trackedProcess = CaptureTrackedProcess(session);
                     session.Status = SessionStatus.Completed;
+                    session.FailureDetail = null;
                     session.CompletedBySession = true;
                     ClearTrackedProcess(session);
                     session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -502,6 +558,7 @@ public static class SessionCommand
                     trackedProcess = CaptureTrackedProcess(session);
                     session.PullRequestNumber = prNumber;
                     session.Status = SessionStatus.WaitingForReview;
+                    session.FailureDetail = null;
                     session.WaitingSince = DateTimeOffset.UtcNow;
                     ClearTrackedProcess(session);
                     session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -566,6 +623,7 @@ public static class SessionCommand
                     processManager.CleanupWorktree(session, config, state);
 
                     session.Status = SessionStatus.Pending;
+                    session.FailureDetail = null;
                     session.CompletedBySession = false;
                     session.PullRequestNumber = null;
                     session.CopilotSessionId = Guid.NewGuid().ToString();
@@ -684,6 +742,7 @@ public static class SessionCommand
 
         RenderSessionTable(list);
         Console.WriteLine();
+        RenderFailedSessionHints(list);
         RenderRemoteSessionUrls(list, remoteSessionUrls, config.CurrentUser);
 
         ConsoleOutput.Info($"{list.Count} session(s)");
@@ -746,6 +805,22 @@ public static class SessionCommand
         AnsiConsole.Write(table);
     }
 
+    private static void RenderFailedSessionHints(List<DispatchSession> sessions)
+    {
+        var failedSessions = sessions
+            .Where(session => session.Status == SessionStatus.Failed)
+            .Select(session => session.IssueKey)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (failedSessions.Count == 0)
+            return;
+
+        foreach (var issueKey in failedSessions)
+            ConsoleOutput.Warning($"For full failure details, run: copilotd session info {issueKey}");
+
+        Console.WriteLine();
+    }
+
     private static void RenderRemoteSessionUrls(List<DispatchSession> sessions,
         GitHubRemoteSessionUrlResolver remoteSessionUrls, string? currentUser)
     {
@@ -767,6 +842,73 @@ public static class SessionCommand
             SessionStatus.Pending or SessionStatus.Dispatching or SessionStatus.Running => "not yet available",
             _ => "unavailable"
         };
+
+    private static void RenderSessionInfo(
+        DispatchSession session,
+        string? repoPath,
+        string? remoteUrl,
+        string? remoteTaskId,
+        ProcessLivenessResult? liveness)
+    {
+        var table = new Table();
+        table.Border(TableBorder.Rounded);
+        table.ShowRowSeparators = true;
+        table.AddColumn(new TableColumn("[bold]Field[/]").NoWrap());
+        table.AddColumn(new TableColumn("[bold]Value[/]"));
+
+        table.AddRow("Issue", Markup.Escape(session.IssueKey));
+        table.AddRow("Repo", Markup.Escape(session.Repo));
+        table.AddRow("Issue number", Markup.Escape(session.IssueNumber.ToString()));
+        table.AddRow("Rule", Markup.Escape(session.RuleName));
+        table.AddRow("Status", Markup.Escape(session.Status.ToString()));
+        table.AddRow("Issue author", Markup.Escape(session.IssueAuthor ?? "(unknown)"));
+        table.AddRow("Created", Markup.Escape(session.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
+        table.AddRow("Updated", Markup.Escape(session.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
+        table.AddRow("Last verified", Markup.Escape(FormatOptionalTime(session.LastVerifiedAt)));
+        table.AddRow("Last failure", Markup.Escape(FormatOptionalTime(session.LastFailureAt)));
+        table.AddRow("Retry count", Markup.Escape(session.RetryCount.ToString()));
+        table.AddRow("Redispatch count", Markup.Escape(session.RedispatchCount.ToString()));
+        table.AddRow("Completed by session", Markup.Escape(session.CompletedBySession ? "yes" : "no"));
+        table.AddRow("Waiting since", Markup.Escape(FormatOptionalTime(session.WaitingSince)));
+        table.AddRow("Pull request", Markup.Escape(session.PullRequestNumber?.ToString() ?? "-"));
+        table.AddRow("Process ID", Markup.Escape(session.ProcessId?.ToString() ?? "-"));
+        table.AddRow("Process start", Markup.Escape(FormatOptionalTime(session.ProcessStartTime)));
+        table.AddRow("Process liveness", Markup.Escape(FormatOptionalLiveness(liveness)));
+        table.AddRow("Session ID", Markup.Escape(string.IsNullOrEmpty(session.CopilotSessionId) ? "-" : session.CopilotSessionId));
+        table.AddRow("Remote task ID", Markup.Escape(remoteTaskId ?? "-"));
+        table.AddRow("Remote URL", Markup.Escape(remoteUrl ?? GetUnavailableRemoteSessionUrlMessage(session)));
+        table.AddRow("Repo path", Markup.Escape(NormalizeDisplayPath(repoPath) ?? "-"));
+        table.AddRow("Worktree path", Markup.Escape(NormalizeDisplayPath(session.WorktreePath) ?? "-"));
+        table.AddRow("Branch", Markup.Escape(session.BranchName ?? "-"));
+        table.AddRow("Failure detail", Markup.Escape(session.FailureDetail ?? "(none)"));
+
+        AnsiConsole.Write(table);
+
+        if (session.Status == SessionStatus.Failed && !string.IsNullOrWhiteSpace(session.FailureDetail))
+        {
+            Console.WriteLine();
+            ConsoleOutput.Warning($"After resolving the issue above, run 'copilotd session reset {session.IssueKey}' to queue a new dispatch.");
+        }
+    }
+
+    private static string FormatOptionalTime(DateTimeOffset? time)
+        => time.HasValue
+            ? time.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")
+            : "-";
+
+    private static string FormatOptionalLiveness(ProcessLivenessResult? liveness)
+        => liveness switch
+        {
+            ProcessLivenessResult.Alive => "alive",
+            ProcessLivenessResult.Dead => "dead",
+            ProcessLivenessResult.PidReused => "pid reused",
+            _ => "-",
+        };
+
+    private static string? NormalizeDisplayPath(string? path)
+        => string.IsNullOrWhiteSpace(path)
+            ? null
+            : path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
 
     public static string FormatTime(DateTimeOffset time)
     {
@@ -798,6 +940,33 @@ public static class SessionCommand
 
     private static TrackedProcessRef CaptureTrackedProcess(DispatchSession session)
         => new(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+
+    private static DispatchSession CreateSessionSnapshot(DispatchSession session)
+        => new()
+        {
+            IssueKey = session.IssueKey,
+            Repo = session.Repo,
+            IssueNumber = session.IssueNumber,
+            RuleName = session.RuleName,
+            IssueAuthor = session.IssueAuthor,
+            CopilotSessionId = session.CopilotSessionId,
+            ProcessId = session.ProcessId,
+            ProcessStartTime = session.ProcessStartTime,
+            Status = session.Status,
+            CreatedAt = session.CreatedAt,
+            UpdatedAt = session.UpdatedAt,
+            LastVerifiedAt = session.LastVerifiedAt,
+            RetryCount = session.RetryCount,
+            LastFailureAt = session.LastFailureAt,
+            FailureDetail = session.FailureDetail,
+            CompletedBySession = session.CompletedBySession,
+            WaitingSince = session.WaitingSince,
+            PullRequestNumber = session.PullRequestNumber,
+            RedispatchCount = session.RedispatchCount,
+            LastRedispatchWasIssueComment = session.LastRedispatchWasIssueComment,
+            WorktreePath = session.WorktreePath,
+            BranchName = session.BranchName,
+        };
 
     private static void ClearTrackedProcess(DispatchSession session)
     {

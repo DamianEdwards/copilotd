@@ -17,17 +17,23 @@ namespace Copilotd.Services;
 public sealed class ReconciliationEngine
 {
     private readonly ProcessManager _processManager;
+    private readonly RepoPathResolver _repoResolver;
+    private readonly CopilotTrustService _copilotTrustService;
     private readonly GhCliService _ghCli;
     private readonly StateStore _stateStore;
     private readonly ILogger<ReconciliationEngine> _logger;
 
     public ReconciliationEngine(
         ProcessManager processManager,
+        RepoPathResolver repoResolver,
+        CopilotTrustService copilotTrustService,
         GhCliService ghCli,
         StateStore stateStore,
         ILogger<ReconciliationEngine> logger)
     {
         _processManager = processManager;
+        _repoResolver = repoResolver;
+        _copilotTrustService = copilotTrustService;
         _ghCli = ghCli;
         _stateStore = stateStore;
         _logger = logger;
@@ -121,6 +127,7 @@ public sealed class ReconciliationEngine
                     // No PID tracked — join process never saved it or state is stale
                     _logger.LogInformation("Joined session {Key} has no tracked PID, resetting to Pending", key);
                     session.Status = SessionStatus.Pending;
+                    session.FailureDetail = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     continue;
                 }
@@ -130,6 +137,7 @@ public sealed class ReconciliationEngine
                 {
                     _logger.LogInformation("Joined session {Key} interactive process is gone, resetting to Pending", key);
                     session.Status = SessionStatus.Pending;
+                    session.FailureDetail = null;
                     session.ProcessId = null;
                     session.ProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -149,12 +157,14 @@ public sealed class ReconciliationEngine
                 case ProcessLivenessResult.Dead:
                     _logger.LogInformation("Session {Key} PID {Pid} is dead, marking orphaned", key, session.ProcessId);
                     session.Status = SessionStatus.Orphaned;
+                    session.FailureDetail = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     break;
 
                 case ProcessLivenessResult.PidReused:
                     _logger.LogWarning("Session {Key} PID {Pid} was reused by another process, marking orphaned", key, session.ProcessId);
                     session.Status = SessionStatus.Orphaned;
+                    session.FailureDetail = null;
                     session.ProcessId = null;
                     session.ProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -260,6 +270,7 @@ public sealed class ReconciliationEngine
                 {
                     _logger.LogInformation("Issue {Key} no longer matches rules, completing waiting session", key);
                     session.Status = SessionStatus.Completed;
+                    session.FailureDetail = null;
                     session.WaitingSince = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     _processManager.CleanupWorktree(session, config, state);
@@ -271,6 +282,7 @@ public sealed class ReconciliationEngine
                 {
                     _logger.LogInformation("Issue {Key} no longer matches rules, completing PR review session", key);
                     session.Status = SessionStatus.Completed;
+                    session.FailureDetail = null;
                     session.WaitingSince = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     _processManager.CleanupWorktree(session, config, state);
@@ -293,6 +305,7 @@ public sealed class ReconciliationEngine
             foreach (var session in toTerminate)
             {
                 session.Status = SessionStatus.Completed;
+                session.FailureDetail = null;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
                 _processManager.CleanupWorktree(session, config, state);
             }
@@ -359,6 +372,7 @@ public sealed class ReconciliationEngine
                                     commentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
                                 // Keep same CopilotSessionId so --resume preserves context
                                 existing.Status = SessionStatus.Pending;
+                                existing.FailureDetail = null;
                                 existing.RedispatchCount++;
                                 existing.LastRedispatchWasIssueComment = true;
                                 existing.WaitingSince = null;
@@ -383,6 +397,7 @@ public sealed class ReconciliationEngine
                                 _logger.LogInformation("PR #{Pr} for {Key} is {State}, completing session",
                                     existing.PullRequestNumber, issueKey, prState);
                                 existing.Status = SessionStatus.Completed;
+                                existing.FailureDetail = null;
                                 existing.CompletedBySession = true;
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
@@ -431,6 +446,7 @@ public sealed class ReconciliationEngine
                                         reviewInfo.Author, existing.PullRequestNumber, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
                                     // Keep same CopilotSessionId so --resume preserves context
                                     existing.Status = SessionStatus.Pending;
+                                    existing.FailureDetail = null;
                                     existing.RedispatchCount++;
                                     existing.LastRedispatchWasIssueComment = false;
                                     existing.WaitingSince = null;
@@ -480,6 +496,7 @@ public sealed class ReconciliationEngine
                                 _logger.LogInformation("New issue comment from {Author} detected on {Key} while waiting for PR review, re-dispatching session (redispatch {N}/{Max})",
                                     issueCommentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
                                 existing.Status = SessionStatus.Pending;
+                                existing.FailureDetail = null;
                                 existing.RedispatchCount++;
                                 existing.LastRedispatchWasIssueComment = true;
                                 existing.WaitingSince = null;
@@ -499,6 +516,7 @@ public sealed class ReconciliationEngine
                             issueKey, existing.RetryCount + 1, DispatchSession.MaxRetries);
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
+                        existing.FailureDetail = null;
                         existing.RetryCount++;
                         existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
@@ -516,6 +534,8 @@ public sealed class ReconciliationEngine
                         {
                             _logger.LogWarning("Session {Key} exceeded max retries, marking failed", issueKey);
                             existing.Status = SessionStatus.Failed;
+                            existing.FailureDetail ??= $"The session exceeded the maximum retry count ({DispatchSession.MaxRetries}). " +
+                                $"Resolve the underlying issue, then run 'copilotd session reset {issueKey}'.";
                             existing.UpdatedAt = DateTimeOffset.UtcNow;
                             continue;
                         }
@@ -532,6 +552,7 @@ public sealed class ReconciliationEngine
                         _logger.LogInformation("Issue {Key} re-matched after completion, re-dispatching", issueKey);
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
+                        existing.FailureDetail = null;
                         existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
                         existing.LastRedispatchWasIssueComment = false;
@@ -590,17 +611,39 @@ public sealed class ReconciliationEngine
 
         foreach (var session in toDispatch)
         {
+            var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
+            if (!string.IsNullOrEmpty(mainRepoPath) && Directory.Exists(mainRepoPath))
+            {
+                var trustCheck = _copilotTrustService.CheckTrustedFolders(_copilotTrustService.GetRequiredTrustedFolders(mainRepoPath));
+                switch (trustCheck.Status)
+                {
+                    case CopilotTrustStatus.Unknown:
+                        _logger.LogWarning("Could not verify Copilot folder trust for {Key}: {Message}",
+                            session.IssueKey, trustCheck.Message ?? "unknown trust verification error");
+                        break;
+
+                    case CopilotTrustStatus.Untrusted:
+                        _logger.LogWarning("Copilot folder trust missing for {Key}: {Folders}",
+                            session.IssueKey, string.Join(", ", trustCheck.MissingFolders));
+                        MarkSessionFailed(session, BuildTrustFailureDetail(session, trustCheck));
+                        _stateStore.SaveState(state);
+                        continue;
+
+                    case CopilotTrustStatus.Trusted:
+                        break;
+                }
+            }
+
             session.Status = SessionStatus.Dispatching;
+            session.FailureDetail = null;
             session.UpdatedAt = DateTimeOffset.UtcNow;
 
             // Create worktree for isolated working directory
             if (!_processManager.PrepareWorktree(session, config, state))
             {
                 _logger.LogWarning("Failed to prepare worktree for {Key}", session.IssueKey);
-                session.Status = SessionStatus.Failed;
-                session.RetryCount++;
-                session.LastFailureAt = DateTimeOffset.UtcNow;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
+                MarkSessionFailed(session,
+                    $"Failed to prepare the git worktree for dispatch. Verify the local clone for {session.Repo} is healthy, then run 'copilotd session reset {session.IssueKey}'.");
                 _stateStore.SaveState(state);
                 continue;
             }
@@ -616,10 +659,8 @@ public sealed class ReconciliationEngine
             if (result is null)
             {
                 _logger.LogWarning("Failed to launch copilot for {Key}", session.IssueKey);
-                session.Status = SessionStatus.Failed;
-                session.RetryCount++;
-                session.LastFailureAt = DateTimeOffset.UtcNow;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
+                MarkSessionFailed(session,
+                    $"Failed to launch the Copilot CLI process. Review the copilotd logs, then run 'copilotd session reset {session.IssueKey}'.");
                 // Clean up the worktree we just created
                 _processManager.CleanupWorktree(session, config, state);
             }
@@ -692,6 +733,30 @@ public sealed class ReconciliationEngine
                 return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
         }
     }
+
+    private static void MarkSessionFailed(DispatchSession session, string detail)
+    {
+        session.Status = SessionStatus.Failed;
+        session.FailureDetail = detail;
+        session.RetryCount++;
+        session.LastFailureAt = DateTimeOffset.UtcNow;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+        session.ProcessId = null;
+        session.ProcessStartTime = null;
+    }
+
+    private string BuildTrustFailureDetail(DispatchSession session, CopilotTrustCheckResult trustCheck)
+    {
+        var folders = trustCheck.MissingFolders.Count > 0
+            ? string.Join(", ", trustCheck.MissingFolders)
+            : string.Join(", ", trustCheck.RequiredFolders);
+
+        return $"Copilot cannot dispatch this session because these folders are not trusted in {NormalizeDisplayPath(_copilotTrustService.ConfigPath)}: {folders}. " +
+            $"Trust the folders for all sessions in Copilot, then run 'copilotd session reset {session.IssueKey}'.";
+    }
+
+    private static string NormalizeDisplayPath(string path)
+        => path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
 
     /// <summary>
     /// Returns true if a session should wait before retrying, using exponential backoff.
