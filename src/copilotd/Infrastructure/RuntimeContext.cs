@@ -32,7 +32,7 @@ public sealed class RuntimeContext
     public string GetCopilotdCallbackCommand()
     {
         if (UsesDotnetSourceCommand)
-            return $"dotnet run --project \"{SourceProjectPath}\" --";
+            return $"dotnet run --project \"{SourceProjectPath}\" --no-build --";
 
         return "copilotd";
     }
