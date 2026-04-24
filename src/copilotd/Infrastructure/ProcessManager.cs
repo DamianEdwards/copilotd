@@ -939,19 +939,22 @@ public sealed partial class ProcessManager
     /// Creates a git worktree for the session on a new branch from the latest default branch.
     /// Layout: &lt;repo_home&gt;/org/repo_sessions/issue-N/
     /// If the session already has a worktree (e.g., re-dispatching for PR review), refreshes it instead.
+    /// Returns <see cref="WorktreeResult.CreatedNew"/> for new worktrees,
+    /// <see cref="WorktreeResult.Refreshed"/> for existing ones, or
+    /// <see cref="WorktreeResult.Failed"/> on error.
     /// </summary>
-    public bool PrepareWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
+    public WorktreeResult PrepareWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
     {
         // If the session already has a worktree (PR review re-dispatch), refresh it
         if (!string.IsNullOrEmpty(session.WorktreePath) && Directory.Exists(session.WorktreePath))
         {
-            return RefreshWorktree(session);
+            return RefreshWorktree(session) ? WorktreeResult.Refreshed : WorktreeResult.Failed;
         }
         var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
         if (mainRepoPath is null || !Directory.Exists(mainRepoPath))
         {
             _logger.LogWarning("Main repo directory not found for {Repo}", session.Repo);
-            return false;
+            return WorktreeResult.Failed;
         }
 
         // Session dir: <repo_home>/org/repo_sessions/issue-N/
@@ -988,7 +991,7 @@ public sealed partial class ProcessManager
         if (!RunGit(mainRepoPath, "fetch origin"))
         {
             _logger.LogWarning("Failed to fetch origin for {Repo}", session.Repo);
-            return false;
+            return WorktreeResult.Failed;
         }
 
         // Determine default branch (origin/HEAD → origin/main or origin/master)
@@ -996,7 +999,7 @@ public sealed partial class ProcessManager
         if (defaultBranch is null)
         {
             _logger.LogWarning("Could not determine default branch for {Repo}", session.Repo);
-            return false;
+            return WorktreeResult.Failed;
         }
 
         // Generate a unique branch name with random suffix to avoid conflicts
@@ -1015,12 +1018,12 @@ public sealed partial class ProcessManager
         if (!RunGit(mainRepoPath, $"worktree add \"{worktreePath}\" -b {branchName} {defaultBranch}"))
         {
             _logger.LogWarning("Failed to create worktree for {Key}", session.IssueKey);
-            return false;
+            return WorktreeResult.Failed;
         }
 
         session.WorktreePath = worktreePath;
         _logger.LogInformation("Worktree ready for {Key} at {Path}", session.IssueKey, worktreePath);
-        return true;
+        return WorktreeResult.CreatedNew;
     }
 
     /// <summary>
@@ -1176,10 +1179,113 @@ public sealed partial class ProcessManager
         }
     }
 
+    private (bool Success, string Output) RunGitWithOutput(string workingDir, string arguments)
+    {
+        try
+        {
+            _logger.LogDebug("Running: git {Arguments} (in {Dir})", arguments, workingDir);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = arguments,
+                WorkingDirectory = workingDir,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                _logger.LogWarning("Failed to start git process for: git {Arguments}", arguments);
+                return (false, "");
+            }
+
+            // Read both streams asynchronously to avoid deadlock when pipe buffers fill
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+
+            if (!process.WaitForExit(TimeSpan.FromSeconds(30)))
+            {
+                _logger.LogWarning("git {Arguments} timed out after 30 seconds", arguments);
+                process.Kill();
+                return (false, "git command timed out");
+            }
+
+            var stdout = stdoutTask.GetAwaiter().GetResult();
+            var stderr = stderrTask.GetAwaiter().GetResult();
+
+            if (process.ExitCode != 0)
+            {
+                _logger.LogWarning("git {Arguments} failed (exit {ExitCode}): {StdErr}",
+                    arguments, process.ExitCode, stderr.Trim());
+                return (false, stderr);
+            }
+
+            return (true, stdout);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Exception running: git {Arguments}", arguments);
+            return (false, "");
+        }
+    }
+
     private bool RunGitCheck(string workingDir, string arguments)
     {
         return RunGit(workingDir, arguments);
     }
+
+    /// <summary>
+    /// Pushes the session branch to the remote and sets up upstream tracking.
+    /// Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    public bool PushBranch(DispatchSession session, CopilotdConfig config, DaemonState state)
+    {
+        if (string.IsNullOrEmpty(session.BranchName))
+        {
+            _logger.LogWarning("Cannot push branch for {Key}: no branch name set", session.IssueKey);
+            return false;
+        }
+
+        // Push from the worktree directory (shares the same git repo as the main checkout)
+        var workDir = session.WorktreePath;
+        if (string.IsNullOrEmpty(workDir) || !Directory.Exists(workDir))
+        {
+            // Fall back to the main repo path
+            workDir = _repoResolver.ResolveRepoPath(session.Repo, config, state);
+            if (workDir is null || !Directory.Exists(workDir))
+            {
+                _logger.LogWarning("Cannot push branch for {Key}: no working directory found", session.IssueKey);
+                return false;
+            }
+        }
+
+        _logger.LogInformation("Pushing branch {Branch} to origin for {Key}", session.BranchName, session.IssueKey);
+        return RunGit(workDir, $"push -u origin {session.BranchName}");
+    }
+
+    /// <summary>
+    /// Gets the HEAD commit SHA from the session's worktree directory.
+    /// Returns null if the worktree is unavailable or the command fails.
+    /// </summary>
+    public string? GetHeadSha(DispatchSession session)
+    {
+        if (string.IsNullOrEmpty(session.WorktreePath) || !Directory.Exists(session.WorktreePath))
+            return null;
+
+        var (success, output) = RunGitWithOutput(session.WorktreePath, "rev-parse HEAD");
+        return success ? output.Trim() : null;
+    }
+}
+
+public enum WorktreeResult
+{
+    Failed,
+    CreatedNew,
+    Refreshed,
 }
 
 public enum ProcessLivenessResult

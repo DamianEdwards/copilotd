@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Copilotd.Models;
 using Microsoft.Extensions.Logging;
 
@@ -610,5 +611,150 @@ public sealed class GhCliService
         var stderr = stderrTask.Result;
         var output = string.IsNullOrEmpty(stdout) ? stderr : stdout;
         return (process.ExitCode, output);
+    }
+
+    private (int ExitCode, string Output) RunGhWithStdin(string arguments, string stdinContent)
+    {
+        _logger.LogDebug("Running: gh {Args} (with stdin)", arguments);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "gh",
+            Arguments = arguments,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        using var process = Process.Start(psi);
+        if (process is null)
+        {
+            _logger.LogWarning("Failed to start gh process for: gh {Args}", arguments);
+            return (-1, "failed to start process");
+        }
+
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        process.StandardInput.Write(stdinContent);
+        process.StandardInput.Close();
+
+        var stdout = process.StandardOutput.ReadToEnd();
+
+        if (!process.WaitForExit(GhTimeout))
+        {
+            _logger.LogWarning("gh command timed out after {Timeout}s: gh {Args}", GhTimeout.TotalSeconds, arguments);
+            process.Kill();
+            return (-1, "gh command timed out");
+        }
+
+        var stderr = stderrTask.Result;
+        var output = string.IsNullOrEmpty(stdout) ? stderr : stdout;
+        return (process.ExitCode, output);
+    }
+
+    /// <summary>
+    /// Links a branch to a GitHub issue via the Development sidebar using the
+    /// <c>createLinkedBranch</c> GraphQL mutation. Call after pushing the branch
+    /// to the remote so the ref exists on GitHub.
+    /// Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    public bool LinkBranchToIssue(string repo, int issueNumber, string branchName, string commitSha)
+    {
+        var parts = repo.Split('/');
+        if (parts.Length != 2)
+        {
+            _logger.LogWarning("Cannot link branch: invalid repo format {Repo}", repo);
+            return false;
+        }
+        var owner = parts[0];
+        var repoName = parts[1];
+
+        // Step 1: Get the GitHub node IDs for the issue and repository
+        var idsRequest = new JsonObject
+        {
+            ["query"] = """
+                query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                        id
+                        issue(number: $number) { id }
+                    }
+                }
+                """,
+            ["variables"] = new JsonObject
+            {
+                ["owner"] = owner,
+                ["repo"] = repoName,
+                ["number"] = issueNumber,
+            },
+        };
+
+        var (idsExitCode, idsOutput) = RunGhWithStdin("api graphql --input -", idsRequest.ToJsonString());
+        if (idsExitCode != 0)
+        {
+            _logger.LogWarning("Failed to get GitHub node IDs for {Repo}#{Issue}: {Output}", repo, issueNumber, idsOutput);
+            return false;
+        }
+
+        string issueId, repoId;
+        try
+        {
+            using var doc = JsonDocument.Parse(idsOutput);
+            var data = doc.RootElement.GetProperty("data");
+            var repository = data.GetProperty("repository");
+            repoId = repository.GetProperty("id").GetString()!;
+            issueId = repository.GetProperty("issue").GetProperty("id").GetString()!;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse GitHub node IDs for {Repo}#{Issue}", repo, issueNumber);
+            return false;
+        }
+
+        // Step 2: Create the linked branch via GraphQL mutation
+        var mutationRequest = new JsonObject
+        {
+            ["query"] = """
+                mutation($issueId: ID!, $oid: GitObjectID!, $name: String!, $repositoryId: ID!) {
+                    createLinkedBranch(input: {issueId: $issueId, oid: $oid, name: $name, repositoryId: $repositoryId}) {
+                        linkedBranch { id }
+                    }
+                }
+                """,
+            ["variables"] = new JsonObject
+            {
+                ["issueId"] = issueId,
+                ["oid"] = commitSha,
+                ["name"] = $"refs/heads/{branchName}",
+                ["repositoryId"] = repoId,
+            },
+        };
+
+        var (mutExitCode, mutOutput) = RunGhWithStdin("api graphql --input -", mutationRequest.ToJsonString());
+        if (mutExitCode != 0)
+        {
+            _logger.LogWarning("Failed to link branch {Branch} to {Repo}#{Issue}: {Output}",
+                branchName, repo, issueNumber, mutOutput);
+            return false;
+        }
+
+        // Check for GraphQL-level errors in the response
+        try
+        {
+            using var doc = JsonDocument.Parse(mutOutput);
+            if (doc.RootElement.TryGetProperty("errors", out var errors))
+            {
+                _logger.LogWarning("GraphQL errors linking branch {Branch} to {Repo}#{Issue}: {Errors}",
+                    branchName, repo, issueNumber, errors.ToString());
+                return false;
+            }
+        }
+        catch
+        {
+            // Best-effort error check — if parsing fails, assume success
+        }
+
+        _logger.LogInformation("Linked branch {Branch} to {Repo}#{Issue}", branchName, repo, issueNumber);
+        return true;
     }
 }

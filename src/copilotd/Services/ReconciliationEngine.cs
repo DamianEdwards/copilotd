@@ -639,13 +639,29 @@ public sealed class ReconciliationEngine
             session.UpdatedAt = DateTimeOffset.UtcNow;
 
             // Create worktree for isolated working directory
-            if (!_processManager.PrepareWorktree(session, config, state))
+            var worktreeResult = _processManager.PrepareWorktree(session, config, state);
+            if (worktreeResult == WorktreeResult.Failed)
             {
                 _logger.LogWarning("Failed to prepare worktree for {Key}", session.IssueKey);
                 MarkSessionFailed(session,
                     $"Failed to prepare the git worktree for dispatch. Verify the local clone for {session.Repo} is healthy, then run 'copilotd session reset {session.IssueKey}'.");
                 _stateStore.SaveState(state);
                 continue;
+            }
+
+            // For newly created worktrees, push the branch and link it to the issue
+            // so it's visible on the GitHub issue UI immediately (best-effort)
+            if (worktreeResult == WorktreeResult.CreatedNew && !string.IsNullOrEmpty(session.BranchName))
+            {
+                // Push the branch to the remote and set up tracking
+                _processManager.PushBranch(session, config, state);
+
+                // Try to link the branch to the issue via GitHub's Development sidebar
+                var sha = _processManager.GetHeadSha(session);
+                if (sha is not null)
+                {
+                    _ghCli.LinkBranchToIssue(session.Repo, session.IssueNumber, session.BranchName, sha);
+                }
             }
 
             // We need the issue data for prompt building
