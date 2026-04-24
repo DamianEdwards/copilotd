@@ -215,7 +215,11 @@ public sealed class CopilotTrustService
             if (string.IsNullOrWhiteSpace(json))
                 throw new JsonException("Copilot config file is empty.");
 
-            var node = JsonNode.Parse(json);
+            var node = JsonNode.Parse(json, nodeOptions: null, new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
             if (node is not JsonObject root)
             {
                 return new ConfigReadResult
