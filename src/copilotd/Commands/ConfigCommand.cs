@@ -40,6 +40,7 @@ public static class ConfigCommand
                     table.AddRow("repo_home", Markup.Escape(config.RepoHome ?? "(not set)"));
                     table.AddRow("default_model", Markup.Escape(config.DefaultModel ?? "(not set)"));
                     table.AddRow("custom_prompt", Markup.Escape(string.IsNullOrEmpty(config.Prompt) ? "(not set)" : config.Prompt));
+                    table.AddRow("session_name_format", Markup.Escape(string.IsNullOrWhiteSpace(config.SessionNameFormat) ? "(disabled)" : config.SessionNameFormat));
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
                     table.AddRow("session_shutdown_delay_seconds", Markup.Escape(config.SessionShutdownDelaySeconds.ToString()));
@@ -122,6 +123,13 @@ public static class ConfigCommand
                             : "default_model cleared.");
                         break;
 
+                    case "session_name_format":
+                        cfg.SessionNameFormat = value;
+                        ConsoleOutput.Success(string.IsNullOrWhiteSpace(cfg.SessionNameFormat)
+                            ? "session_name_format cleared; session naming disabled."
+                            : $"session_name_format set to: {cfg.SessionNameFormat}");
+                        break;
+
                     case "max_instances":
                         if (int.TryParse(value, out var maxInst) && maxInst > 0)
                         {
@@ -151,7 +159,7 @@ public static class ConfigCommand
 
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, max_instances, session_shutdown_delay_seconds");
+                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, session_name_format, max_instances, session_shutdown_delay_seconds");
                         return 1;
                 }
 

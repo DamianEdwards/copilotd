@@ -119,7 +119,7 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd session pr <pr-number> <issue>` | Associate a PR with a session and wait for review feedback (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
-| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `max_instances`, `session_shutdown_delay_seconds`) |
+| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `session_name_format`, `max_instances`, `session_shutdown_delay_seconds`) |
 | `copilotd rules list` | List all dispatch rules (`copilotd rule list` also works) |
 | `copilotd rules add <name>` | Add a new dispatch rule (`copilotd rule create <name>` and `copilotd rule new <name>` also work) |
 | `copilotd rules update <name>` | Update an existing rule (`copilotd rule edit <name>` also works) |
@@ -178,7 +178,7 @@ copilotd rules update "Trusted" --add-author NewUser --delete-author OldUser
 
 ### Prompt templating
 
-The built-in prompt supports token replacement:
+The built-in prompt and `session_name_format` support token replacement:
 
 | Token | Value |
 |-------|-------|
@@ -187,11 +187,19 @@ The built-in prompt supports token replacement:
 | `$(issue.type)` | Issue type (e.g., `bug`) |
 | `$(issue.milestone)` | Milestone title |
 | `$(pr.id)` | Pull request number (available in PR review re-dispatch prompts) |
+| `$(org)` | Repository owner / organization |
+| `$(repo)` | Repository name only |
+| `$(issue_id)` | Issue number |
+| `$(session_id)` | Copilot session ID used with `--resume` |
+| `$(machine_name)` | Local machine name |
+| `$(gh_user)` | Authenticated GitHub username from copilotd config |
 
 Custom prompt text (configured via `custom_prompt` or `~/.copilotd/prompt.md` by default) is appended after
 the built-in prompt with a trailer. Rules can also specify a `custom_prompt` that either appends
 to or overrides the global custom prompt (controlled by `custom_prompt_mode`). Tokens are replaced
-in both the built-in and custom prompt text. Per-rule extra prompts are appended last.
+in both the built-in and custom prompt text. Per-rule extra prompts are appended last. By default,
+`session_name_format` is `(copilotd) $(org)/$(repo)#$(issue_id)`. Session naming is skipped when the
+installed Copilot CLI is older than `1.0.35` or if name generation fails.
 
 ## Session lifecycle
 
@@ -385,6 +393,7 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 | `repo_home` | — | Root directory where repos are cloned (`<org>/<repo>` sub-folders expected) |
 | `default_model` | *(none)* | Default model passed to copilot via `--model` for all sessions (rule-specific `model` overrides) |
 | `prompt` | *(empty)* | Custom prompt text appended to the built-in prompt |
+| `session_name_format` | `(copilotd) $(org)/$(repo)#$(issue_id)` | Session name template passed to `copilot --name` when the installed Copilot CLI supports it (`1.0.35+`) |
 | `max_instances` | `3` | Maximum concurrent copilot processes; excess sessions queue as Pending |
 | `session_shutdown_delay_seconds` | `15` | Delay before shutting down an orchestrated session after `session comment`, `session pr`, or `session complete` |
 | `max_redispatches` | `10` | Maximum re-dispatches per session via comment/review feedback loops before requiring manual reset |

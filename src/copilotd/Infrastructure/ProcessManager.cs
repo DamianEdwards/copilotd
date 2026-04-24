@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Copilotd.Commands;
 using Copilotd.Models;
+using Copilotd.Services;
 using Microsoft.Extensions.Logging;
+using NuGet.Versioning;
 using static Copilotd.Infrastructure.NativeInterop;
 
 namespace Copilotd.Infrastructure;
@@ -17,17 +19,25 @@ public sealed partial class ProcessManager
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan WindowsCopilotChildDiscoveryTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan WindowsCopilotChildDiscoveryPollInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly NuGetVersion MinimumNamedSessionVersion = new(1, 0, 35);
 
     private readonly StateStore _stateStore;
     private readonly RepoPathResolver _repoResolver;
     private readonly RuntimeContext _runtimeContext;
+    private readonly CopilotCliService _copilotCli;
     private readonly ILogger<ProcessManager> _logger;
 
-    public ProcessManager(StateStore stateStore, RepoPathResolver repoResolver, RuntimeContext runtimeContext, ILogger<ProcessManager> logger)
+    public ProcessManager(
+        StateStore stateStore,
+        RepoPathResolver repoResolver,
+        RuntimeContext runtimeContext,
+        CopilotCliService copilotCli,
+        ILogger<ProcessManager> logger)
     {
         _stateStore = stateStore;
         _repoResolver = repoResolver;
         _runtimeContext = runtimeContext;
+        _copilotCli = copilotCli;
         _logger = logger;
     }
 
@@ -46,10 +56,13 @@ public sealed partial class ProcessManager
         }
 
         var customPrompt = _stateStore.LoadCustomPrompt(config);
-        var prompt = BuildPrompt(customPrompt, issue, session, config, _runtimeContext.GetCopilotdCallbackCommand());
+        var copilotdCommand = _runtimeContext.GetCopilotdCallbackCommand();
+        var prompt = BuildPrompt(customPrompt, issue, session, config, copilotdCommand);
+        var sessionName = TryBuildSessionName(issue, session, config, copilotdCommand);
         var args = BuildArguments(
             session,
             prompt,
+            sessionName,
             config.Rules.GetValueOrDefault(session.RuleName),
             repoPath,
             config.DefaultModel,
@@ -738,15 +751,7 @@ public sealed partial class ProcessManager
         }
 
         // Replace tokens in the entire prompt (default + custom + extra)
-        prompt = prompt
-            .Replace("$(copilotd.command)", copilotdCommand, StringComparison.Ordinal)
-            .Replace("$(issue.repo)", issue.Repo)
-            .Replace("$(issue.id)", issue.Number.ToString())
-            .Replace("$(issue.type)", issue.Type ?? "issue")
-            .Replace("$(issue.milestone)", issue.Milestone ?? "none")
-            .Replace("$(pr.id)", session.PullRequestNumber?.ToString() ?? "");
-
-        return prompt;
+        return ExpandTemplate(prompt, issue, session, copilotdCommand, config.CurrentUser);
     }
 
     /// <summary>
@@ -800,14 +805,107 @@ public sealed partial class ProcessManager
         };
     }
 
-    private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule, string repoPath, string? defaultModel, IEnumerable<string> extraAllowedDirectories)
+    private string? TryBuildSessionName(GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand)
+    {
+        if (string.IsNullOrWhiteSpace(config.SessionNameFormat))
+            return null;
+
+        if (!_copilotCli.TryGetSemanticVersion(out var installedVersion, out var versionDisplay))
+        {
+            if (string.IsNullOrWhiteSpace(versionDisplay))
+            {
+                _logger.LogWarning(
+                    "Could not determine the installed copilot CLI version; skipping session name for {IssueKey}",
+                    session.IssueKey);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Could not parse copilot CLI version '{VersionDisplay}'; skipping session name for {IssueKey}",
+                    versionDisplay,
+                    session.IssueKey);
+            }
+
+            return null;
+        }
+
+        if (installedVersion < MinimumNamedSessionVersion)
+        {
+            _logger.LogWarning(
+                "copilot CLI {VersionDisplay} is older than {MinimumVersion}; skipping session name for {IssueKey}",
+                versionDisplay,
+                MinimumNamedSessionVersion,
+                session.IssueKey);
+            return null;
+        }
+
+        try
+        {
+            var sessionName = ExpandTemplate(config.SessionNameFormat, issue, session, copilotdCommand, config.CurrentUser).Trim();
+            if (string.IsNullOrWhiteSpace(sessionName))
+            {
+                _logger.LogWarning(
+                    "session_name_format resolved to an empty session name for {IssueKey}; skipping --name",
+                    session.IssueKey);
+                return null;
+            }
+
+            return sessionName;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to build session name for {IssueKey}; continuing without --name", session.IssueKey);
+            return null;
+        }
+    }
+
+    private static string ExpandTemplate(string template, GitHubIssue issue, DispatchSession session, string copilotdCommand, string? ghUser)
+    {
+        var (org, repo) = SplitRepoSlug(issue.Repo);
+
+        return template
+            .Replace("$(copilotd.command)", copilotdCommand, StringComparison.Ordinal)
+            .Replace("$(issue.repo)", issue.Repo, StringComparison.Ordinal)
+            .Replace("$(issue.id)", issue.Number.ToString(), StringComparison.Ordinal)
+            .Replace("$(issue.type)", issue.Type ?? "issue", StringComparison.Ordinal)
+            .Replace("$(issue.milestone)", issue.Milestone ?? "none", StringComparison.Ordinal)
+            .Replace("$(pr.id)", session.PullRequestNumber?.ToString() ?? "", StringComparison.Ordinal)
+            .Replace("$(org)", org, StringComparison.Ordinal)
+            .Replace("$(repo)", repo, StringComparison.Ordinal)
+            .Replace("$(issue_id)", issue.Number.ToString(), StringComparison.Ordinal)
+            .Replace("$(session_id)", session.CopilotSessionId, StringComparison.Ordinal)
+            .Replace("$(machine_name)", Environment.MachineName, StringComparison.Ordinal)
+            .Replace("$(gh_user)", ghUser ?? "", StringComparison.Ordinal);
+    }
+
+    private static (string Org, string Repo) SplitRepoSlug(string repoSlug)
+    {
+        if (string.IsNullOrWhiteSpace(repoSlug))
+            return ("", "");
+
+        var separatorIndex = repoSlug.IndexOf('/');
+        if (separatorIndex < 0)
+            return ("", repoSlug);
+
+        return (repoSlug[..separatorIndex], repoSlug[(separatorIndex + 1)..]);
+    }
+
+    private static string BuildArguments(DispatchSession session, string prompt, string? sessionName, DispatchRule? rule, string repoPath, string? defaultModel, IEnumerable<string> extraAllowedDirectories)
     {
         var args = new List<string>
         {
             "--remote",
             $"--resume={session.CopilotSessionId}",
-            "-i", $"\"{EscapeArg(prompt)}\"",
         };
+
+        if (!string.IsNullOrWhiteSpace(sessionName))
+        {
+            args.Add("--name");
+            args.Add($"\"{EscapeArg(sessionName)}\"");
+        }
+
+        args.Add("-i");
+        args.Add($"\"{EscapeArg(prompt)}\"");
 
         // Model: rule-specific overrides global default
         var model = rule?.Model ?? defaultModel;

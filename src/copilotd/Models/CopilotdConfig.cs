@@ -37,6 +37,13 @@ public sealed class CopilotdConfig
     public string? CurrentUser { get; set; }
 
     /// <summary>
+    /// Format string used for naming dispatched copilot sessions via <c>copilot --name</c>.
+    /// Uses the same <c>$(token)</c> replacement style as prompt templating. Set to an empty
+    /// string to disable naming entirely. Default is <c>(copilotd) $(org)/$(repo)#$(issue_id)</c>.
+    /// </summary>
+    public string SessionNameFormat { get; set; } = DefaultSessionNameFormat;
+
+    /// <summary>
     /// Maximum number of concurrent copilot instances. Sessions beyond this limit
     /// are queued as Pending until a slot opens. Default is 3.
     /// </summary>
@@ -118,6 +125,8 @@ public sealed class CopilotdConfig
         - Run `$(copilotd.command) session comment $(issue.repo)#$(issue.id) --message "Your question or findings here"` to post a comment on the issue.
         - This will pause your session until a response is posted on the issue, at which point your session will automatically resume.
         """;
+
+    public const string DefaultSessionNameFormat = "(copilotd) $(org)/$(repo)#$(issue_id)";
 
     public const string IssueFeedbackPrompt =
         """
