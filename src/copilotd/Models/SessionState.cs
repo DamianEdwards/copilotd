@@ -172,6 +172,13 @@ public sealed class DispatchSession
     /// </summary>
     public string? BranchName { get; set; }
 
+    /// <summary>
+    /// The GitHub reaction ID currently posted on the issue by copilotd, for lifecycle tracking.
+    /// Used to remove the previous reaction when transitioning to a new state (e.g., 🚀→👍).
+    /// Null when no reaction has been posted or when reactions are disabled.
+    /// </summary>
+    public long? IssueReactionId { get; set; }
+
     /// <summary>Maximum retries before giving up (0 = unlimited).</summary>
     public const int MaxRetries = 3;
 

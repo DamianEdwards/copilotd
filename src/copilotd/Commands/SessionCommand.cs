@@ -362,6 +362,8 @@ public static class SessionCommand
                 var issueNumber = 0;
                 string? expectedSessionId = null;
                 string? errorMessage = null;
+                long? oldReactionId = null;
+                string? ruleName = null;
 
                 stateStore.WithStateLock(() =>
                 {
@@ -380,6 +382,8 @@ public static class SessionCommand
                     repo = session.Repo;
                     issueNumber = session.IssueNumber;
                     expectedSessionId = session.CopilotSessionId;
+                    oldReactionId = session.IssueReactionId;
+                    ruleName = session.RuleName;
                 }, ct);
 
                 if (errorMessage is not null)
@@ -432,6 +436,12 @@ public static class SessionCommand
 
                 ConsoleOutput.Success($"Comment posted on {issueKey}. Session is now waiting for feedback.");
                 ScheduleSessionShutdown(processManager, trackedProcess, config);
+
+                // Best-effort reaction transition: 🚀 → 👀 (waiting for feedback)
+                TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, expectedSessionId!,
+                    repo!, issueNumber, ruleName!, oldReactionId,
+                    GhCliService.ReactionEyes, ct);
+
                 return 0;
             }, logger);
         });
@@ -454,6 +464,7 @@ public static class SessionCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
+                var ghCli = services.GetRequiredService<GhCliService>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
 
@@ -461,6 +472,13 @@ public static class SessionCommand
                 var trackedProcess = default(TrackedProcessRef);
                 string? terminalStatus = null;
                 string? errorMessage = null;
+
+                // Reaction state captured inside lock, API calls made outside
+                string? reactionRepo = null;
+                int reactionIssueNumber = 0;
+                long? oldReactionId = null;
+                string? reactionSessionId = null;
+                string? reactionRuleName = null;
 
                 stateStore.WithStateLock(() =>
                 {
@@ -483,6 +501,13 @@ public static class SessionCommand
                     session.CompletedBySession = true;
                     ClearTrackedProcess(session);
                     session.UpdatedAt = DateTimeOffset.UtcNow;
+
+                    reactionRepo = session.Repo;
+                    reactionIssueNumber = session.IssueNumber;
+                    oldReactionId = session.IssueReactionId;
+                    reactionSessionId = session.CopilotSessionId;
+                    reactionRuleName = session.RuleName;
+
                     stateStore.SaveState(state);
                 }, ct);
 
@@ -500,6 +525,12 @@ public static class SessionCommand
 
                 ConsoleOutput.Success($"Session for {issueKey} marked as completed.");
                 ScheduleSessionShutdown(processManager, trackedProcess, config);
+
+                // Best-effort reaction transition: 🚀 → 👍
+                TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, reactionSessionId!,
+                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionId,
+                    GhCliService.ReactionThumbsUp, ct);
+
                 return 0;
             }, logger);
         });
@@ -525,6 +556,7 @@ public static class SessionCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
+                var ghCli = services.GetRequiredService<GhCliService>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
 
@@ -539,6 +571,13 @@ public static class SessionCommand
 
                 var trackedProcess = default(TrackedProcessRef);
                 string? errorMessage = null;
+
+                // Reaction state captured inside lock, API calls made outside
+                string? reactionRepo = null;
+                int reactionIssueNumber = 0;
+                long? oldReactionId = null;
+                string? reactionSessionId = null;
+                string? reactionRuleName = null;
 
                 stateStore.WithStateLock(() =>
                 {
@@ -562,6 +601,13 @@ public static class SessionCommand
                     session.WaitingSince = DateTimeOffset.UtcNow;
                     ClearTrackedProcess(session);
                     session.UpdatedAt = DateTimeOffset.UtcNow;
+
+                    reactionRepo = session.Repo;
+                    reactionIssueNumber = session.IssueNumber;
+                    oldReactionId = session.IssueReactionId;
+                    reactionSessionId = session.CopilotSessionId;
+                    reactionRuleName = session.RuleName;
+
                     stateStore.SaveState(state);
                 }, ct);
 
@@ -573,6 +619,12 @@ public static class SessionCommand
 
                 ConsoleOutput.Success($"PR #{prNumber} associated with session for {issueKey}. Session is now waiting for review feedback.");
                 ScheduleSessionShutdown(processManager, trackedProcess, config);
+
+                // Best-effort reaction transition: 🚀 → 👀 (waiting for review)
+                TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, reactionSessionId!,
+                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionId,
+                    GhCliService.ReactionEyes, ct);
+
                 return 0;
             }, logger);
         });
@@ -595,6 +647,7 @@ public static class SessionCommand
             return await ConsoleOutput.RunWithErrorHandling(async () =>
             {
                 var stateStore = services.GetRequiredService<StateStore>();
+                var ghCli = services.GetRequiredService<GhCliService>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var config = stateStore.LoadConfig();
 
@@ -602,6 +655,12 @@ public static class SessionCommand
                 var pending = false;
                 string? errorMessage = null;
                 string? newSessionId = null;
+
+                // Reaction state captured inside lock, API calls made outside
+                string? reactionRepo = null;
+                int reactionIssueNumber = 0;
+                long? oldReactionId = null;
+                string? reactionRuleName = null;
 
                 stateStore.WithStateLock(() =>
                 {
@@ -619,6 +678,11 @@ public static class SessionCommand
                         return;
                     }
 
+                    reactionRepo = session.Repo;
+                    reactionIssueNumber = session.IssueNumber;
+                    oldReactionId = session.IssueReactionId;
+                    reactionRuleName = session.RuleName;
+
                     processManager.TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
                     processManager.CleanupWorktree(session, config, state);
 
@@ -633,6 +697,7 @@ public static class SessionCommand
                     session.LastRedispatchWasIssueComment = false;
                     session.LastFailureAt = null;
                     session.WaitingSince = null;
+                    session.IssueReactionId = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     newSessionId = session.CopilotSessionId;
                     stateStore.SaveState(state);
@@ -651,6 +716,12 @@ public static class SessionCommand
                 }
 
                 ConsoleOutput.Success($"Session for {issueKey} reset to pending (new session {newSessionId}).");
+
+                // Best-effort: transition to 👀 (queued) for the reset session
+                TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, newSessionId!,
+                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionId,
+                    GhCliService.ReactionEyes, ct);
+
                 return 0;
             }, logger);
         });
@@ -977,5 +1048,48 @@ public static class SessionCommand
     private readonly record struct TrackedProcessRef(string Label, int? ProcessId, DateTimeOffset? ProcessStartTime)
     {
         public bool HasProcess => ProcessId is not null;
+    }
+
+    /// <summary>
+    /// Checks whether reactions are enabled for a session based on rule + global config.
+    /// </summary>
+    private static bool AreReactionsEnabled(CopilotdConfig config, string ruleName)
+    {
+        if (config.Rules.TryGetValue(ruleName, out var rule) && rule.EnableReactions.HasValue)
+            return rule.EnableReactions.Value;
+        return config.EnableReactions;
+    }
+
+    /// <summary>
+    /// Best-effort reaction transition for use in session commands. Removes the old reaction,
+    /// adds the new one, and updates <see cref="DispatchSession.IssueReactionId"/> in a
+    /// second state lock with identity verification. Failures are logged but do not
+    /// affect the command's return code.
+    /// </summary>
+    private static void TransitionReactionBestEffort(
+        StateStore stateStore, GhCliService ghCli, CopilotdConfig config,
+        string issueKey, string sessionId, string repo, int issueNumber,
+        string ruleName, long? oldReactionId, string? newContent, CancellationToken ct)
+    {
+        if (!AreReactionsEnabled(config, ruleName))
+            return;
+
+        if (oldReactionId.HasValue)
+            ghCli.RemoveIssueReaction(repo, issueNumber, oldReactionId.Value);
+
+        long? newId = null;
+        if (newContent is not null)
+            newId = ghCli.AddIssueReaction(repo, issueNumber, newContent);
+
+        // Persist the new reaction ID with identity check to avoid clobbering a reset session
+        stateStore.WithStateLock(() =>
+        {
+            var state = stateStore.LoadState();
+            if (state.Sessions.TryGetValue(issueKey, out var s) && s.CopilotSessionId == sessionId)
+            {
+                s.IssueReactionId = newId;
+                stateStore.SaveState(state);
+            }
+        }, ct);
     }
 }

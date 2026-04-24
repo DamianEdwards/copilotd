@@ -578,6 +578,56 @@ public sealed class GhCliService
         return new NewCommentInfo(author, createdAt);
     }
 
+    // Reaction content constants for GitHub issue reactions
+    internal const string ReactionEyes = "eyes";
+    internal const string ReactionRocket = "rocket";
+    internal const string ReactionThumbsUp = "+1";
+    internal const string ReactionThumbsDown = "-1";
+
+    /// <summary>
+    /// Adds a reaction emoji to a GitHub issue. Returns the reaction ID for later removal,
+    /// or null on failure. Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    public long? AddIssueReaction(string repo, int issueNumber, string content)
+    {
+        var args = $"api repos/{repo}/issues/{issueNumber}/reactions -f content={content}";
+        var (exitCode, output) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to add {Reaction} reaction on {Repo}#{Issue}: {Output}", content, repo, issueNumber, output);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.TryGetProperty("id", out var idEl))
+                return idEl.GetInt64();
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse reaction response for {Repo}#{Issue}", repo, issueNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Removes a reaction from a GitHub issue by reaction ID. Returns true on success.
+    /// Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    public bool RemoveIssueReaction(string repo, int issueNumber, long reactionId)
+    {
+        var args = $"api repos/{repo}/issues/{issueNumber}/reactions/{reactionId} -X DELETE";
+        var (exitCode, _) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to remove reaction {Id} from {Repo}#{Issue}", reactionId, repo, issueNumber);
+            return false;
+        }
+        return true;
+    }
+
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);
 
     private (int ExitCode, string Output) RunGh(string arguments)

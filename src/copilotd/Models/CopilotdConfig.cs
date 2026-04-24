@@ -70,6 +70,13 @@ public sealed class CopilotdConfig
     public bool EnableControlSession { get; set; } = true;
 
     /// <summary>
+    /// Whether to post emoji reactions on issues to indicate session lifecycle status
+    /// (👀 queued, 🚀 working, 👍 completed, 👎 failed). Default is true.
+    /// Can be overridden per-rule via <see cref="DispatchRule.EnableReactions"/>.
+    /// </summary>
+    public bool EnableReactions { get; set; } = true;
+
+    /// <summary>
     /// Named dispatch rules. Key is the rule name.
     /// </summary>
     public Dictionary<string, DispatchRule> Rules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -244,6 +251,12 @@ public sealed class DispatchRule
     /// <see cref="PromptMode.Override"/>: rule prompt replaces the global custom prompt entirely.
     /// </summary>
     public PromptMode CustomPromptMode { get; set; } = PromptMode.Append;
+
+    /// <summary>
+    /// Per-rule override for emoji reactions on issues. When null (default), falls back
+    /// to the global <see cref="CopilotdConfig.EnableReactions"/> setting.
+    /// </summary>
+    public bool? EnableReactions { get; set; }
 
     /// <summary>
     /// Returns true if the given issue matches all conditions on this rule.

@@ -273,6 +273,7 @@ public sealed class ReconciliationEngine
                     session.FailureDetail = null;
                     session.WaitingSince = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
+                    TransitionReaction(session, config, null);
                     _processManager.CleanupWorktree(session, config, state);
                     continue;
                 }
@@ -285,6 +286,7 @@ public sealed class ReconciliationEngine
                     session.FailureDetail = null;
                     session.WaitingSince = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
+                    TransitionReaction(session, config, null);
                     _processManager.CleanupWorktree(session, config, state);
                     continue;
                 }
@@ -307,6 +309,7 @@ public sealed class ReconciliationEngine
                 session.Status = SessionStatus.Completed;
                 session.FailureDetail = null;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
+                TransitionReaction(session, config, null);
                 _processManager.CleanupWorktree(session, config, state);
             }
         }
@@ -379,6 +382,7 @@ public sealed class ReconciliationEngine
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                // 👀 stays — it was set when entering WaitingForFeedback
                             }
                             else
                             {
@@ -403,6 +407,7 @@ public sealed class ReconciliationEngine
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                TransitionReaction(existing, config, GhCliService.ReactionThumbsUp);
                                 _processManager.CleanupWorktree(existing, config, state);
                                 continue;
                             }
@@ -526,6 +531,7 @@ public sealed class ReconciliationEngine
                         existing.ProcessStartTime = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         existing.LastFailureAt = DateTimeOffset.UtcNow;
+                        TransitionReaction(existing, config, GhCliService.ReactionEyes);
                         continue;
 
                     case SessionStatus.Orphaned:
@@ -537,6 +543,7 @@ public sealed class ReconciliationEngine
                             existing.FailureDetail ??= $"The session exceeded the maximum retry count ({DispatchSession.MaxRetries}). " +
                                 $"Resolve the underlying issue, then run 'copilotd session reset {issueKey}'.";
                             existing.UpdatedAt = DateTimeOffset.UtcNow;
+                            TransitionReaction(existing, config, GhCliService.ReactionThumbsDown);
                             continue;
                         }
                         continue;
@@ -560,6 +567,7 @@ public sealed class ReconciliationEngine
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
+                        TransitionReaction(existing, config, GhCliService.ReactionEyes);
                         continue;
                 }
             }
@@ -581,6 +589,7 @@ public sealed class ReconciliationEngine
                 state.Sessions[issueKey] = newSession;
 
                 _logger.LogInformation("New issue {Key} matched by rule '{Rule}', creating pending dispatch", issueKey, ruleName);
+                TransitionReaction(newSession, config, GhCliService.ReactionEyes);
             }
         }
     }
@@ -626,6 +635,7 @@ public sealed class ReconciliationEngine
                         _logger.LogWarning("Copilot folder trust missing for {Key}: {Folders}",
                             session.IssueKey, string.Join(", ", trustCheck.MissingFolders));
                         MarkSessionFailed(session, BuildTrustFailureDetail(session, trustCheck));
+                        TransitionReaction(session, config, GhCliService.ReactionThumbsDown);
                         _stateStore.SaveState(state);
                         continue;
 
@@ -644,6 +654,7 @@ public sealed class ReconciliationEngine
                 _logger.LogWarning("Failed to prepare worktree for {Key}", session.IssueKey);
                 MarkSessionFailed(session,
                     $"Failed to prepare the git worktree for dispatch. Verify the local clone for {session.Repo} is healthy, then run 'copilotd session reset {session.IssueKey}'.");
+                TransitionReaction(session, config, GhCliService.ReactionThumbsDown);
                 _stateStore.SaveState(state);
                 continue;
             }
@@ -661,10 +672,15 @@ public sealed class ReconciliationEngine
                 _logger.LogWarning("Failed to launch copilot for {Key}", session.IssueKey);
                 MarkSessionFailed(session,
                     $"Failed to launch the Copilot CLI process. Review the copilotd logs, then run 'copilotd session reset {session.IssueKey}'.");
+                TransitionReaction(session, config, GhCliService.ReactionThumbsDown);
                 // Clean up the worktree we just created
                 _processManager.CleanupWorktree(session, config, state);
             }
-            // else: session was updated in-place by LaunchCopilot
+            else
+            {
+                // Session launched successfully — indicate active work
+                TransitionReaction(session, config, GhCliService.ReactionRocket);
+            }
 
             // Save state after each launch to prevent ghost processes on crash
             _stateStore.SaveState(state);
@@ -770,5 +786,37 @@ public sealed class ReconciliationEngine
         var backoffMinutes = Math.Min(Math.Pow(2, session.RetryCount), 30);
         var backoff = TimeSpan.FromMinutes(backoffMinutes);
         return DateTimeOffset.UtcNow - session.LastFailureAt.Value < backoff;
+    }
+
+    /// <summary>
+    /// Checks whether reactions are enabled for a session based on rule + global config.
+    /// </summary>
+    private static bool AreReactionsEnabled(CopilotdConfig config, string ruleName)
+    {
+        if (config.Rules.TryGetValue(ruleName, out var rule) && rule.EnableReactions.HasValue)
+            return rule.EnableReactions.Value;
+        return config.EnableReactions;
+    }
+
+    /// <summary>
+    /// Transitions the reaction on a session's issue. Removes the existing reaction (if any),
+    /// then adds a new one (if specified). Updates <see cref="DispatchSession.IssueReactionId"/>.
+    /// Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    private void TransitionReaction(DispatchSession session, CopilotdConfig config, string? newContent)
+    {
+        if (!AreReactionsEnabled(config, session.RuleName))
+            return;
+
+        if (session.IssueReactionId.HasValue)
+        {
+            _ghCli.RemoveIssueReaction(session.Repo, session.IssueNumber, session.IssueReactionId.Value);
+            session.IssueReactionId = null;
+        }
+
+        if (newContent is not null)
+        {
+            session.IssueReactionId = _ghCli.AddIssueReaction(session.Repo, session.IssueNumber, newContent);
+        }
     }
 }
