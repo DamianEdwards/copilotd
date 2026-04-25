@@ -698,16 +698,6 @@ public static class InitCommand
     {
         const string prompt = "Search term or owner/repo (empty to go back): ";
         var input = new StringBuilder();
-        bool? originalCursorVisible = null;
-
-        try
-        {
-            originalCursorVisible = Console.CursorVisible;
-            Console.CursorVisible = true;
-        }
-        catch
-        {
-        }
 
         RenderInlinePrompt(prompt, input.ToString());
 
@@ -718,17 +708,7 @@ public static class InitCommand
             {
                 case ConsoleKey.Enter:
                     ClearInlinePrompt();
-                    if (originalCursorVisible.HasValue)
-                    {
-                        try
-                        {
-                            Console.CursorVisible = originalCursorVisible.Value;
-                        }
-                        catch
-                        {
-                        }
-                    }
-                     return input.ToString();
+                    return input.ToString();
 
                 case ConsoleKey.Backspace:
                     if (input.Length > 0)
@@ -738,16 +718,6 @@ public static class InitCommand
                 case ConsoleKey.Escape:
                     input.Clear();
                     ClearInlinePrompt();
-                    if (originalCursorVisible.HasValue)
-                    {
-                        try
-                        {
-                            Console.CursorVisible = originalCursorVisible.Value;
-                        }
-                        catch
-                        {
-                        }
-                    }
                     return "";
 
                 default:
