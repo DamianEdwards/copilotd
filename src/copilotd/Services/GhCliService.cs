@@ -110,8 +110,16 @@ public sealed class GhCliService
     }
 
     /// <summary>
+    /// Lists repositories the user owns.
+    /// </summary>
+    public List<AccessibleGitHubRepo> ListOwnedRepos(int limit = 200)
+        => ListOwnedReposFallback(limit);
+
+    /// <summary>
     /// Lists repositories the user can watch during init:
     /// repos they own plus repos where they have write-or-better access.
+    /// This can be expensive for users who belong to large organizations because
+    /// GitHub's API does not support server-side filtering by write permission.
     /// </summary>
     public List<AccessibleGitHubRepo> ListAccessibleRepos(string? currentUsername = null)
     {

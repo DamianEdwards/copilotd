@@ -133,6 +133,18 @@ public sealed class RepoPathResolver
     }
 
     /// <summary>
+    /// Scans RepoHome once and returns the normalized slugs for all local git repositories found.
+    /// </summary>
+    public HashSet<string> ListClonedRepoSlugs(CopilotdConfig config)
+    {
+        var repoHome = config.RepoHome;
+        if (string.IsNullOrEmpty(repoHome))
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        return new HashSet<string>(ScanAllRepos(repoHome).Keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// Scans RepoHome up to 2 levels deep and resolves the origin remote for every git repo found.
     /// Returns a dictionary mapping normalized repo slugs to their local paths.
     /// </summary>
