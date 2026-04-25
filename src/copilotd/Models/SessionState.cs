@@ -96,8 +96,24 @@ public sealed class DispatchSession
     /// </summary>
     public string? IssueAuthor { get; set; }
 
-    /// <summary>Generated UUID used with copilot --resume=&lt;id&gt;.</summary>
+    /// <summary>
+    /// Stable local identifier for this tracked session. Existing persisted sessions also use this
+    /// as their copilot <c>--resume</c> value. New named sessions keep this identifier for
+    /// copilotd's own state tracking while resuming via <see cref="CopilotSessionName"/>.
+    /// </summary>
     public string CopilotSessionId { get; set; } = "";
+
+    /// <summary>
+    /// Optional name used to start a new Copilot session via <c>copilot --name</c> and later
+    /// resume it via <c>copilot --resume=&lt;name&gt;</c>.
+    /// </summary>
+    public string? CopilotSessionName { get; set; }
+
+    /// <summary>
+    /// True once copilotd has successfully launched this session at least once. Used to decide
+    /// whether a named session should start with <c>--name</c> or resume with <c>--resume</c>.
+    /// </summary>
+    public bool HasStarted { get; set; }
 
     /// <summary>OS process ID of the launched copilot process.</summary>
     public int? ProcessId { get; set; }

@@ -208,9 +208,9 @@ public static class SessionCommand
                         return;
                     }
 
-                    if (string.IsNullOrEmpty(session.CopilotSessionId))
+                    if (string.IsNullOrEmpty(session.CopilotSessionId) && string.IsNullOrEmpty(session.CopilotSessionName))
                     {
-                        errorMessage = $"Session for '{issueKey}' has no copilot session ID.";
+                        errorMessage = $"Session for '{issueKey}' has no copilot resume target.";
                         return;
                     }
 
@@ -221,6 +221,8 @@ public static class SessionCommand
                     {
                         IssueKey = session.IssueKey,
                         CopilotSessionId = session.CopilotSessionId,
+                        CopilotSessionName = session.CopilotSessionName,
+                        HasStarted = session.HasStarted,
                         ProcessId = session.ProcessId,
                         ProcessStartTime = session.ProcessStartTime,
                         Status = session.Status,
@@ -691,7 +693,10 @@ public static class SessionCommand
                     session.CompletedBySession = false;
                     session.PullRequestNumber = null;
                     session.CopilotSessionId = Guid.NewGuid().ToString();
+                    session.CopilotSessionName = null;
+                    session.HasStarted = false;
                     ClearTrackedProcess(session);
+                    session.LastVerifiedAt = null;
                     session.RetryCount = 0;
                     session.RedispatchCount = 0;
                     session.LastRedispatchWasIssueComment = false;
@@ -834,7 +839,7 @@ public static class SessionCommand
         table.AddColumn("Rule");
         table.AddColumn("Status");
         table.AddColumn("PID");
-        table.AddColumn("Session ID");
+        table.AddColumn("Resume");
         table.AddColumn("Worktree");
         table.AddColumn("Created");
         table.AddColumn("Updated");
@@ -854,9 +859,7 @@ public static class SessionCommand
             };
 
             var pid = s.ProcessId?.ToString() ?? "-";
-            var sessionId = string.IsNullOrEmpty(s.CopilotSessionId)
-                ? "-"
-                : s.CopilotSessionId;
+            var resumeTarget = GetResumeTargetDisplay(s);
             var worktree = string.IsNullOrEmpty(s.WorktreePath)
                 ? "-"
                 : s.WorktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
@@ -866,7 +869,7 @@ public static class SessionCommand
                 Markup.Escape(s.RuleName),
                 statusMarkup,
                 Markup.Escape(pid),
-                Markup.Escape(sessionId),
+                Markup.Escape(resumeTarget),
                 Markup.Escape(worktree),
                 FormatTime(s.CreatedAt),
                 FormatTime(s.UpdatedAt)
@@ -945,7 +948,8 @@ public static class SessionCommand
         table.AddRow("Process ID", Markup.Escape(session.ProcessId?.ToString() ?? "-"));
         table.AddRow("Process start", Markup.Escape(FormatOptionalTime(session.ProcessStartTime)));
         table.AddRow("Process liveness", Markup.Escape(FormatOptionalLiveness(liveness)));
-        table.AddRow("Session ID", Markup.Escape(string.IsNullOrEmpty(session.CopilotSessionId) ? "-" : session.CopilotSessionId));
+        table.AddRow("Resume target", Markup.Escape(GetResumeTargetDisplay(session)));
+        table.AddRow("Session name", Markup.Escape(session.CopilotSessionName ?? "-"));
         table.AddRow("Remote task ID", Markup.Escape(remoteTaskId ?? "-"));
         table.AddRow("Remote URL", Markup.Escape(remoteUrl ?? GetUnavailableRemoteSessionUrlMessage(session)));
         table.AddRow("Repo path", Markup.Escape(NormalizeDisplayPath(repoPath) ?? "-"));
@@ -1021,6 +1025,8 @@ public static class SessionCommand
             RuleName = session.RuleName,
             IssueAuthor = session.IssueAuthor,
             CopilotSessionId = session.CopilotSessionId,
+            CopilotSessionName = session.CopilotSessionName,
+            HasStarted = session.HasStarted,
             ProcessId = session.ProcessId,
             ProcessStartTime = session.ProcessStartTime,
             Status = session.Status,
@@ -1038,6 +1044,13 @@ public static class SessionCommand
             WorktreePath = session.WorktreePath,
             BranchName = session.BranchName,
         };
+
+    private static string GetResumeTargetDisplay(DispatchSession session)
+        => !string.IsNullOrWhiteSpace(session.CopilotSessionName)
+            ? session.CopilotSessionName
+            : string.IsNullOrEmpty(session.CopilotSessionId)
+                ? "-"
+                : session.CopilotSessionId;
 
     private static void ClearTrackedProcess(DispatchSession session)
     {

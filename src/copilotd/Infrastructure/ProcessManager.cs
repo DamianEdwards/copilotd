@@ -58,8 +58,14 @@ public sealed partial class ProcessManager
         var customPrompt = _stateStore.LoadCustomPrompt(config);
         var copilotdCommand = _runtimeContext.GetCopilotdCallbackCommand();
         var prompt = BuildPrompt(customPrompt, issue, session, config, copilotdCommand);
-        var usesResume = !string.IsNullOrWhiteSpace(session.CopilotSessionId);
-        var sessionName = usesResume ? null : TryBuildSessionName(issue, session, config, copilotdCommand);
+        var hasExistingResumeContext = HasExistingResumeContext(session);
+        var sessionName = session.CopilotSessionName;
+        if (!hasExistingResumeContext && string.IsNullOrWhiteSpace(sessionName))
+        {
+            sessionName = TryBuildSessionName(issue, session, config, copilotdCommand);
+            session.CopilotSessionName = sessionName;
+        }
+
         var args = BuildArguments(
             session,
             prompt,
@@ -69,7 +75,10 @@ public sealed partial class ProcessManager
             config.DefaultModel,
             _runtimeContext.GetExtraAllowedDirectories());
 
-        _logger.LogInformation("Launching copilot for {IssueKey} with session {SessionId}", session.IssueKey, session.CopilotSessionId);
+        _logger.LogInformation(
+            "Launching copilot for {IssueKey} with session {SessionId}",
+            session.IssueKey,
+            session.CopilotSessionName ?? session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
 
         try
@@ -136,6 +145,7 @@ public sealed partial class ProcessManager
 
             session.Status = SessionStatus.Running;
             session.FailureDetail = null;
+            session.HasStarted = true;
             session.UpdatedAt = DateTimeOffset.UtcNow;
             session.LastVerifiedAt = DateTimeOffset.UtcNow;
 
@@ -898,13 +908,23 @@ public sealed partial class ProcessManager
             "--remote",
         };
 
-        var usesResume = !string.IsNullOrWhiteSpace(session.CopilotSessionId);
-        if (usesResume)
+        string? resumeTarget = null;
+        if (HasExistingResumeContext(session))
         {
-            args.Add($"--resume={session.CopilotSessionId}");
+            resumeTarget = !string.IsNullOrWhiteSpace(session.CopilotSessionName)
+                ? session.CopilotSessionName
+                : session.CopilotSessionId;
+        }
+        else if (string.IsNullOrWhiteSpace(sessionName))
+        {
+            resumeTarget = session.CopilotSessionId;
         }
 
-        if (usesResume is false && !string.IsNullOrWhiteSpace(sessionName))
+        if (!string.IsNullOrWhiteSpace(resumeTarget))
+        {
+            args.Add($"--resume=\"{EscapeArg(resumeTarget)}\"");
+        }
+        else if (!string.IsNullOrWhiteSpace(sessionName))
         {
             args.Add("--name");
             args.Add($"\"{EscapeArg(sessionName)}\"");
@@ -952,6 +972,16 @@ public sealed partial class ProcessManager
 
         return string.Join(' ', args);
     }
+
+    private static bool HasExistingResumeContext(DispatchSession session)
+        => session.HasStarted
+            || session.ProcessId is not null
+            || session.ProcessStartTime is not null
+            || session.LastVerifiedAt is not null
+            || session.WaitingSince is not null
+            || session.PullRequestNumber is not null
+            || session.RedispatchCount > 0
+            || session.CompletedBySession;
 
     private static string EscapeArg(string value)
     {

@@ -373,7 +373,7 @@ public sealed class ReconciliationEngine
 
                                 _logger.LogInformation("New comment from {Author} detected on {Key}, re-dispatching waiting session (redispatch {N}/{Max})",
                                     commentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
-                                // Keep same CopilotSessionId so --resume preserves context
+                                // Keep the same resume target so --resume preserves context
                                 existing.Status = SessionStatus.Pending;
                                 existing.FailureDetail = null;
                                 existing.RedispatchCount++;
@@ -449,7 +449,7 @@ public sealed class ReconciliationEngine
 
                                     _logger.LogInformation("New PR review from {Author} detected on PR #{Pr} for {Key}, re-dispatching session (redispatch {N}/{Max})",
                                         reviewInfo.Author, existing.PullRequestNumber, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
-                                    // Keep same CopilotSessionId so --resume preserves context
+                                    // Keep the same resume target so --resume preserves context
                                     existing.Status = SessionStatus.Pending;
                                     existing.FailureDetail = null;
                                     existing.RedispatchCount++;
@@ -527,8 +527,11 @@ public sealed class ReconciliationEngine
                         existing.RedispatchCount = 0;
                         existing.LastRedispatchWasIssueComment = false;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
+                        existing.CopilotSessionName = null;
+                        existing.HasStarted = false;
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.LastVerifiedAt = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         existing.LastFailureAt = DateTimeOffset.UtcNow;
                         TransitionReaction(existing, config, GhCliService.ReactionEyes);
@@ -564,8 +567,11 @@ public sealed class ReconciliationEngine
                         existing.RedispatchCount = 0;
                         existing.LastRedispatchWasIssueComment = false;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
+                        existing.CopilotSessionName = null;
+                        existing.HasStarted = false;
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.LastVerifiedAt = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         TransitionReaction(existing, config, GhCliService.ReactionEyes);
                         continue;
@@ -582,6 +588,7 @@ public sealed class ReconciliationEngine
                     RuleName = ruleName,
                     IssueAuthor = issue.Author,
                     CopilotSessionId = Guid.NewGuid().ToString(),
+                    HasStarted = false,
                     Status = SessionStatus.Pending,
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow,

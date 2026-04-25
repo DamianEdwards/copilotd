@@ -31,9 +31,18 @@ public sealed class GitHubRemoteSessionUrlResolver
     }
 
     public string? TryResolve(DispatchSession session, string? currentUser)
-        => session.ProcessId is { } pid && session.Status is SessionStatus.Dispatching or SessionStatus.Running
-            ? TryResolveFromCurrentProcess(session.CopilotSessionId, pid, currentUser)
-            : TryResolve(session.CopilotSessionId, session.ProcessId, currentUser);
+    {
+        if (session.ProcessId is { } pid && session.Status is SessionStatus.Dispatching or SessionStatus.Running)
+        {
+            var currentProcessUrl = TryResolveFromCurrentProcess(session.CopilotSessionId, pid, currentUser)
+                ?? TryResolveBySessionName(session.CopilotSessionName, pid, currentUser);
+            if (currentProcessUrl is not null)
+                return currentProcessUrl;
+        }
+
+        return TryResolve(session.CopilotSessionId, session.ProcessId, currentUser)
+            ?? TryResolveBySessionName(session.CopilotSessionName, session.ProcessId, currentUser);
+    }
 
     public string? TryResolve(ControlSessionInfo session, string? currentUser)
         => TryResolve(session.CopilotSessionId, session.ProcessId, currentUser);
@@ -79,6 +88,15 @@ public sealed class GitHubRemoteSessionUrlResolver
         }
 
         return null;
+    }
+
+    private string? TryResolveBySessionName(string? sessionName, int? processId, string? currentUser)
+    {
+        if (string.IsNullOrWhiteSpace(sessionName))
+            return null;
+
+        var sessionId = TryResolveSessionIdFromSessionName(sessionName, processId);
+        return sessionId is null ? null : TryResolve(sessionId, processId, currentUser);
     }
 
     private string? TryResolveFromCurrentProcess(string? sessionId, int processId, string? currentUser)
@@ -127,6 +145,62 @@ public sealed class GitHubRemoteSessionUrlResolver
         }
 
         return resolvedUrl;
+    }
+
+    private string? TryResolveSessionIdFromSessionName(string sessionName, int? processId)
+    {
+        var sessionId = TryResolveSessionIdFromSessionStateName(sessionName);
+        if (sessionId is not null)
+            return sessionId;
+
+        if (processId is not { } pid)
+            return null;
+
+        foreach (var logPath in EnumerateProcessLogFiles(pid))
+        {
+            try
+            {
+                var resolved = TryResolveSessionIdFromLog(logPath);
+                if (resolved is not null)
+                    return resolved;
+            }
+            catch (IOException ex)
+            {
+                _logger.LogDebug(ex, "Failed reading Copilot log {Path}", logPath);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _logger.LogDebug(ex, "Access denied reading Copilot log {Path}", logPath);
+            }
+        }
+
+        return null;
+    }
+
+    private string? TryResolveSessionIdFromSessionStateName(string sessionName)
+    {
+        if (!Directory.Exists(_sessionStateDir))
+            return null;
+
+        foreach (var sessionDirectory in new DirectoryInfo(_sessionStateDir)
+                     .EnumerateDirectories()
+                     .OrderByDescending(directory => directory.LastWriteTimeUtc))
+        {
+            var workspacePath = Path.Combine(sessionDirectory.FullName, "workspace.yaml");
+            if (!File.Exists(workspacePath))
+                continue;
+
+            foreach (var line in ReadLinesShared(workspacePath))
+            {
+                if (TryExtractWorkspaceName(line, out var workspaceName)
+                    && string.Equals(workspaceName, sessionName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return sessionDirectory.Name;
+                }
+            }
+        }
+
+        return null;
     }
 
     private IEnumerable<string> EnumerateCandidateLogFiles(int? processId)
@@ -191,6 +265,17 @@ public sealed class GitHubRemoteSessionUrlResolver
             yield return line;
     }
 
+    private static string? TryResolveSessionIdFromLog(string logPath)
+    {
+        foreach (var line in ReadLinesShared(logPath))
+        {
+            if (TryExtractSessionId(line, out var sessionId))
+                return sessionId;
+        }
+
+        return null;
+    }
+
     private static bool LineReferencesSession(string line, string sessionId)
     {
         if (line.Equals($@"  ""session_id"": ""{sessionId}"",", StringComparison.Ordinal)
@@ -205,9 +290,49 @@ public sealed class GitHubRemoteSessionUrlResolver
             || Regex.IsMatch(line,
                 $@"^\d{{4}}-\d{{2}}-\d{{2}}T\S+\s\[INFO\]\sCreating new session with provided ID: {Regex.Escape(sessionId)}$",
                 RegexOptions.CultureInvariant)
-            || Regex.IsMatch(line,
-                $@"^\d{{4}}-\d{{2}}-\d{{2}}T\S+\s\[INFO\]\sWorkspace initialized: {Regex.Escape(sessionId)} \(checkpoints: \d+\)$",
-                RegexOptions.CultureInvariant);
+             || Regex.IsMatch(line,
+                 $@"^\d{{4}}-\d{{2}}-\d{{2}}T\S+\s\[INFO\]\sWorkspace initialized: {Regex.Escape(sessionId)} \(checkpoints: \d+\)$",
+                 RegexOptions.CultureInvariant);
+    }
+
+    private static bool TryExtractSessionId(string line, out string? sessionId)
+    {
+        var workspaceMatch = Regex.Match(
+            line,
+            @"^\d{4}-\d{2}-\d{2}T\S+\s\[INFO\]\sWorkspace initialized:\s+([0-9a-fA-F-]{36})\s+\(checkpoints:\s+\d+\)$",
+            RegexOptions.CultureInvariant);
+        if (workspaceMatch.Success)
+        {
+            sessionId = workspaceMatch.Groups[1].Value;
+            return true;
+        }
+
+        var jsonMatch = Regex.Match(
+            line,
+            @"^\s*""session_id"":\s+""([0-9a-fA-F-]{36})"",\s*$",
+            RegexOptions.CultureInvariant);
+        if (jsonMatch.Success)
+        {
+            sessionId = jsonMatch.Groups[1].Value;
+            return true;
+        }
+
+        sessionId = null;
+        return false;
+    }
+
+    private static bool TryExtractWorkspaceName(string line, out string? workspaceName)
+    {
+        const string NamePrefix = "name:";
+
+        if (line.StartsWith(NamePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            workspaceName = line[NamePrefix.Length..].Trim();
+            return !string.IsNullOrEmpty(workspaceName);
+        }
+
+        workspaceName = null;
+        return false;
     }
 
     private static bool TryExtractRemoteTaskUrl(string line, out string? url)
