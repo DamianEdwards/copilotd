@@ -12,13 +12,6 @@ public sealed class DaemonState
     public int SchemaVersion { get; set; } = 1;
 
     /// <summary>
-    /// Legacy migration fallback for machine identity. Newer versions persist the
-    /// machine identifier separately in the local app data machine.id file so it
-    /// survives copilotd home/state resets.
-    /// </summary>
-    public string? MachineIdentifier { get; set; }
-
-    /// <summary>
     /// All tracked dispatch sessions keyed by issue key ("org/repo#number").
     /// </summary>
     public Dictionary<string, DispatchSession> Sessions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -38,7 +31,6 @@ public sealed class DaemonState
     /// dispatch sessions to avoid interference with reconciliation and pruning.
     /// </summary>
     public ControlSessionInfo? ControlSession { get; set; }
-
 }
 
 /// <summary>

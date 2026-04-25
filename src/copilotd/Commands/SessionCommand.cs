@@ -388,7 +388,7 @@ public static class SessionCommand
                     oldReactionId = session.IssueReactionId;
                     ruleName = session.RuleName;
 
-                    machineIdentifier = stateStore.EnsureMachineIdentifier(state, ct);
+                    machineIdentifier = stateStore.EnsureMachineIdentifier(ct);
                 }, ct);
 
                 if (errorMessage is not null)

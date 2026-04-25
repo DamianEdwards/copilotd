@@ -110,16 +110,12 @@ public sealed class StateStore
         _logger.LogDebug("State saved to {Path}", _statePath);
     }
 
-    public string? GetMachineIdentifier(DaemonState? state = null)
+    public string? GetMachineIdentifier()
     {
-        var persistedIdentifier = ReadMachineIdentifierFromFile();
-        if (persistedIdentifier is not null)
-            return persistedIdentifier;
-
-        return NormalizeMachineIdentifier(state?.MachineIdentifier);
+        return ReadMachineIdentifierFromFile();
     }
 
-    public string EnsureMachineIdentifier(DaemonState? state = null, CancellationToken ct = default)
+    public string EnsureMachineIdentifier(CancellationToken ct = default)
     {
         Directory.CreateDirectory(_machineIdentityDir);
 
@@ -129,8 +125,7 @@ public sealed class StateStore
         if (persistedIdentifier is not null)
             return persistedIdentifier;
 
-        var machineIdentifier = NormalizeMachineIdentifier(state?.MachineIdentifier)
-                                ?? Guid.NewGuid().ToString("D");
+        var machineIdentifier = Guid.NewGuid().ToString("D");
 
         AtomicWrite(_machineIdentifierPath, machineIdentifier);
         _logger.LogDebug("Machine identifier saved to {Path}", _machineIdentifierPath);
@@ -379,23 +374,16 @@ public sealed class StateStore
 
         try
         {
-            return NormalizeMachineIdentifier(File.ReadAllText(_machineIdentifierPath));
+            var persistedIdentifier = File.ReadAllText(_machineIdentifierPath).Trim();
+            return Guid.TryParse(persistedIdentifier, out var parsedIdentifier)
+                ? parsedIdentifier.ToString("D")
+                : null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to read machine identifier from {Path}", _machineIdentifierPath);
             return null;
         }
-    }
-
-    private static string? NormalizeMachineIdentifier(string? machineIdentifier)
-    {
-        if (string.IsNullOrWhiteSpace(machineIdentifier))
-            return null;
-
-        return Guid.TryParse(machineIdentifier.Trim(), out var parsedIdentifier)
-            ? parsedIdentifier.ToString("D")
-            : null;
     }
 
     private static void AtomicWrite(string path, string content)

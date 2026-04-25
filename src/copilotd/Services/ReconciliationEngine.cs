@@ -46,8 +46,8 @@ public sealed class ReconciliationEngine
     {
         _logger.LogInformation("Starting reconciliation cycle");
 
-        var hadMachineIdentifier = _stateStore.GetMachineIdentifier(state) is not null;
-        var machineIdentifier = _stateStore.EnsureMachineIdentifier(state);
+        var hadMachineIdentifier = _stateStore.GetMachineIdentifier() is not null;
+        var machineIdentifier = _stateStore.EnsureMachineIdentifier();
         if (!hadMachineIdentifier)
             _logger.LogInformation("Assigned machine identifier {MachineIdentifier}", machineIdentifier);
 

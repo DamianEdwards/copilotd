@@ -27,7 +27,7 @@ public static class InitCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var repoResolver = services.GetRequiredService<RepoPathResolver>();
                 var state = stateStore.LoadState();
-                stateStore.EnsureMachineIdentifier(state, ct);
+                stateStore.EnsureMachineIdentifier(ct);
 
                 // ── Phase 1: Dependencies & Auth ──────────────────────────
                 AnsiConsole.Write(new Rule("[bold blue]Dependencies & Authentication[/]").LeftJustified());
