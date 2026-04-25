@@ -2,6 +2,8 @@ name: PR
 
 on:
   pull_request:
+    paths-ignore:
+      - '**/*.md'
 
 concurrency:
   group: pr-${{ github.ref }}
@@ -35,26 +37,14 @@ jobs:
         shell: bash
         run: ./scripts/verify-shell-syntax.sh
 
-  build:
-    needs: [validate-powershell-scripts, validate-shell-scripts]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-
-      - name: Build
-        uses: ./.github/actions/build
-        with:
-          validate-native-aot: 'true'
-          aot-runtime-identifier: linux-x64
-
   publish-aot:
-    needs: [build]
+    needs: [validate-powershell-scripts, validate-shell-scripts]
     strategy:
       fail-fast: false
       matrix:
         include:
+          - runner: ubuntu-22.04
+            rid: linux-x64
           - runner: windows-latest
             rid: win-x64
           - runner: ubuntu-22.04-arm
