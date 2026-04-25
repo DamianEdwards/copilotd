@@ -934,12 +934,13 @@ public sealed class GhCliService
     }
 
     /// <summary>
-    /// Links a branch to a GitHub issue via the Development sidebar using the
-    /// <c>createLinkedBranch</c> GraphQL mutation. Call after pushing the branch
-    /// to the remote so the ref exists on GitHub.
+    /// Creates a linked branch for a GitHub issue via the Development sidebar
+    /// using the <c>createLinkedBranch</c> GraphQL mutation. This mutation
+    /// creates the remote branch as part of linking it, so call it before
+    /// pushing the local branch and use the same branch name locally.
     /// Best-effort: failures are logged but do not block session lifecycle.
     /// </summary>
-    public bool LinkBranchToIssue(string repo, int issueNumber, string branchName, string commitSha)
+    public bool CreateLinkedBranchForIssue(string repo, int issueNumber, string branchName, string commitSha)
     {
         var parts = repo.Split('/');
         if (parts.Length != 2)
@@ -1005,7 +1006,7 @@ public sealed class GhCliService
             {
                 ["issueId"] = issueId,
                 ["oid"] = commitSha,
-                ["name"] = $"refs/heads/{branchName}",
+                ["name"] = branchName,
                 ["repositoryId"] = repoId,
             },
         };
@@ -1013,7 +1014,7 @@ public sealed class GhCliService
         var (mutExitCode, mutOutput) = RunGhWithStdin("api graphql --input -", mutationRequest.ToJsonString());
         if (mutExitCode != 0)
         {
-            _logger.LogWarning("Failed to link branch {Branch} to {Repo}#{Issue}: {Output}",
+            _logger.LogWarning("Failed to create linked branch {Branch} for {Repo}#{Issue}: {Output}",
                 branchName, repo, issueNumber, mutOutput);
             return false;
         }
@@ -1024,7 +1025,7 @@ public sealed class GhCliService
             using var doc = JsonDocument.Parse(mutOutput);
             if (doc.RootElement.TryGetProperty("errors", out var errors))
             {
-                _logger.LogWarning("GraphQL errors linking branch {Branch} to {Repo}#{Issue}: {Errors}",
+                _logger.LogWarning("GraphQL errors creating linked branch {Branch} for {Repo}#{Issue}: {Errors}",
                     branchName, repo, issueNumber, errors.ToString());
                 return false;
             }
@@ -1034,7 +1035,7 @@ public sealed class GhCliService
             // Best-effort error check — if parsing fails, assume success
         }
 
-        _logger.LogInformation("Linked branch {Branch} to {Repo}#{Issue}", branchName, repo, issueNumber);
+        _logger.LogInformation("Created linked branch {Branch} for {Repo}#{Issue}", branchName, repo, issueNumber);
         return true;
     }
 }

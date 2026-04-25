@@ -672,19 +672,20 @@ public sealed class ReconciliationEngine
                 continue;
             }
 
-            // For newly created worktrees, push the branch and link it to the issue
-            // so it's visible on the GitHub issue UI immediately (best-effort)
+            // For newly created worktrees, create the linked branch on GitHub first
+            // (that mutation creates the remote branch), then push locally to set
+            // upstream tracking. Both operations are best-effort.
             if (worktreeResult == WorktreeResult.CreatedNew && !string.IsNullOrEmpty(session.BranchName))
             {
-                // Push the branch to the remote and set up tracking
-                _processManager.PushBranch(session, config, state);
-
-                // Try to link the branch to the issue via GitHub's Development sidebar
                 var sha = _processManager.GetHeadSha(session);
                 if (sha is not null)
                 {
-                    _ghCli.LinkBranchToIssue(session.Repo, session.IssueNumber, session.BranchName, sha);
+                    _ghCli.CreateLinkedBranchForIssue(session.Repo, session.IssueNumber, session.BranchName, sha);
                 }
+
+                // Push the branch to the remote and set up tracking. If the linked branch
+                // was created successfully above, this becomes a no-op push plus upstream setup.
+                _processManager.PushBranch(session, config, state);
             }
 
             // We need the issue data for prompt building
