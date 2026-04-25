@@ -199,7 +199,7 @@ the built-in prompt with a trailer. Rules can also specify a `custom_prompt` tha
 to or overrides the global custom prompt (controlled by `custom_prompt_mode`). Tokens are replaced
 in both the built-in and custom prompt text. Per-rule extra prompts are appended last. By default,
 `session_name_format` is `(copilotd) $(org)/$(repo)#$(issue_id)`. Session naming is skipped when the
-installed Copilot CLI is older than `1.0.35` or if name generation fails.
+launch uses `--resume`, when the installed Copilot CLI is older than `1.0.35`, or if name generation fails.
 
 ## Session lifecycle
 
@@ -393,7 +393,7 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 | `repo_home` | — | Root directory where repos are cloned (`<org>/<repo>` sub-folders expected) |
 | `default_model` | *(none)* | Default model passed to copilot via `--model` for all sessions (rule-specific `model` overrides) |
 | `prompt` | *(empty)* | Custom prompt text appended to the built-in prompt |
-| `session_name_format` | `(copilotd) $(org)/$(repo)#$(issue_id)` | Session name template passed to `copilot --name` when the installed Copilot CLI supports it (`1.0.35+`) |
+| `session_name_format` | `(copilotd) $(org)/$(repo)#$(issue_id)` | Session name template passed to `copilot --name` when the installed Copilot CLI supports it (`1.0.35+`) and the launch does not use `--resume` |
 | `max_instances` | `3` | Maximum concurrent copilot processes; excess sessions queue as Pending |
 | `session_shutdown_delay_seconds` | `15` | Delay before shutting down an orchestrated session after `session comment`, `session pr`, or `session complete` |
 | `max_redispatches` | `10` | Maximum re-dispatches per session via comment/review feedback loops before requiring manual reset |

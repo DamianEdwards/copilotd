@@ -37,9 +37,10 @@ public sealed class CopilotdConfig
     public string? CurrentUser { get; set; }
 
     /// <summary>
-    /// Format string used for naming dispatched copilot sessions via <c>copilot --name</c>.
-    /// Uses the same <c>$(token)</c> replacement style as prompt templating. Set to an empty
-    /// string to disable naming entirely. Default is <c>(copilotd) $(org)/$(repo)#$(issue_id)</c>.
+    /// Format string used for naming dispatched copilot sessions via <c>copilot --name</c>
+    /// when the launch does not use <c>--resume</c>. Uses the same <c>$(token)</c> replacement
+    /// style as prompt templating. Set to an empty string to disable naming entirely. Default is
+    /// <c>(copilotd) $(org)/$(repo)#$(issue_id)</c>.
     /// </summary>
     public string SessionNameFormat { get; set; } = DefaultSessionNameFormat;
 

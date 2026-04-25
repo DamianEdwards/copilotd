@@ -58,7 +58,8 @@ public sealed partial class ProcessManager
         var customPrompt = _stateStore.LoadCustomPrompt(config);
         var copilotdCommand = _runtimeContext.GetCopilotdCallbackCommand();
         var prompt = BuildPrompt(customPrompt, issue, session, config, copilotdCommand);
-        var sessionName = TryBuildSessionName(issue, session, config, copilotdCommand);
+        var usesResume = !string.IsNullOrWhiteSpace(session.CopilotSessionId);
+        var sessionName = usesResume ? null : TryBuildSessionName(issue, session, config, copilotdCommand);
         var args = BuildArguments(
             session,
             prompt,
@@ -895,10 +896,15 @@ public sealed partial class ProcessManager
         var args = new List<string>
         {
             "--remote",
-            $"--resume={session.CopilotSessionId}",
         };
 
-        if (!string.IsNullOrWhiteSpace(sessionName))
+        var usesResume = !string.IsNullOrWhiteSpace(session.CopilotSessionId);
+        if (usesResume)
+        {
+            args.Add($"--resume={session.CopilotSessionId}");
+        }
+
+        if (usesResume is false && !string.IsNullOrWhiteSpace(sessionName))
         {
             args.Add("--name");
             args.Add($"\"{EscapeArg(sessionName)}\"");
