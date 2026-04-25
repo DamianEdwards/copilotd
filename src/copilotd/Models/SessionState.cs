@@ -73,6 +73,30 @@ public enum SessionStatus
 }
 
 /// <summary>
+/// The GitHub object currently hosting a session's lifecycle reaction.
+/// </summary>
+[JsonConverter(typeof(TolerantReactionTargetTypeConverter))]
+public enum ReactionTargetType
+{
+    /// <summary>The issue body is the current lifecycle anchor.</summary>
+    IssueBody,
+
+    /// <summary>A specific issue comment is the current lifecycle anchor.</summary>
+    IssueComment
+}
+
+/// <summary>
+/// Identifies the GitHub object that should host a session's lifecycle reaction.
+/// </summary>
+public readonly record struct ReactionAnchor(ReactionTargetType TargetType, long? IssueCommentId)
+{
+    public static ReactionAnchor IssueBody => new(ReactionTargetType.IssueBody, null);
+
+    public static ReactionAnchor ForIssueComment(long issueCommentId)
+        => new(ReactionTargetType.IssueComment, issueCommentId);
+}
+
+/// <summary>
 /// Tracks a single dispatched copilot session and its lifecycle.
 /// </summary>
 public sealed class DispatchSession
@@ -189,11 +213,23 @@ public sealed class DispatchSession
     public string? BranchName { get; set; }
 
     /// <summary>
-    /// The GitHub reaction ID currently posted on the issue by copilotd, for lifecycle tracking.
-    /// Used to remove the previous reaction when transitioning to a new state (e.g., 🚀→👍).
-    /// Null when no reaction has been posted or when reactions are disabled.
+    /// The GitHub reaction ID currently posted by copilotd for lifecycle tracking.
+    /// Kept under its legacy name for persisted-state compatibility.
     /// </summary>
     public long? IssueReactionId { get; set; }
+
+    /// <summary>
+    /// The GitHub object currently hosting the lifecycle reaction.
+    /// Defaults to <see cref="Models.ReactionTargetType.IssueBody"/> for compatibility
+    /// with state written before comment-targeted reactions were introduced.
+    /// </summary>
+    public ReactionTargetType ReactionTargetType { get; set; } = ReactionTargetType.IssueBody;
+
+    /// <summary>
+    /// The numeric issue comment ID when <see cref="ReactionTargetType"/> is
+    /// <see cref="Models.ReactionTargetType.IssueComment"/>.
+    /// </summary>
+    public long? ReactionTargetCommentId { get; set; }
 
     /// <summary>Maximum retries before giving up (0 = unlimited).</summary>
     public const int MaxRetries = 3;
@@ -204,6 +240,21 @@ public sealed class DispatchSession
     /// <summary>Whether this session can be re-dispatched.</summary>
     public bool CanRetry => Status is SessionStatus.Orphaned or SessionStatus.Failed
                             && RetryCount < MaxRetries;
+
+    /// <summary>Returns the current lifecycle reaction anchor for this session.</summary>
+    public ReactionAnchor GetReactionAnchor()
+        => ReactionTargetType == Models.ReactionTargetType.IssueComment && ReactionTargetCommentId.HasValue
+            ? ReactionAnchor.ForIssueComment(ReactionTargetCommentId.Value)
+            : ReactionAnchor.IssueBody;
+
+    /// <summary>Updates the current lifecycle reaction anchor.</summary>
+    public void SetReactionAnchor(ReactionAnchor anchor)
+    {
+        ReactionTargetType = anchor.TargetType;
+        ReactionTargetCommentId = anchor.TargetType == Models.ReactionTargetType.IssueComment
+            ? anchor.IssueCommentId
+            : null;
+    }
 }
 
 /// <summary>

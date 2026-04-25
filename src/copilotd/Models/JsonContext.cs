@@ -83,6 +83,41 @@ public sealed class TolerantSessionStatusConverter : JsonConverter<SessionStatus
 }
 
 /// <summary>
+/// AOT-compatible JSON converter for <see cref="ReactionTargetType"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="ReactionTargetType.IssueBody"/>.
+/// </summary>
+public sealed class TolerantReactionTargetTypeConverter : JsonConverter<ReactionTargetType>
+{
+    public override ReactionTargetType Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<ReactionTargetType>(value, ignoreCase: true, out var targetType))
+                return targetType;
+
+            return ReactionTargetType.IssueBody;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(ReactionTargetType), intValue))
+                return (ReactionTargetType)intValue;
+
+            return ReactionTargetType.IssueBody;
+        }
+
+        return ReactionTargetType.IssueBody;
+    }
+
+    public override void Write(Utf8JsonWriter writer, ReactionTargetType value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
 /// AOT-compatible JSON converter for <see cref="UpdateStatus"/> that gracefully handles
 /// unknown enum values by falling back to <see cref="UpdateStatus.None"/>.
 /// </summary>
@@ -227,7 +262,7 @@ public sealed class TolerantControlSessionStatusConverter : JsonConverter<Contro
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter), typeof(TolerantAuthorModeConverter), typeof(TolerantControlSessionStatusConverter)])]
+    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantReactionTargetTypeConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter), typeof(TolerantAuthorModeConverter), typeof(TolerantControlSessionStatusConverter)])]
 [JsonSerializable(typeof(CopilotdConfig))]
 [JsonSerializable(typeof(DaemonState))]
 [JsonSerializable(typeof(DispatchRule))]

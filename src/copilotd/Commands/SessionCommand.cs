@@ -365,6 +365,7 @@ public static class SessionCommand
                 string? expectedSessionId = null;
                 string? errorMessage = null;
                 long? oldReactionId = null;
+                var oldReactionAnchor = ReactionAnchor.IssueBody;
                 string? ruleName = null;
                 string? machineIdentifier = null;
 
@@ -386,6 +387,7 @@ public static class SessionCommand
                     issueNumber = session.IssueNumber;
                     expectedSessionId = session.CopilotSessionId;
                     oldReactionId = session.IssueReactionId;
+                    oldReactionAnchor = session.GetReactionAnchor();
                     ruleName = session.RuleName;
 
                     machineIdentifier = stateStore.EnsureMachineIdentifier(ct);
@@ -444,7 +446,7 @@ public static class SessionCommand
 
                 // Best-effort reaction transition: 🚀 → 👀 (waiting for feedback)
                 TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, expectedSessionId!,
-                    repo!, issueNumber, ruleName!, oldReactionId,
+                    repo!, issueNumber, ruleName!, oldReactionAnchor, oldReactionId, ReactionAnchor.IssueBody,
                     GhCliService.ReactionEyes, ct);
 
                 return 0;
@@ -482,6 +484,7 @@ public static class SessionCommand
                 string? reactionRepo = null;
                 int reactionIssueNumber = 0;
                 long? oldReactionId = null;
+                var oldReactionAnchor = ReactionAnchor.IssueBody;
                 string? reactionSessionId = null;
                 string? reactionRuleName = null;
 
@@ -510,6 +513,7 @@ public static class SessionCommand
                     reactionRepo = session.Repo;
                     reactionIssueNumber = session.IssueNumber;
                     oldReactionId = session.IssueReactionId;
+                    oldReactionAnchor = session.GetReactionAnchor();
                     reactionSessionId = session.CopilotSessionId;
                     reactionRuleName = session.RuleName;
 
@@ -533,7 +537,7 @@ public static class SessionCommand
 
                 // Best-effort reaction transition: 🚀 → 👍
                 TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, reactionSessionId!,
-                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionId,
+                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionAnchor, oldReactionId, oldReactionAnchor,
                     GhCliService.ReactionThumbsUp, ct);
 
                 return 0;
@@ -581,6 +585,7 @@ public static class SessionCommand
                 string? reactionRepo = null;
                 int reactionIssueNumber = 0;
                 long? oldReactionId = null;
+                var oldReactionAnchor = ReactionAnchor.IssueBody;
                 string? reactionSessionId = null;
                 string? reactionRuleName = null;
 
@@ -610,6 +615,7 @@ public static class SessionCommand
                     reactionRepo = session.Repo;
                     reactionIssueNumber = session.IssueNumber;
                     oldReactionId = session.IssueReactionId;
+                    oldReactionAnchor = session.GetReactionAnchor();
                     reactionSessionId = session.CopilotSessionId;
                     reactionRuleName = session.RuleName;
 
@@ -627,7 +633,7 @@ public static class SessionCommand
 
                 // Best-effort reaction transition: 🚀 → 👀 (waiting for review)
                 TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, reactionSessionId!,
-                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionId,
+                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionAnchor, oldReactionId, ReactionAnchor.IssueBody,
                     GhCliService.ReactionEyes, ct);
 
                 return 0;
@@ -665,6 +671,7 @@ public static class SessionCommand
                 string? reactionRepo = null;
                 int reactionIssueNumber = 0;
                 long? oldReactionId = null;
+                var oldReactionAnchor = ReactionAnchor.IssueBody;
                 string? reactionRuleName = null;
 
                 stateStore.WithStateLock(() =>
@@ -686,6 +693,7 @@ public static class SessionCommand
                     reactionRepo = session.Repo;
                     reactionIssueNumber = session.IssueNumber;
                     oldReactionId = session.IssueReactionId;
+                    oldReactionAnchor = session.GetReactionAnchor();
                     reactionRuleName = session.RuleName;
 
                     processManager.TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
@@ -705,6 +713,7 @@ public static class SessionCommand
                     session.LastRedispatchWasIssueComment = false;
                     session.LastFailureAt = null;
                     session.WaitingSince = null;
+                    session.SetReactionAnchor(ReactionAnchor.IssueBody);
                     session.IssueReactionId = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     newSessionId = session.CopilotSessionId;
@@ -727,7 +736,7 @@ public static class SessionCommand
 
                 // Best-effort: transition to 👀 (queued) for the reset session
                 TransitionReactionBestEffort(stateStore, ghCli, config, issueKey, newSessionId!,
-                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionId,
+                    reactionRepo!, reactionIssueNumber, reactionRuleName!, oldReactionAnchor, oldReactionId, ReactionAnchor.IssueBody,
                     GhCliService.ReactionEyes, ct);
 
                 return 0;
@@ -1046,6 +1055,9 @@ public static class SessionCommand
             LastRedispatchWasIssueComment = session.LastRedispatchWasIssueComment,
             WorktreePath = session.WorktreePath,
             BranchName = session.BranchName,
+            IssueReactionId = session.IssueReactionId,
+            ReactionTargetType = session.ReactionTargetType,
+            ReactionTargetCommentId = session.ReactionTargetCommentId,
         };
 
     private static string GetResumeTargetDisplay(DispatchSession session)
@@ -1078,34 +1090,52 @@ public static class SessionCommand
 
     /// <summary>
     /// Best-effort reaction transition for use in session commands. Removes the old reaction,
-    /// adds the new one, and updates <see cref="DispatchSession.IssueReactionId"/> in a
-    /// second state lock with identity verification. Failures are logged but do not
-    /// affect the command's return code.
+    /// adds the new one on the requested anchor, and persists the updated anchor state in a
+    /// second state lock with identity verification. Failures are logged but do not affect
+    /// the command's return code.
     /// </summary>
     private static void TransitionReactionBestEffort(
         StateStore stateStore, GhCliService ghCli, CopilotdConfig config,
         string issueKey, string sessionId, string repo, int issueNumber,
-        string ruleName, long? oldReactionId, string? newContent, CancellationToken ct)
+        string ruleName, ReactionAnchor oldAnchor, long? oldReactionId, ReactionAnchor newAnchor,
+        string? newContent, CancellationToken ct)
     {
         if (!AreReactionsEnabled(config, ruleName))
             return;
 
         if (oldReactionId.HasValue)
-            ghCli.RemoveIssueReaction(repo, issueNumber, oldReactionId.Value);
+            RemoveReactionForAnchor(ghCli, repo, issueNumber, oldAnchor, oldReactionId.Value);
 
         long? newId = null;
         if (newContent is not null)
-            newId = ghCli.AddIssueReaction(repo, issueNumber, newContent);
+            newId = AddReactionForAnchor(ghCli, repo, issueNumber, newAnchor, newContent);
 
-        // Persist the new reaction ID with identity check to avoid clobbering a reset session
+        // Persist the new reaction state with identity check to avoid clobbering a reset session
         stateStore.WithStateLock(() =>
         {
             var state = stateStore.LoadState();
             if (state.Sessions.TryGetValue(issueKey, out var s) && s.CopilotSessionId == sessionId)
             {
+                s.SetReactionAnchor(newAnchor);
                 s.IssueReactionId = newId;
                 stateStore.SaveState(state);
             }
         }, ct);
+    }
+
+    private static long? AddReactionForAnchor(GhCliService ghCli, string repo, int issueNumber, ReactionAnchor anchor, string content)
+        => anchor.TargetType == ReactionTargetType.IssueComment && anchor.IssueCommentId.HasValue
+            ? ghCli.AddIssueCommentReaction(repo, anchor.IssueCommentId.Value, content)
+            : ghCli.AddIssueReaction(repo, issueNumber, content);
+
+    private static void RemoveReactionForAnchor(GhCliService ghCli, string repo, int issueNumber, ReactionAnchor anchor, long reactionId)
+    {
+        if (anchor.TargetType == ReactionTargetType.IssueComment && anchor.IssueCommentId.HasValue)
+        {
+            ghCli.RemoveIssueCommentReaction(repo, anchor.IssueCommentId.Value, reactionId);
+            return;
+        }
+
+        ghCli.RemoveIssueReaction(repo, issueNumber, reactionId);
     }
 }

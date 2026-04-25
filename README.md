@@ -251,9 +251,9 @@ stateDiagram-v2
 | **Orphaned** | **Pending** | Retry eligible (retry count < 3) — exponential backoff: 2^n minutes, capped at 30m |
 | **Orphaned** | **Failed** | Max retries (3) exceeded |
 | **Failed** | **Pending** | Issue still matches and retry count < 3 |
-| **WaitingForFeedback** | **Pending** | New comment detected from a trusted author (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity. Author trust is controlled by `trust_level` rule setting |
+| **WaitingForFeedback** | **Pending** | New comment detected from a trusted author (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity, and the lifecycle reaction moves to that triggering issue comment. Author trust is controlled by `trust_level` rule setting |
 | **WaitingForFeedback** | **Completed** | Issue no longer matches rules while waiting |
-| **WaitingForReview** | **Pending** | New review comment or changes-requested review detected on the PR — re-dispatched with PR review prompt |
+| **WaitingForReview** | **Pending** | New review comment or changes-requested review detected on the PR, or a new trusted issue comment is added while review is pending — re-dispatched with the appropriate resume prompt. Issue-comment redispatches move the lifecycle reaction to the triggering issue comment |
 | **WaitingForReview** | **Completed** | PR is merged or closed, or issue no longer matches rules |
 | **Completed** | **Pending** | Issue re-matches rules (e.g., reopened) — only if not explicitly completed by copilot |
 | Any non-terminal | **Completed** | Copilot calls `copilotd session complete` — sets `CompletedBySession` flag, prevents re-dispatch |
@@ -276,7 +276,7 @@ When a copilot session encounters an issue that needs more information before wo
 2. The comment is posted to the GitHub issue (with a hidden `<!-- posted by copilotd -->` marker)
 3. The session transitions to **WaitingForFeedback** — the copilot process exits, no instance slot is consumed
 4. On each poll cycle, the reconciler checks for new comments on the issue (ignoring copilotd-posted comments)
-5. When a new comment is detected, the session is re-dispatched with `--resume` to preserve the full conversation context
+5. When a new trusted comment is detected, the session is re-dispatched with `--resume` to preserve the full conversation context, and the lifecycle reaction moves from the issue body to that specific comment
 6. The model can then decide to start coding or ask further questions (multiple rounds supported)
 
 The default prompt instructs copilot sessions to use this flow when they need clarification.
@@ -288,12 +288,12 @@ When a copilot session creates a pull request, it can enter a review monitoring 
 1. The session calls `copilotd session pr <pr-number> <issue>` after pushing a PR
 2. The session transitions to **WaitingForReview** — the copilot process exits, no instance slot is consumed
 3. On each poll cycle, the reconciler checks for new PR review comments, formal reviews (`CHANGES_REQUESTED` or `COMMENTED`), and falls back to checking issue comments
-4. When review feedback is detected, the session is re-dispatched with a PR-specific prompt that instructs copilot to address the feedback
+4. When PR review feedback is detected, the session is re-dispatched with a PR-specific prompt that instructs copilot to address the feedback; when a trusted issue comment triggers the re-dispatch instead, the normal issue-feedback resume prompt is used
 5. The existing worktree is refreshed (`git fetch` + `git pull --ff-only`) rather than recreated, preserving any local state
 6. Copilot addresses the feedback, pushes changes to the existing PR, and calls `session pr` again to continue the loop
 7. If the PR is merged or closed, the session is automatically completed
 
-The default prompt instructs copilot sessions to use `session pr` after creating a pull request. Multiple review rounds are supported — the session resumes with `--resume` for full conversation context continuity.
+The default prompt instructs copilot sessions to use `session pr` after creating a pull request. Multiple review rounds are supported — the session resumes with `--resume` for full conversation context continuity. For the issue-comment paths above, the lifecycle reaction follows the latest trusted issue comment; full PR-feedback anchoring remains future work.
 
 When re-dispatched for PR review, copilot is instructed to interact with the PR directly:
 - **General comments** — posted to the PR via `gh pr comment`

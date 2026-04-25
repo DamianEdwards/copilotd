@@ -476,7 +476,7 @@ public sealed class GhCliService
     /// <summary>
     /// Information about a new comment detected on an issue or PR.
     /// </summary>
-    public sealed record NewCommentInfo(string Author, DateTimeOffset CreatedAt);
+    public sealed record NewCommentInfo(string Author, DateTimeOffset CreatedAt, long? IssueCommentId = null);
 
     /// <summary>
     /// Checks whether there are new comments on an issue since the given timestamp,
@@ -491,7 +491,7 @@ public sealed class GhCliService
     /// </summary>
     public NewCommentInfo? GetNewCommentSince(string repo, int issueNumber, DateTimeOffset since)
     {
-        var args = $"issue view {issueNumber} --repo {repo} --json comments";
+        var args = $"api repos/{repo}/issues/{issueNumber}/comments?per_page=100";
         var (exitCode, output) = RunGh(args);
         if (exitCode != 0)
         {
@@ -502,12 +502,12 @@ public sealed class GhCliService
         try
         {
             using var doc = JsonDocument.Parse(output);
-            if (!doc.RootElement.TryGetProperty("comments", out var comments))
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
                 return null;
 
-            foreach (var comment in comments.EnumerateArray())
+            foreach (var comment in doc.RootElement.EnumerateArray())
             {
-                if (!comment.TryGetProperty("createdAt", out var createdAtEl))
+                if (!comment.TryGetProperty("created_at", out var createdAtEl))
                     continue;
 
                 var createdAtStr = createdAtEl.GetString();
@@ -525,12 +525,13 @@ public sealed class GhCliService
                         continue;
                 }
 
-                var author = comment.TryGetProperty("author", out var a) && a.TryGetProperty("login", out var l)
+                var author = comment.TryGetProperty("user", out var a) && a.TryGetProperty("login", out var l)
                     ? l.GetString() ?? "unknown"
                     : "unknown";
+                var commentId = comment.TryGetProperty("id", out var idEl) ? idEl.GetInt64() : (long?)null;
 
                 _logger.LogDebug("Found new comment on {Repo}#{Issue} from {Author}", repo, issueNumber, author);
-                return new NewCommentInfo(author, createdAt);
+                return new NewCommentInfo(author, createdAt, commentId);
             }
 
             return null;
@@ -783,16 +784,40 @@ public sealed class GhCliService
     internal const string ReactionThumbsDown = "-1";
 
     /// <summary>
-    /// Adds a reaction emoji to a GitHub issue. Returns the reaction ID for later removal,
+    /// Adds a reaction emoji to a GitHub issue body. Returns the reaction ID for later removal,
     /// or null on failure. Best-effort: failures are logged but do not block session lifecycle.
     /// </summary>
     public long? AddIssueReaction(string repo, int issueNumber, string content)
+        => AddReaction($"repos/{repo}/issues/{issueNumber}/reactions", content, $"{repo}#{issueNumber}");
+
+    /// <summary>
+    /// Adds a reaction emoji to a GitHub issue comment. Returns the reaction ID for later removal,
+    /// or null on failure. Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    public long? AddIssueCommentReaction(string repo, long issueCommentId, string content)
+        => AddReaction($"repos/{repo}/issues/comments/{issueCommentId}/reactions", content, $"{repo} issue comment {issueCommentId}");
+
+    /// <summary>
+    /// Removes a reaction from a GitHub issue body by reaction ID. Returns true on success.
+    /// Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    public bool RemoveIssueReaction(string repo, int issueNumber, long reactionId)
+        => RemoveReaction($"repos/{repo}/issues/{issueNumber}/reactions/{reactionId}", reactionId, $"{repo}#{issueNumber}");
+
+    /// <summary>
+    /// Removes a reaction from a GitHub issue comment by reaction ID. Returns true on success.
+    /// Best-effort: failures are logged but do not block session lifecycle.
+    /// </summary>
+    public bool RemoveIssueCommentReaction(string repo, long issueCommentId, long reactionId)
+        => RemoveReaction($"repos/{repo}/issues/comments/{issueCommentId}/reactions/{reactionId}", reactionId, $"{repo} issue comment {issueCommentId}");
+
+    private long? AddReaction(string endpoint, string content, string targetDescription)
     {
-        var args = $"api repos/{repo}/issues/{issueNumber}/reactions -f content={content}";
+        var args = $"api {endpoint} -f content={content}";
         var (exitCode, output) = RunGh(args);
         if (exitCode != 0)
         {
-            _logger.LogWarning("Failed to add {Reaction} reaction on {Repo}#{Issue}: {Output}", content, repo, issueNumber, output);
+            _logger.LogWarning("Failed to add {Reaction} reaction on {Target}: {Output}", content, targetDescription, output);
             return null;
         }
 
@@ -805,24 +830,21 @@ public sealed class GhCliService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to parse reaction response for {Repo}#{Issue}", repo, issueNumber);
+            _logger.LogWarning(ex, "Failed to parse reaction response for {Target}", targetDescription);
             return null;
         }
     }
 
-    /// <summary>
-    /// Removes a reaction from a GitHub issue by reaction ID. Returns true on success.
-    /// Best-effort: failures are logged but do not block session lifecycle.
-    /// </summary>
-    public bool RemoveIssueReaction(string repo, int issueNumber, long reactionId)
+    private bool RemoveReaction(string endpoint, long reactionId, string targetDescription)
     {
-        var args = $"api repos/{repo}/issues/{issueNumber}/reactions/{reactionId} -X DELETE";
+        var args = $"api {endpoint} -X DELETE";
         var (exitCode, _) = RunGh(args);
         if (exitCode != 0)
         {
-            _logger.LogWarning("Failed to remove reaction {Id} from {Repo}#{Issue}", reactionId, repo, issueNumber);
+            _logger.LogWarning("Failed to remove reaction {Id} from {Target}", reactionId, targetDescription);
             return false;
         }
+
         return true;
     }
 
