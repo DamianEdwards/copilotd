@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Reflection;
+using System.Text;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
 using Copilotd.Services;
@@ -646,9 +647,7 @@ public static class InitCommand
         GhCliService ghCli,
         string? username)
     {
-        var searchTerm = AnsiConsole.Prompt(
-            new TextPrompt<string>("Search term or owner/repo (empty to go back):")
-                .AllowEmpty());
+        var searchTerm = PromptInlineSearchTerm();
         if (string.IsNullOrWhiteSpace(searchTerm))
             return;
 
@@ -693,6 +692,104 @@ public static class InitCommand
 
         foreach (var repo in selectedMatches)
             selectedRepos.Add(repo.NameWithOwner);
+    }
+
+    private static string PromptInlineSearchTerm()
+    {
+        const string prompt = "Search term or owner/repo (empty to go back): ";
+        var input = new StringBuilder();
+        bool? originalCursorVisible = null;
+
+        try
+        {
+            originalCursorVisible = Console.CursorVisible;
+            Console.CursorVisible = true;
+        }
+        catch
+        {
+        }
+
+        RenderInlinePrompt(prompt, input.ToString());
+
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            switch (key.Key)
+            {
+                case ConsoleKey.Enter:
+                    ClearInlinePrompt();
+                    if (originalCursorVisible.HasValue)
+                    {
+                        try
+                        {
+                            Console.CursorVisible = originalCursorVisible.Value;
+                        }
+                        catch
+                        {
+                        }
+                    }
+                     return input.ToString();
+
+                case ConsoleKey.Backspace:
+                    if (input.Length > 0)
+                        input.Length--;
+                    break;
+
+                case ConsoleKey.Escape:
+                    input.Clear();
+                    ClearInlinePrompt();
+                    if (originalCursorVisible.HasValue)
+                    {
+                        try
+                        {
+                            Console.CursorVisible = originalCursorVisible.Value;
+                        }
+                        catch
+                        {
+                        }
+                    }
+                    return "";
+
+                default:
+                    if (!char.IsControl(key.KeyChar))
+                        input.Append(key.KeyChar);
+                    break;
+            }
+
+            RenderInlinePrompt(prompt, input.ToString());
+        }
+    }
+
+    private static void RenderInlinePrompt(string prompt, string value)
+    {
+        var text = prompt + value;
+        var width = Math.Max(GetConsoleWidth() - 1, text.Length);
+        Console.Write('\r');
+        Console.Write(text);
+        if (width > text.Length)
+            Console.Write(new string(' ', width - text.Length));
+        Console.Write('\r');
+        Console.Write(text);
+    }
+
+    private static void ClearInlinePrompt()
+    {
+        var width = Math.Max(GetConsoleWidth() - 1, 1);
+        Console.Write('\r');
+        Console.Write(new string(' ', width));
+        Console.Write('\r');
+    }
+
+    private static int GetConsoleWidth()
+    {
+        try
+        {
+            return Console.BufferWidth;
+        }
+        catch
+        {
+            return 120;
+        }
     }
 
     private static void MergeDiscoveredRepos(List<AccessibleGitHubRepo> repos, IReadOnlyList<AccessibleGitHubRepo> discoveredRepos)
