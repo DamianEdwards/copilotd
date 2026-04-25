@@ -252,7 +252,7 @@ public static class InitCommand
                 AnsiConsole.WriteLine();
 
                 ConsoleOutput.Info("Fetching repositories you can watch...");
-                var repos = ghCli.ListAccessibleRepos();
+                var repos = ghCli.ListAccessibleRepos(username);
 
                 if (repos.Count == 0)
                 {
@@ -479,6 +479,7 @@ public static class InitCommand
         var groupPrompt = new MultiSelectionPrompt<AccessibleGitHubRepo>()
             .Title($"Select repositories in {Markup.Escape(menuOption.Label)}:")
             .PageSize(15)
+            .NotRequired()
             .MoreChoicesText("[grey](Move up/down to see more repos)[/]")
             .InstructionsText("[grey](Press space to toggle, enter to save this group and return)[/]")
             .UseConverter(repo => FormatRepoChoice(repo, cloneStatus))
@@ -515,6 +516,7 @@ public static class InitCommand
         var reviewPrompt = new MultiSelectionPrompt<AccessibleGitHubRepo>()
             .Title("Review selected repositories:")
             .PageSize(15)
+            .NotRequired()
             .MoreChoicesText("[grey](Move up/down to see more repos)[/]")
             .InstructionsText("[grey](Press space to remove or restore, enter to return)[/]")
             .UseConverter(repo => FormatRepoChoice(repo, cloneStatus))

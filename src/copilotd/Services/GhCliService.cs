@@ -113,105 +113,59 @@ public sealed class GhCliService
     /// Lists repositories the user can watch during init:
     /// repos they own plus repos where they have write-or-better access.
     /// </summary>
-    public List<AccessibleGitHubRepo> ListAccessibleRepos()
+    public List<AccessibleGitHubRepo> ListAccessibleRepos(string? currentUsername = null)
     {
-        const string query = """
-            query($cursor: String) {
-                viewer {
-                    login
-                    repositories(
-                        first: 100
-                        after: $cursor
-                        affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]
-                    ) {
-                        nodes {
-                            nameWithOwner
-                            viewerPermission
-                            owner {
-                                login
-                            }
-                        }
-                        pageInfo {
-                            hasNextPage
-                            endCursor
-                        }
-                    }
-                }
-            }
-            """;
-
         var repos = new Dictionary<string, AccessibleGitHubRepo>(StringComparer.OrdinalIgnoreCase);
-        string? cursor = null;
+        currentUsername ??= CheckAuth().Username;
 
-        while (true)
+        var (exitCode, output) = RunGh(
+            "api --paginate --slurp \"user/repos?per_page=100&affiliation=owner,collaborator,organization_member\"");
+        if (exitCode != 0)
         {
-            var request = new JsonObject
+            _logger.LogWarning("Failed to list accessible repos via REST API: {Output}", output);
+            return ListOwnedReposFallback();
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            foreach (var page in doc.RootElement.EnumerateArray())
             {
-                ["query"] = query,
-                ["variables"] = new JsonObject
+                foreach (var repo in page.EnumerateArray())
                 {
-                    ["cursor"] = cursor,
-                },
-            };
-
-            var (exitCode, output) = RunGhWithStdin("api graphql --input -", request.ToJsonString());
-            if (exitCode != 0)
-            {
-                _logger.LogWarning("Failed to list accessible repos via GraphQL: {Output}", output);
-                return ListOwnedReposFallback();
-            }
-
-            try
-            {
-                using var doc = JsonDocument.Parse(output);
-
-                if (doc.RootElement.TryGetProperty("errors", out var errors))
-                {
-                    _logger.LogWarning("GraphQL errors listing accessible repos: {Errors}", errors.ToString());
-                    return ListOwnedReposFallback();
-                }
-
-                var viewer = doc.RootElement.GetProperty("data").GetProperty("viewer");
-                var viewerLogin = viewer.GetProperty("login").GetString();
-                var repositories = viewer.GetProperty("repositories");
-
-                foreach (var node in repositories.GetProperty("nodes").EnumerateArray())
-                {
-                    var nameWithOwner = node.GetProperty("nameWithOwner").GetString();
-                    var ownerLogin = node.GetProperty("owner").GetProperty("login").GetString();
-                    var viewerPermission = node.TryGetProperty("viewerPermission", out var permissionEl)
-                        ? permissionEl.GetString()
+                    var fullName = repo.TryGetProperty("full_name", out var fullNameEl)
+                        ? fullNameEl.GetString()
                         : null;
 
-                    if (string.IsNullOrWhiteSpace(nameWithOwner) || string.IsNullOrWhiteSpace(ownerLogin))
+                    if (string.IsNullOrWhiteSpace(fullName))
                         continue;
 
-                    var isOwnedByViewer = !string.IsNullOrWhiteSpace(viewerLogin)
-                        && string.Equals(ownerLogin, viewerLogin, StringComparison.OrdinalIgnoreCase);
+                    var ownerLogin = repo.TryGetProperty("owner", out var ownerEl)
+                        && ownerEl.TryGetProperty("login", out var ownerLoginEl)
+                        ? ownerLoginEl.GetString()
+                        : null;
 
-                    if (!isOwnedByViewer && !HasWriteOrBetter(viewerPermission))
+                    if (string.IsNullOrWhiteSpace(ownerLogin))
                         continue;
 
-                    repos[nameWithOwner] = new AccessibleGitHubRepo
+                    var isOwnedByViewer = !string.IsNullOrWhiteSpace(currentUsername)
+                        && string.Equals(ownerLogin, currentUsername, StringComparison.OrdinalIgnoreCase);
+
+                    if (!isOwnedByViewer && !HasWriteOrBetter(repo))
+                        continue;
+
+                    repos[fullName] = new AccessibleGitHubRepo
                     {
-                        NameWithOwner = nameWithOwner,
+                        NameWithOwner = fullName,
                         AccessKind = isOwnedByViewer ? GitHubRepoAccessKind.Owned : GitHubRepoAccessKind.WriteAccess,
                     };
                 }
-
-                var pageInfo = repositories.GetProperty("pageInfo");
-                if (!pageInfo.GetProperty("hasNextPage").GetBoolean())
-                    break;
-
-                cursor = pageInfo.GetProperty("endCursor").GetString();
-                if (string.IsNullOrWhiteSpace(cursor))
-                    break;
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to parse accessible repo GraphQL response");
-                return ListOwnedReposFallback();
-            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse accessible repo REST response");
+            return ListOwnedReposFallback();
         }
 
         return repos.Values
@@ -755,8 +709,20 @@ public sealed class GhCliService
 
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);
 
-    private static bool HasWriteOrBetter(string? permission)
-        => permission is "ADMIN" or "MAINTAIN" or "WRITE";
+    private static bool HasWriteOrBetter(JsonElement repo)
+    {
+        if (!repo.TryGetProperty("permissions", out var permissions) || permissions.ValueKind != JsonValueKind.Object)
+            return false;
+
+        return GetBooleanProperty(permissions, "admin")
+            || GetBooleanProperty(permissions, "maintain")
+            || GetBooleanProperty(permissions, "push");
+    }
+
+    private static bool GetBooleanProperty(JsonElement obj, string propertyName)
+        => obj.TryGetProperty(propertyName, out var property)
+            && property.ValueKind is JsonValueKind.True or JsonValueKind.False
+            && property.GetBoolean();
 
     private (int ExitCode, string Output) RunGh(string arguments)
     {
