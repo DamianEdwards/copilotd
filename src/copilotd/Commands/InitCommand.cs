@@ -251,8 +251,8 @@ public static class InitCommand
                 AnsiConsole.Write(new Rule("[bold blue]Repository Selection[/]").LeftJustified());
                 AnsiConsole.WriteLine();
 
-                ConsoleOutput.Info("Fetching your repositories...");
-                var repos = ghCli.ListRepos();
+                ConsoleOutput.Info("Fetching repositories you can watch...");
+                var repos = ghCli.ListAccessibleRepos();
 
                 if (repos.Count == 0)
                 {
@@ -260,32 +260,22 @@ public static class InitCommand
                 }
                 else
                 {
+                    var repoSlugs = repos.Select(repo => repo.NameWithOwner).ToList();
+
                     // Check which repos are cloned locally under RepoHome (single scan, not per-repo)
-                    var cloneStatus = repoResolver.BuildCloneStatusMap(repos, config);
+                    var cloneStatus = repoResolver.BuildCloneStatusMap(repoSlugs, config);
 
                     var clonedCount = cloneStatus.Values.Count(v => v);
-                    AnsiConsole.MarkupLine($"[grey]Found {clonedCount} of {repos.Count} repos cloned under {Markup.Escape(config.RepoHome)}[/]");
-                    AnsiConsole.MarkupLine("[grey]Only cloned repos can be dispatched — repos are not auto-cloned.[/]");
+                    var ownedCount = repos.Count(repo => repo.AccessKind == GitHubRepoAccessKind.Owned);
+                    var writeAccessCount = repos.Count - ownedCount;
+                    AnsiConsole.MarkupLine(
+                        $"[grey]Found {repos.Count} repos you can watch: {ownedCount} owned and {writeAccessCount} with write access.[/]");
+                    AnsiConsole.MarkupLine(
+                        $"[grey]{clonedCount} are cloned under {Markup.Escape(config.RepoHome)} and can dispatch immediately.[/]");
+                    AnsiConsole.MarkupLine("[grey]Use the group picker to edit one slice at a time. Only cloned repos can dispatch — repos are not auto-cloned.[/]");
                     AnsiConsole.WriteLine();
 
-                    var repoPrompt = new MultiSelectionPrompt<string>()
-                            .Title("Select repositories to watch ([green]cloned[/] repos will dispatch, [red]not cloned[/] repos will be skipped until cloned):")
-                            .PageSize(15)
-                            .MoreChoicesText("[grey](Move up/down, space to select, enter to confirm)[/]")
-                            .InstructionsText("[grey](Press space to toggle, enter to accept)[/]")
-                            .UseConverter(r => cloneStatus.GetValueOrDefault(r)
-                                ? $"{Markup.Escape(r)} [green](cloned)[/]"
-                                : $"{Markup.Escape(r)} [red](not cloned)[/]")
-                            .AddChoices(repos);
-
-                    // Pre-select previously chosen repos on re-run
-                    if (existingRule?.Repos is { Count: > 0 } existingRepos)
-                    {
-                        foreach (var repo in existingRepos.Where(r => repos.Contains(r, StringComparer.OrdinalIgnoreCase)))
-                            repoPrompt.Select(repo);
-                    }
-
-                    var selected = AnsiConsole.Prompt(repoPrompt);
+                    var selected = PromptForRepoSelection(repos, cloneStatus, existingRule?.Repos ?? []);
 
                     var notClonedSelected = selected.Where(r => !cloneStatus.GetValueOrDefault(r)).ToList();
                     if (notClonedSelected.Count > 0)
@@ -380,5 +370,200 @@ public static class InitCommand
         if (rule.AllowAllTools) parts.Add("--allow-all-tools");
         if (rule.AllowAllUrls) parts.Add("--allow-all-urls");
         return parts.Count > 0 ? string.Join(", ", parts) : "(defaults)";
+    }
+
+    private static List<string> PromptForRepoSelection(
+        IReadOnlyList<AccessibleGitHubRepo> repos,
+        IReadOnlyDictionary<string, bool> cloneStatus,
+        IReadOnlyList<string> existingRepos)
+    {
+        var reposBySlug = repos.ToDictionary(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase);
+        var selectedRepos = new HashSet<string>(
+            existingRepos.Where(reposBySlug.ContainsKey),
+            StringComparer.OrdinalIgnoreCase);
+
+        while (true)
+        {
+            var menuOptions = BuildRepoSelectionMenuOptions(repos, cloneStatus, selectedRepos);
+
+            var selectedMenuOption = AnsiConsole.Prompt(
+                new SelectionPrompt<RepoSelectionMenuOption>()
+                    .Title($"Choose a repository group to edit ({selectedRepos.Count} selected):")
+                    .PageSize(8)
+                    .EnableSearch()
+                    .SearchPlaceholderText("Type to search groups...")
+                    .MoreChoicesText("[grey](Use up/down to navigate, type to search, enter to open)[/]")
+                    .UseConverter(option => option.DisplayText)
+                    .AddChoices(menuOptions));
+
+            switch (selectedMenuOption.Action)
+            {
+                case RepoSelectionMenuAction.EditGroup:
+                    EditRepoSelectionGroup(selectedMenuOption, repos, cloneStatus, selectedRepos);
+                    AnsiConsole.MarkupLine($"[grey]{selectedRepos.Count} repo(s) selected so far.[/]");
+                    AnsiConsole.WriteLine();
+                    break;
+
+                case RepoSelectionMenuAction.ReviewSelected:
+                    ReviewSelectedRepos(repos, cloneStatus, selectedRepos);
+                    AnsiConsole.WriteLine();
+                    break;
+
+                case RepoSelectionMenuAction.Done:
+                    return selectedRepos
+                        .OrderBy(repo => repo, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+            }
+        }
+    }
+
+    private static List<RepoSelectionMenuOption> BuildRepoSelectionMenuOptions(
+        IReadOnlyList<AccessibleGitHubRepo> repos,
+        IReadOnlyDictionary<string, bool> cloneStatus,
+        IReadOnlySet<string> selectedRepos)
+    {
+        List<RepoSelectionMenuOption> options = [];
+
+        foreach (var (accessKind, isCloned, label) in RepoSelectionGroups)
+        {
+            var reposInGroup = repos
+                .Where(repo => repo.AccessKind == accessKind && cloneStatus.GetValueOrDefault(repo.NameWithOwner) == isCloned)
+                .ToList();
+            var selectedCount = reposInGroup.Count(repo => selectedRepos.Contains(repo.NameWithOwner));
+            options.Add(new RepoSelectionMenuOption
+            {
+                Action = RepoSelectionMenuAction.EditGroup,
+                AccessKind = accessKind,
+                IsCloned = isCloned,
+                Label = label,
+                DisplayText = $"{label} — {reposInGroup.Count} repo(s), {selectedCount} selected",
+            });
+        }
+
+        options.Add(new RepoSelectionMenuOption
+        {
+            Action = RepoSelectionMenuAction.ReviewSelected,
+            DisplayText = $"Review selected repos — {selectedRepos.Count} selected",
+        });
+
+        options.Add(new RepoSelectionMenuOption
+        {
+            Action = RepoSelectionMenuAction.Done,
+            DisplayText = "Done",
+        });
+
+        return options;
+    }
+
+    private static void EditRepoSelectionGroup(
+        RepoSelectionMenuOption menuOption,
+        IReadOnlyList<AccessibleGitHubRepo> repos,
+        IReadOnlyDictionary<string, bool> cloneStatus,
+        HashSet<string> selectedRepos)
+    {
+        if (menuOption.AccessKind is null || menuOption.IsCloned is null || string.IsNullOrWhiteSpace(menuOption.Label))
+            return;
+
+        var groupRepos = repos
+            .Where(repo => repo.AccessKind == menuOption.AccessKind
+                && cloneStatus.GetValueOrDefault(repo.NameWithOwner) == menuOption.IsCloned.Value)
+            .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (groupRepos.Count == 0)
+        {
+            ConsoleOutput.Info($"No repositories found in {menuOption.Label}.");
+            return;
+        }
+
+        var groupPrompt = new MultiSelectionPrompt<AccessibleGitHubRepo>()
+            .Title($"Select repositories in {Markup.Escape(menuOption.Label)}:")
+            .PageSize(15)
+            .MoreChoicesText("[grey](Move up/down to see more repos)[/]")
+            .InstructionsText("[grey](Press space to toggle, enter to save this group and return)[/]")
+            .UseConverter(repo => FormatRepoChoice(repo, cloneStatus))
+            .AddChoices(groupRepos);
+
+        foreach (var repo in groupRepos.Where(repo => selectedRepos.Contains(repo.NameWithOwner)))
+            groupPrompt.Select(repo);
+
+        var selectedInGroup = AnsiConsole.Prompt(groupPrompt);
+
+        foreach (var repo in groupRepos)
+            selectedRepos.Remove(repo.NameWithOwner);
+
+        foreach (var repo in selectedInGroup)
+            selectedRepos.Add(repo.NameWithOwner);
+    }
+
+    private static void ReviewSelectedRepos(
+        IReadOnlyList<AccessibleGitHubRepo> repos,
+        IReadOnlyDictionary<string, bool> cloneStatus,
+        HashSet<string> selectedRepos)
+    {
+        var currentSelection = repos
+            .Where(repo => selectedRepos.Contains(repo.NameWithOwner))
+            .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (currentSelection.Count == 0)
+        {
+            ConsoleOutput.Warning("No repositories selected yet.");
+            return;
+        }
+
+        var reviewPrompt = new MultiSelectionPrompt<AccessibleGitHubRepo>()
+            .Title("Review selected repositories:")
+            .PageSize(15)
+            .MoreChoicesText("[grey](Move up/down to see more repos)[/]")
+            .InstructionsText("[grey](Press space to remove or restore, enter to return)[/]")
+            .UseConverter(repo => FormatRepoChoice(repo, cloneStatus))
+            .AddChoices(currentSelection);
+
+        foreach (var repo in currentSelection)
+            reviewPrompt.Select(repo);
+
+        var reviewedSelection = AnsiConsole.Prompt(reviewPrompt);
+
+        selectedRepos.Clear();
+        foreach (var repo in reviewedSelection)
+            selectedRepos.Add(repo.NameWithOwner);
+    }
+
+    private static string FormatRepoChoice(AccessibleGitHubRepo repo, IReadOnlyDictionary<string, bool> cloneStatus)
+    {
+        var cloneLabel = cloneStatus.GetValueOrDefault(repo.NameWithOwner)
+            ? "[green](cloned)[/]"
+            : "[red](not cloned)[/]";
+        var accessLabel = repo.AccessKind == GitHubRepoAccessKind.Owned
+            ? "[blue](owned)[/]"
+            : "[yellow](write access)[/]";
+        return $"{Markup.Escape(repo.NameWithOwner)} {cloneLabel} {accessLabel}";
+    }
+
+    private static readonly (GitHubRepoAccessKind AccessKind, bool IsCloned, string Label)[] RepoSelectionGroups =
+    [
+        (GitHubRepoAccessKind.Owned, true, "Owned (cloned)"),
+        (GitHubRepoAccessKind.WriteAccess, true, "Write access (cloned)"),
+        (GitHubRepoAccessKind.Owned, false, "Owned (not cloned)"),
+        (GitHubRepoAccessKind.WriteAccess, false, "Write access (not cloned)"),
+    ];
+
+    private enum RepoSelectionMenuAction
+    {
+        EditGroup,
+        ReviewSelected,
+        Done,
+    }
+
+    private sealed class RepoSelectionMenuOption
+    {
+        public RepoSelectionMenuAction Action { get; init; }
+        public GitHubRepoAccessKind? AccessKind { get; init; }
+        public bool? IsCloned { get; init; }
+        public string? Label { get; init; }
+        public string DisplayText { get; init; } = "";
+
+        public override string ToString() => DisplayText;
     }
 }

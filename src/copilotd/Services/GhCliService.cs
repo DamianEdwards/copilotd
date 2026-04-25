@@ -6,6 +6,18 @@ using Microsoft.Extensions.Logging;
 
 namespace Copilotd.Services;
 
+public enum GitHubRepoAccessKind
+{
+    Owned,
+    WriteAccess,
+}
+
+public sealed class AccessibleGitHubRepo
+{
+    public string NameWithOwner { get; init; } = "";
+    public GitHubRepoAccessKind AccessKind { get; init; }
+}
+
 /// <summary>
 /// Adapter for the GitHub CLI (gh). Handles dependency checks, auth, repo listing, and issue queries.
 /// </summary>
@@ -98,19 +110,131 @@ public sealed class GhCliService
     }
 
     /// <summary>
-    /// Lists repositories the user has access to.
+    /// Lists repositories the user can watch during init:
+    /// repos they own plus repos where they have write-or-better access.
     /// </summary>
-    public List<string> ListRepos(int limit = 200)
+    public List<AccessibleGitHubRepo> ListAccessibleRepos()
+    {
+        const string query = """
+            query($cursor: String) {
+                viewer {
+                    login
+                    repositories(
+                        first: 100
+                        after: $cursor
+                        affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]
+                    ) {
+                        nodes {
+                            nameWithOwner
+                            viewerPermission
+                            owner {
+                                login
+                            }
+                        }
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
+                    }
+                }
+            }
+            """;
+
+        var repos = new Dictionary<string, AccessibleGitHubRepo>(StringComparer.OrdinalIgnoreCase);
+        string? cursor = null;
+
+        while (true)
+        {
+            var request = new JsonObject
+            {
+                ["query"] = query,
+                ["variables"] = new JsonObject
+                {
+                    ["cursor"] = cursor,
+                },
+            };
+
+            var (exitCode, output) = RunGhWithStdin("api graphql --input -", request.ToJsonString());
+            if (exitCode != 0)
+            {
+                _logger.LogWarning("Failed to list accessible repos via GraphQL: {Output}", output);
+                return ListOwnedReposFallback();
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(output);
+
+                if (doc.RootElement.TryGetProperty("errors", out var errors))
+                {
+                    _logger.LogWarning("GraphQL errors listing accessible repos: {Errors}", errors.ToString());
+                    return ListOwnedReposFallback();
+                }
+
+                var viewer = doc.RootElement.GetProperty("data").GetProperty("viewer");
+                var viewerLogin = viewer.GetProperty("login").GetString();
+                var repositories = viewer.GetProperty("repositories");
+
+                foreach (var node in repositories.GetProperty("nodes").EnumerateArray())
+                {
+                    var nameWithOwner = node.GetProperty("nameWithOwner").GetString();
+                    var ownerLogin = node.GetProperty("owner").GetProperty("login").GetString();
+                    var viewerPermission = node.TryGetProperty("viewerPermission", out var permissionEl)
+                        ? permissionEl.GetString()
+                        : null;
+
+                    if (string.IsNullOrWhiteSpace(nameWithOwner) || string.IsNullOrWhiteSpace(ownerLogin))
+                        continue;
+
+                    var isOwnedByViewer = !string.IsNullOrWhiteSpace(viewerLogin)
+                        && string.Equals(ownerLogin, viewerLogin, StringComparison.OrdinalIgnoreCase);
+
+                    if (!isOwnedByViewer && !HasWriteOrBetter(viewerPermission))
+                        continue;
+
+                    repos[nameWithOwner] = new AccessibleGitHubRepo
+                    {
+                        NameWithOwner = nameWithOwner,
+                        AccessKind = isOwnedByViewer ? GitHubRepoAccessKind.Owned : GitHubRepoAccessKind.WriteAccess,
+                    };
+                }
+
+                var pageInfo = repositories.GetProperty("pageInfo");
+                if (!pageInfo.GetProperty("hasNextPage").GetBoolean())
+                    break;
+
+                cursor = pageInfo.GetProperty("endCursor").GetString();
+                if (string.IsNullOrWhiteSpace(cursor))
+                    break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse accessible repo GraphQL response");
+                return ListOwnedReposFallback();
+            }
+        }
+
+        return repos.Values
+            .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private List<AccessibleGitHubRepo> ListOwnedReposFallback(int limit = 200)
     {
         var (exitCode, output) = RunGh($"repo list --limit {limit} --json nameWithOwner --jq \".[].nameWithOwner\"");
         if (exitCode != 0)
         {
-            _logger.LogWarning("Failed to list repos: {Output}", output);
+            _logger.LogWarning("Failed to list fallback owned repos: {Output}", output);
             return [];
         }
 
         return output
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(nameWithOwner => new AccessibleGitHubRepo
+            {
+                NameWithOwner = nameWithOwner,
+                AccessKind = GitHubRepoAccessKind.Owned,
+            })
             .ToList();
     }
 
@@ -630,6 +754,9 @@ public sealed class GhCliService
     }
 
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);
+
+    private static bool HasWriteOrBetter(string? permission)
+        => permission is "ADMIN" or "MAINTAIN" or "WRITE";
 
     private (int ExitCode, string Output) RunGh(string arguments)
     {
