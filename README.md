@@ -389,6 +389,7 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 - `prompt.md` — optional global custom prompt text appended to the built-in prompt
 - `logs\` — rolling file logs for copilotd commands, with daemon instances isolated under `logs\daemon_<uuid>\`
 - `.lock` — single-instance guard (present while daemon is running)
+- `<local app data>\copilotd\machine.id` — stable machine identifier stored outside `COPILOTD_HOME` so it survives state resets
 
 ### Config options
 

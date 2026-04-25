@@ -16,6 +16,9 @@ public sealed class StateStore
     private readonly string _configPath;
     private readonly string _statePath;
     private readonly string _updateStatePath;
+    private readonly string _machineIdentityDir;
+    private readonly string _machineIdentifierPath;
+    private readonly string _machineIdentifierLockPath;
     private readonly string _lockPath;
     private readonly string _stateLockPath;
     private readonly string _updateLockPath;
@@ -35,6 +38,9 @@ public sealed class StateStore
         _configPath = Path.Combine(_configDir, "config.json");
         _statePath = Path.Combine(_configDir, "state.json");
         _updateStatePath = Path.Combine(_configDir, "update-state.json");
+        _machineIdentityDir = CopilotdPaths.GetMachineIdentityDirectory();
+        _machineIdentifierPath = CopilotdPaths.GetMachineIdentifierPath();
+        _machineIdentifierLockPath = Path.Combine(_machineIdentityDir, ".machine-id.lock");
         _lockPath = Path.Combine(_configDir, ".lock");
         _stateLockPath = Path.Combine(_configDir, ".state-lock");
         _updateLockPath = Path.Combine(_configDir, ".update-lock");
@@ -102,6 +108,33 @@ public sealed class StateStore
         var json = JsonSerializer.Serialize(state, CopilotdJsonContext.Default.DaemonState);
         AtomicWrite(_statePath, json);
         _logger.LogDebug("State saved to {Path}", _statePath);
+    }
+
+    public string? GetMachineIdentifier(DaemonState? state = null)
+    {
+        var persistedIdentifier = ReadMachineIdentifierFromFile();
+        if (persistedIdentifier is not null)
+            return persistedIdentifier;
+
+        return NormalizeMachineIdentifier(state?.MachineIdentifier);
+    }
+
+    public string EnsureMachineIdentifier(DaemonState? state = null, CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(_machineIdentityDir);
+
+        using var lockStream = AcquireExclusiveLock(_machineIdentifierLockPath, ct);
+
+        var persistedIdentifier = ReadMachineIdentifierFromFile();
+        if (persistedIdentifier is not null)
+            return persistedIdentifier;
+
+        var machineIdentifier = NormalizeMachineIdentifier(state?.MachineIdentifier)
+                                ?? Guid.NewGuid().ToString("D");
+
+        AtomicWrite(_machineIdentifierPath, machineIdentifier);
+        _logger.LogDebug("Machine identifier saved to {Path}", _machineIdentifierPath);
+        return machineIdentifier;
     }
 
     /// <summary>
@@ -338,6 +371,32 @@ public sealed class StateStore
     }
 
     // --- Helpers ---
+
+    private string? ReadMachineIdentifierFromFile()
+    {
+        if (!File.Exists(_machineIdentifierPath))
+            return null;
+
+        try
+        {
+            return NormalizeMachineIdentifier(File.ReadAllText(_machineIdentifierPath));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read machine identifier from {Path}", _machineIdentifierPath);
+            return null;
+        }
+    }
+
+    private static string? NormalizeMachineIdentifier(string? machineIdentifier)
+    {
+        if (string.IsNullOrWhiteSpace(machineIdentifier))
+            return null;
+
+        return Guid.TryParse(machineIdentifier.Trim(), out var parsedIdentifier)
+            ? parsedIdentifier.ToString("D")
+            : null;
+    }
 
     private static void AtomicWrite(string path, string content)
     {

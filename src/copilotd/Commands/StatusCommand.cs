@@ -85,7 +85,7 @@ public static class StatusCommand
                 if (daemonInfo is { LogInstanceId: { Length: > 0 } daemonLogInstanceId })
                     ConsoleOutput.Info($"  Logs:      {logFileManager.GetDaemonLogDirectoryForDisplay(daemonLogInstanceId)}");
                 ConsoleOutput.Info($"  Machine:   {Environment.MachineName}");
-                ConsoleOutput.Info($"  Machine ID:{(state.MachineIdentifier is { Length: > 0 } machineIdentifier ? $" {machineIdentifier}" : " (not assigned)")}");
+                ConsoleOutput.Info($"  Machine ID:{(stateStore.GetMachineIdentifier(state) is { Length: > 0 } machineIdentifier ? $" {machineIdentifier}" : " (not assigned)")}");
 
                 // Control session status
                 if (state.ControlSession is not null)

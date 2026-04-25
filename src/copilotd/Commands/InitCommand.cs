@@ -27,8 +27,7 @@ public static class InitCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var repoResolver = services.GetRequiredService<RepoPathResolver>();
                 var state = stateStore.LoadState();
-                var hadMachineIdentifier = !string.IsNullOrWhiteSpace(state.MachineIdentifier);
-                state.EnsureMachineIdentifier();
+                stateStore.EnsureMachineIdentifier(state, ct);
 
                 // ── Phase 1: Dependencies & Auth ──────────────────────────
                 AnsiConsole.Write(new Rule("[bold blue]Dependencies & Authentication[/]").LeftJustified());
@@ -334,9 +333,6 @@ public static class InitCommand
                 AnsiConsole.WriteLine();
 
                 // ── Phase 6: Save & Summary ───────────────────────────────
-                if (!hadMachineIdentifier)
-                    stateStore.SaveState(state);
-
                 stateStore.SaveConfig(config);
 
                 AnsiConsole.Write(new Rule("[bold green]Configuration Saved[/]").LeftJustified());

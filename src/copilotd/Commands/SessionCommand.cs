@@ -388,10 +388,7 @@ public static class SessionCommand
                     oldReactionId = session.IssueReactionId;
                     ruleName = session.RuleName;
 
-                    var hadMachineIdentifier = !string.IsNullOrWhiteSpace(state.MachineIdentifier);
-                    machineIdentifier = state.EnsureMachineIdentifier();
-                    if (!hadMachineIdentifier)
-                        stateStore.SaveState(state);
+                    machineIdentifier = stateStore.EnsureMachineIdentifier(state, ct);
                 }, ct);
 
                 if (errorMessage is not null)

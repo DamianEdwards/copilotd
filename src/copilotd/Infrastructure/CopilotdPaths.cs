@@ -38,6 +38,21 @@ public static class CopilotdPaths
     public static string GetCopilotHomeDirectory()
         => Path.Combine(GetUserProfileDirectory(), ".copilot");
 
+    public static string GetLocalAppDataDirectory()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(localAppData))
+            return localAppData;
+
+        return Path.Combine(GetUserProfileDirectory(), ".local", "share");
+    }
+
+    public static string GetMachineIdentityDirectory()
+        => Path.Combine(GetLocalAppDataDirectory(), "copilotd");
+
+    public static string GetMachineIdentifierPath()
+        => Path.Combine(GetMachineIdentityDirectory(), "machine.id");
+
     public static string GetCopilotConfigPath()
         => Path.Combine(GetCopilotHomeDirectory(), "config.json");
 

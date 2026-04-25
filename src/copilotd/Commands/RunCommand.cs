@@ -127,7 +127,7 @@ public static class RunCommand
                         stateStore.WithStateLock(() =>
                         {
                             var state = stateStore.LoadState();
-                            var machineIdentifier = state.EnsureMachineIdentifier();
+                            var machineIdentifier = stateStore.EnsureMachineIdentifier(state, daemonCancellationToken);
 
                             var existingAlive = state.ControlSession is not null
                                 && IsControlSessionHealthy(
@@ -258,7 +258,7 @@ public static class RunCommand
                                             }
 
                                             logger.LogInformation("Relaunching control session...");
-                                            var controlSession = processManager.LaunchControlSession(config, state.EnsureMachineIdentifier());
+                                            var controlSession = processManager.LaunchControlSession(config, stateStore.EnsureMachineIdentifier(state, daemonCancellationToken));
                                             if (controlSession is not null)
                                             {
                                                 state.ControlSession = controlSession;

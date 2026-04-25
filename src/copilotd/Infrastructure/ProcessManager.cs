@@ -57,7 +57,7 @@ public sealed partial class ProcessManager
 
         var customPrompt = _stateStore.LoadCustomPrompt(config);
         var copilotdCommand = _runtimeContext.GetCopilotdCallbackCommand();
-        var machineIdentifier = state.EnsureMachineIdentifier();
+        var machineIdentifier = _stateStore.EnsureMachineIdentifier(state);
         var prompt = BuildPrompt(customPrompt, issue, session, config, copilotdCommand, machineIdentifier);
         var hasExistingResumeContext = HasExistingResumeContext(session);
         var sessionName = session.CopilotSessionName;

@@ -12,9 +12,9 @@ public sealed class DaemonState
     public int SchemaVersion { get; set; } = 1;
 
     /// <summary>
-    /// Stable UUID assigned to this copilotd installation for cross-machine attribution.
-    /// Persisted in state so public metadata can identify which instance acted without
-    /// exposing the local machine name.
+    /// Legacy migration fallback for machine identity. Newer versions persist the
+    /// machine identifier separately in the local app data machine.id file so it
+    /// survives copilotd home/state resets.
     /// </summary>
     public string? MachineIdentifier { get; set; }
 
@@ -39,16 +39,6 @@ public sealed class DaemonState
     /// </summary>
     public ControlSessionInfo? ControlSession { get; set; }
 
-    /// <summary>
-    /// Returns the persisted machine identifier, assigning a new stable UUID when missing.
-    /// </summary>
-    public string EnsureMachineIdentifier()
-    {
-        if (string.IsNullOrWhiteSpace(MachineIdentifier))
-            MachineIdentifier = Guid.NewGuid().ToString("D");
-
-        return MachineIdentifier;
-    }
 }
 
 /// <summary>
