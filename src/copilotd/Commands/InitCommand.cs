@@ -466,21 +466,14 @@ public static class InitCommand
                     AnsiConsole.WriteLine();
                     break;
 
-                case RepoSelectionMenuAction.LoadAdditionalWriteAccess:
-                    additionalWriteAccessReposLoaded = true;
-                    LoadAdditionalWriteAccessRepos(repos, ghCli, username);
-                    cloneStatus = BuildCloneStatusMap(repos, clonedRepoSlugs);
-                    EditRepoSelectionGroup(
-                        new RepoSelectionMenuOption
-                        {
-                            Action = RepoSelectionMenuAction.EditGroup,
-                            AccessKind = GitHubRepoAccessKind.WriteAccess,
-                            IsCloned = false,
-                            Label = "Write access (not cloned)",
-                        },
+                case RepoSelectionMenuAction.OpenWriteAccessNotCloned:
+                    HandleWriteAccessNotClonedFlow(
                         repos,
-                        cloneStatus,
-                        selectedRepos);
+                        clonedRepoSlugs,
+                        selectedRepos,
+                        ghCli,
+                        username,
+                        ref additionalWriteAccessReposLoaded);
                     AnsiConsole.MarkupLine($"[grey]{selectedRepos.Count} repo(s) selected so far.[/]");
                     AnsiConsole.WriteLine();
                     break;
@@ -508,20 +501,23 @@ public static class InitCommand
 
         foreach (var (accessKind, isCloned, label) in RepoSelectionGroups)
         {
-            if (accessKind == GitHubRepoAccessKind.WriteAccess && !isCloned && !additionalWriteAccessReposLoaded)
+            if (accessKind == GitHubRepoAccessKind.WriteAccess && !isCloned)
             {
-                var knownReposInGroup = repos
+                var loadedReposInGroup = repos
                     .Where(repo => repo.AccessKind == accessKind && cloneStatus.GetValueOrDefault(repo.NameWithOwner) == isCloned)
                     .ToList();
+                var loadedSelectedCount = loadedReposInGroup.Count(repo => selectedRepos.Contains(repo.NameWithOwner));
                 options.Add(new RepoSelectionMenuOption
                 {
-                    Action = RepoSelectionMenuAction.LoadAdditionalWriteAccess,
+                    Action = RepoSelectionMenuAction.OpenWriteAccessNotCloned,
                     AccessKind = accessKind,
                     IsCloned = isCloned,
                     Label = label,
-                    DisplayText = knownReposInGroup.Count > 0
-                        ? $"{label} — {knownReposInGroup.Count} saved repo(s), load more from GitHub"
-                        : $"{label} — load from GitHub on demand",
+                    DisplayText = additionalWriteAccessReposLoaded
+                        ? $"{label} — {loadedReposInGroup.Count} repo(s), {loadedSelectedCount} selected"
+                        : loadedReposInGroup.Count > 0
+                            ? $"{label} — {loadedReposInGroup.Count} loaded, {loadedSelectedCount} selected (search or load all)"
+                            : $"{label} — search GitHub or load all",
                 });
                 continue;
             }
@@ -555,6 +551,165 @@ public static class InitCommand
         return options;
     }
 
+    private static void HandleWriteAccessNotClonedFlow(
+        List<AccessibleGitHubRepo> repos,
+        HashSet<string> clonedRepoSlugs,
+        HashSet<string> selectedRepos,
+        GhCliService ghCli,
+        string? username,
+        ref bool additionalWriteAccessReposLoaded)
+    {
+        while (true)
+        {
+            var cloneStatus = BuildCloneStatusMap(repos, clonedRepoSlugs);
+            var loadedRepos = repos
+                .Where(repo => repo.AccessKind == GitHubRepoAccessKind.WriteAccess && !cloneStatus.GetValueOrDefault(repo.NameWithOwner))
+                .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var selectedCount = loadedRepos.Count(repo => selectedRepos.Contains(repo.NameWithOwner));
+
+            var menuOptions = new List<WriteAccessNotClonedMenuOption>
+            {
+                new()
+                {
+                    Action = WriteAccessNotClonedMenuAction.SearchByTerm,
+                    DisplayText = "Search GitHub by term (recommended)",
+                },
+            };
+
+            if (loadedRepos.Count > 0)
+            {
+                menuOptions.Add(new WriteAccessNotClonedMenuOption
+                {
+                    Action = WriteAccessNotClonedMenuAction.EditLoadedResults,
+                    DisplayText = $"Edit loaded results — {loadedRepos.Count} repo(s), {selectedCount} selected",
+                });
+            }
+
+            if (!additionalWriteAccessReposLoaded)
+            {
+                menuOptions.Add(new WriteAccessNotClonedMenuOption
+                {
+                    Action = WriteAccessNotClonedMenuAction.LoadAll,
+                    DisplayText = "Load all from GitHub (slow)",
+                });
+            }
+
+            menuOptions.Add(new WriteAccessNotClonedMenuOption
+            {
+                Action = WriteAccessNotClonedMenuAction.Back,
+                DisplayText = "Back",
+            });
+
+            var selectedOption = AnsiConsole.Prompt(
+                new SelectionPrompt<WriteAccessNotClonedMenuOption>()
+                    .Title("Choose how to find write-access repos that are not cloned:")
+                    .PageSize(6)
+                    .UseConverter(option => option.DisplayText)
+                    .AddChoices(menuOptions));
+
+            switch (selectedOption.Action)
+            {
+                case WriteAccessNotClonedMenuAction.SearchByTerm:
+                    SearchWriteAccessNotClonedRepos(repos, clonedRepoSlugs, selectedRepos, ghCli, username);
+                    break;
+
+                case WriteAccessNotClonedMenuAction.EditLoadedResults:
+                    EditRepoSelectionGroup(
+                        new RepoSelectionMenuOption
+                        {
+                            Action = RepoSelectionMenuAction.EditGroup,
+                            AccessKind = GitHubRepoAccessKind.WriteAccess,
+                            IsCloned = false,
+                            Label = "Write access (not cloned)",
+                        },
+                        repos,
+                        cloneStatus,
+                        selectedRepos);
+                    break;
+
+                case WriteAccessNotClonedMenuAction.LoadAll:
+                    additionalWriteAccessReposLoaded = true;
+                    LoadAdditionalWriteAccessRepos(repos, ghCli, username);
+                    break;
+
+                case WriteAccessNotClonedMenuAction.Back:
+                    return;
+            }
+        }
+    }
+
+    private static void SearchWriteAccessNotClonedRepos(
+        List<AccessibleGitHubRepo> repos,
+        HashSet<string> clonedRepoSlugs,
+        HashSet<string> selectedRepos,
+        GhCliService ghCli,
+        string? username)
+    {
+        var searchTerm = AnsiConsole.Prompt(
+            new TextPrompt<string>("Search term or owner/repo (empty to go back):")
+                .AllowEmpty());
+        if (string.IsNullOrWhiteSpace(searchTerm))
+            return;
+
+        List<AccessibleGitHubRepo> searchResults = [];
+        AnsiConsole.Status()
+            .Spinner(Spinner.Known.Dots)
+            .Start("Searching GitHub...", _ =>
+            {
+                searchResults = ghCli.SearchAccessibleRepos(searchTerm, username);
+            });
+
+        var matches = searchResults
+            .Where(repo => repo.AccessKind == GitHubRepoAccessKind.WriteAccess && !clonedRepoSlugs.Contains(repo.NameWithOwner))
+            .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (matches.Count == 0)
+        {
+            ConsoleOutput.Warning($"No write-access repos found for '{searchTerm}' that are not already cloned.");
+            return;
+        }
+
+        MergeDiscoveredRepos(repos, matches);
+        var matchCloneStatus = BuildCloneStatusMap(matches, clonedRepoSlugs);
+
+        var resultPrompt = new MultiSelectionPrompt<AccessibleGitHubRepo>()
+            .Title($"Search results for {Markup.Escape(searchTerm)}:")
+            .PageSize(15)
+            .NotRequired()
+            .MoreChoicesText("[grey](Move up/down to see more repos)[/]")
+            .InstructionsText("[grey](Press space to toggle, enter to save these results)[/]")
+            .UseConverter(repo => FormatRepoChoice(repo, matchCloneStatus))
+            .AddChoices(matches);
+
+        foreach (var repo in matches.Where(repo => selectedRepos.Contains(repo.NameWithOwner)))
+            resultPrompt.Select(repo);
+
+        var selectedMatches = AnsiConsole.Prompt(resultPrompt);
+
+        foreach (var repo in matches)
+            selectedRepos.Remove(repo.NameWithOwner);
+
+        foreach (var repo in selectedMatches)
+            selectedRepos.Add(repo.NameWithOwner);
+    }
+
+    private static void MergeDiscoveredRepos(List<AccessibleGitHubRepo> repos, IReadOnlyList<AccessibleGitHubRepo> discoveredRepos)
+    {
+        var existingRepoSlugs = new HashSet<string>(
+            repos.Select(repo => repo.NameWithOwner),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var repo in discoveredRepos)
+        {
+            if (existingRepoSlugs.Add(repo.NameWithOwner))
+                repos.Add(repo);
+        }
+
+        repos.Sort((left, right) => StringComparer.OrdinalIgnoreCase.Compare(left.NameWithOwner, right.NameWithOwner));
+    }
+
     private static void LoadAdditionalWriteAccessRepos(
         List<AccessibleGitHubRepo> repos,
         GhCliService ghCli,
@@ -570,20 +725,9 @@ public static class InitCommand
                 accessibleRepos = ghCli.ListAccessibleRepos(username);
             });
 
-        var existingRepoSlugs = new HashSet<string>(
-            repos.Select(repo => repo.NameWithOwner),
-            StringComparer.OrdinalIgnoreCase);
-
-        foreach (var repo in accessibleRepos)
-        {
-            if (repo.AccessKind != GitHubRepoAccessKind.WriteAccess)
-                continue;
-
-            if (existingRepoSlugs.Add(repo.NameWithOwner))
-                repos.Add(repo);
-        }
-
-        repos.Sort((left, right) => StringComparer.OrdinalIgnoreCase.Compare(left.NameWithOwner, right.NameWithOwner));
+        MergeDiscoveredRepos(
+            repos,
+            accessibleRepos.Where(repo => repo.AccessKind == GitHubRepoAccessKind.WriteAccess).ToList());
     }
 
     private static void EditRepoSelectionGroup(
@@ -685,9 +829,17 @@ public static class InitCommand
     private enum RepoSelectionMenuAction
     {
         EditGroup,
-        LoadAdditionalWriteAccess,
+        OpenWriteAccessNotCloned,
         ReviewSelected,
         Done,
+    }
+
+    private enum WriteAccessNotClonedMenuAction
+    {
+        SearchByTerm,
+        EditLoadedResults,
+        LoadAll,
+        Back,
     }
 
     private sealed class RepoSelectionMenuOption
@@ -696,6 +848,14 @@ public static class InitCommand
         public GitHubRepoAccessKind? AccessKind { get; init; }
         public bool? IsCloned { get; init; }
         public string? Label { get; init; }
+        public string DisplayText { get; init; } = "";
+
+        public override string ToString() => DisplayText;
+    }
+
+    private sealed class WriteAccessNotClonedMenuOption
+    {
+        public WriteAccessNotClonedMenuAction Action { get; init; }
         public string DisplayText { get; init; } = "";
 
         public override string ToString() => DisplayText;
