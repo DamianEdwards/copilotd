@@ -45,13 +45,24 @@ public sealed class GitHubRemoteSessionUrlResolver
     }
 
     public string? TryResolve(ControlSessionInfo session, string? currentUser)
-        => TryResolve(session.CopilotSessionId, session.ProcessId, currentUser);
+    {
+        if (session.ProcessId is { } pid && session.Status is ControlSessionStatus.Starting or ControlSessionStatus.Running)
+        {
+            var currentProcessUrl = TryResolveFromCurrentProcess(session.CopilotSessionId, pid, currentUser)
+                ?? TryResolveBySessionName(session.CopilotSessionName, pid, currentUser);
+            if (currentProcessUrl is not null)
+                return currentProcessUrl;
+        }
+
+        return TryResolve(session.CopilotSessionId, session.ProcessId, currentUser)
+            ?? TryResolveBySessionName(session.CopilotSessionName, session.ProcessId, currentUser);
+    }
 
     public string? TryResolveTaskId(DispatchSession session, string? currentUser)
         => TryExtractTaskId(TryResolve(session, currentUser), out var taskId) ? taskId : null;
 
     public string? TryResolveTaskId(ControlSessionInfo session, string? currentUser)
-        => TryResolveTaskId(session.CopilotSessionId, session.ProcessId, currentUser);
+        => TryExtractTaskId(TryResolve(session, currentUser), out var taskId) ? taskId : null;
 
     public string? TryResolve(string? sessionId, int? processId, string? currentUser)
     {

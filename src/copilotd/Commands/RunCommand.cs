@@ -120,15 +120,14 @@ public static class RunCommand
                     // Launch control session if enabled
                     if (config.EnableControlSession)
                     {
-                        var existingControlPid = default(int?);
-                        var existingControlSessionId = default(string);
-                        var launchedControlPid = default(int?);
-                        var launchedControlSessionId = default(string);
+                        ControlSessionInfo? existingControlSession = null;
+                        ControlSessionInfo? launchedControlSession = null;
                         var launchFailed = false;
 
                         stateStore.WithStateLock(() =>
                         {
                             var state = stateStore.LoadState();
+                            var machineIdentifier = state.EnsureMachineIdentifier();
 
                             var existingAlive = state.ControlSession is not null
                                 && IsControlSessionHealthy(
@@ -140,20 +139,18 @@ public static class RunCommand
 
                             if (existingAlive)
                             {
-                                existingControlPid = state.ControlSession!.ProcessId;
-                                existingControlSessionId = state.ControlSession.CopilotSessionId;
+                                existingControlSession = state.ControlSession;
                                 return;
                             }
 
                             if (state.ControlSession?.ProcessId is not null)
                                 processManager.TerminateControlSession(state.ControlSession);
 
-                            var controlSession = processManager.LaunchControlSession(config);
+                            var controlSession = processManager.LaunchControlSession(config, machineIdentifier);
                             if (controlSession is not null)
                             {
                                 state.ControlSession = controlSession;
-                                launchedControlPid = controlSession.ProcessId;
-                                launchedControlSessionId = controlSession.CopilotSessionId;
+                                launchedControlSession = controlSession;
                             }
                             else
                             {
@@ -168,23 +165,21 @@ public static class RunCommand
                             stateStore.SaveState(state);
                         }, daemonCancellationToken);
 
-                        if (existingControlPid is not null)
+                        if (existingControlSession?.ProcessId is not null)
                         {
-                            ConsoleOutput.Success($"Control session already running (PID {existingControlPid}).");
+                            ConsoleOutput.Success($"Control session already running (PID {existingControlSession.ProcessId}).");
                             await WriteControlSessionRemoteUrlAsync(
                                 remoteSessionUrls,
-                                existingControlSessionId,
-                                existingControlPid,
+                                existingControlSession,
                                 config.CurrentUser,
                                 ct);
                         }
-                        else if (launchedControlPid is not null)
+                        else if (launchedControlSession?.ProcessId is not null)
                         {
-                            ConsoleOutput.Success($"Control session launched (PID {launchedControlPid}).");
+                            ConsoleOutput.Success($"Control session launched (PID {launchedControlSession.ProcessId}).");
                             await WriteControlSessionRemoteUrlAsync(
                                 remoteSessionUrls,
-                                launchedControlSessionId,
-                                launchedControlPid,
+                                launchedControlSession,
                                 config.CurrentUser,
                                 ct);
                         }
@@ -263,7 +258,7 @@ public static class RunCommand
                                             }
 
                                             logger.LogInformation("Relaunching control session...");
-                                            var controlSession = processManager.LaunchControlSession(config);
+                                            var controlSession = processManager.LaunchControlSession(config, state.EnsureMachineIdentifier());
                                             if (controlSession is not null)
                                             {
                                                 state.ControlSession = controlSession;
@@ -364,15 +359,14 @@ public static class RunCommand
 
     private static async Task WriteControlSessionRemoteUrlAsync(
         GitHubRemoteSessionUrlResolver remoteSessionUrls,
-        string? sessionId,
-        int? processId,
+        ControlSessionInfo? session,
         string? currentUser,
         CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(sessionId))
+        if (session is null)
             return;
 
-        var url = remoteSessionUrls.TryResolve(sessionId, processId, currentUser);
+        var url = remoteSessionUrls.TryResolve(session, currentUser);
         var deadline = DateTimeOffset.UtcNow + RemoteUrlResolveTimeout;
 
         while (url is null && DateTimeOffset.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -386,7 +380,7 @@ public static class RunCommand
                 break;
             }
 
-            url = remoteSessionUrls.TryResolve(sessionId, processId, currentUser);
+            url = remoteSessionUrls.TryResolve(session, currentUser);
         }
 
         ConsoleOutput.Info("Remote:");

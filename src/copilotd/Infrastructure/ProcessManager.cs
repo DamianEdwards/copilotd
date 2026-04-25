@@ -57,12 +57,13 @@ public sealed partial class ProcessManager
 
         var customPrompt = _stateStore.LoadCustomPrompt(config);
         var copilotdCommand = _runtimeContext.GetCopilotdCallbackCommand();
-        var prompt = BuildPrompt(customPrompt, issue, session, config, copilotdCommand);
+        var machineIdentifier = state.EnsureMachineIdentifier();
+        var prompt = BuildPrompt(customPrompt, issue, session, config, copilotdCommand, machineIdentifier);
         var hasExistingResumeContext = HasExistingResumeContext(session);
         var sessionName = session.CopilotSessionName;
         if (!hasExistingResumeContext && string.IsNullOrWhiteSpace(sessionName))
         {
-            sessionName = TryBuildSessionName(issue, session, config, copilotdCommand);
+            sessionName = TryBuildSessionName(issue, session, config, copilotdCommand, machineIdentifier);
             session.CopilotSessionName = sessionName;
         }
 
@@ -502,7 +503,7 @@ public sealed partial class ProcessManager
     /// allows remote management of copilotd via the GitHub remote sessions UI.
     /// Returns a populated <see cref="ControlSessionInfo"/> on success, or null on failure.
     /// </summary>
-    public ControlSessionInfo? LaunchControlSession(CopilotdConfig config)
+    public ControlSessionInfo? LaunchControlSession(CopilotdConfig config, string machineIdentifier)
     {
         // Clone the copilotd repo to <RepoHome>/DamianEdwards/copilotd if needed, then
         // launch from a dedicated subdirectory so repo-root wrapper scripts don't shadow
@@ -517,6 +518,7 @@ public sealed partial class ProcessManager
         var session = new ControlSessionInfo
         {
             CopilotSessionId = Guid.NewGuid().ToString("D"),
+            CopilotSessionName = BuildControlSessionName(machineIdentifier),
             Status = ControlSessionStatus.Starting,
             StartedAt = DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow,
@@ -524,8 +526,8 @@ public sealed partial class ProcessManager
 
         var prompt = CopilotdConfig.ControlSessionPrompt
             .Replace("$(copilotd.command)", _runtimeContext.GetCopilotdCallbackCommand(), StringComparison.Ordinal);
-        var args = BuildControlSessionArguments(session.CopilotSessionId, prompt, config.DefaultModel, _runtimeContext);
-        _logger.LogInformation("Launching control session {SessionId}", session.CopilotSessionId);
+        var args = BuildControlSessionArguments(session, prompt, config.DefaultModel, _runtimeContext);
+        _logger.LogInformation("Launching control session {SessionName}", session.CopilotSessionName);
         _logger.LogDebug("copilot {Args}", args);
 
         try
@@ -600,14 +602,25 @@ public sealed partial class ProcessManager
     public bool TerminateControlSession(ControlSessionInfo session)
         => TerminateProcess("control session", session.ProcessId, session.ProcessStartTime);
 
-    private static string BuildControlSessionArguments(string sessionId, string prompt, string? defaultModel, RuntimeContext runtimeContext)
+    private static string BuildControlSessionArguments(ControlSessionInfo session, string prompt, string? defaultModel, RuntimeContext runtimeContext)
     {
         var args = new List<string>
         {
             "--remote",
-            $"--resume={sessionId}",
-            "-i", $"\"{EscapeArg(prompt)}\"",
         };
+
+        if (!string.IsNullOrWhiteSpace(session.CopilotSessionName))
+        {
+            args.Add("--name");
+            args.Add($"\"{EscapeArg(session.CopilotSessionName)}\"");
+        }
+        else if (!string.IsNullOrWhiteSpace(session.CopilotSessionId))
+        {
+            args.Add($"--resume=\"{EscapeArg(session.CopilotSessionId)}\"");
+        }
+
+        args.Add("-i");
+        args.Add($"\"{EscapeArg(prompt)}\"");
 
         // Only allow the commands needed to manage the daemon remotely — no general shell access.
         foreach (var command in runtimeContext.GetControlSessionAllowedShellCommands().Distinct(StringComparer.OrdinalIgnoreCase))
@@ -627,6 +640,9 @@ public sealed partial class ProcessManager
 
         return string.Join(' ', args);
     }
+
+    private static string BuildControlSessionName(string machineIdentifier)
+        => $"(copilotd control) {machineIdentifier}";
 
     /// <summary>
     /// The copilotd repo to clone for the control session's working directory.
@@ -732,7 +748,7 @@ public sealed partial class ProcessManager
         }
     }
 
-    private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand)
+    private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand, string machineIdentifier)
     {
         var prompt = session.RedispatchCount > 0
             ? session.PullRequestNumber is not null && !session.LastRedispatchWasIssueComment
@@ -762,7 +778,7 @@ public sealed partial class ProcessManager
         }
 
         // Replace tokens in the entire prompt (default + custom + extra)
-        return ExpandTemplate(prompt, issue, session, copilotdCommand, config.CurrentUser);
+        return ExpandTemplate(prompt, issue, session, copilotdCommand, config.CurrentUser, machineIdentifier);
     }
 
     /// <summary>
@@ -816,7 +832,7 @@ public sealed partial class ProcessManager
         };
     }
 
-    private string? TryBuildSessionName(GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand)
+    private string? TryBuildSessionName(GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand, string machineIdentifier)
     {
         if (string.IsNullOrWhiteSpace(config.SessionNameFormat))
             return null;
@@ -852,7 +868,7 @@ public sealed partial class ProcessManager
 
         try
         {
-            var sessionName = ExpandTemplate(config.SessionNameFormat, issue, session, copilotdCommand, config.CurrentUser).Trim();
+            var sessionName = ExpandTemplate(config.SessionNameFormat, issue, session, copilotdCommand, config.CurrentUser, machineIdentifier).Trim();
             if (string.IsNullOrWhiteSpace(sessionName))
             {
                 _logger.LogWarning(
@@ -870,7 +886,7 @@ public sealed partial class ProcessManager
         }
     }
 
-    private static string ExpandTemplate(string template, GitHubIssue issue, DispatchSession session, string copilotdCommand, string? ghUser)
+    private static string ExpandTemplate(string template, GitHubIssue issue, DispatchSession session, string copilotdCommand, string? ghUser, string machineIdentifier)
     {
         var (org, repo) = SplitRepoSlug(issue.Repo);
 
@@ -885,6 +901,8 @@ public sealed partial class ProcessManager
             .Replace("$(repo)", repo, StringComparison.Ordinal)
             .Replace("$(issue_id)", issue.Number.ToString(), StringComparison.Ordinal)
             .Replace("$(session_id)", session.CopilotSessionId, StringComparison.Ordinal)
+            .Replace("$(machine_id)", machineIdentifier, StringComparison.Ordinal)
+            .Replace("$(machine_identifier)", machineIdentifier, StringComparison.Ordinal)
             .Replace("$(machine_name)", Environment.MachineName, StringComparison.Ordinal)
             .Replace("$(gh_user)", ghUser ?? "", StringComparison.Ordinal);
     }

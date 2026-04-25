@@ -411,19 +411,25 @@ public sealed class GhCliService
     }
 
     /// <summary>
-    /// Marker appended to comments posted by copilotd, used to distinguish
+    /// Prefix for hidden HTML metadata appended to comments posted by copilotd, used to distinguish
     /// bot-posted comments from human replies when checking for new feedback.
     /// Invisible on GitHub (HTML comment).
     /// </summary>
-    internal const string CommentMarker = "<!-- posted by copilotd -->";
+    internal const string CommentMarkerPrefix = "<!-- posted by copilotd";
+
+    /// <summary>
+    /// Legacy hidden marker used before machine identifiers were added to comment metadata.
+    /// Preserved so older copilotd comments remain attributable and ignored during feedback checks.
+    /// </summary>
+    internal const string LegacyCommentMarker = "<!-- posted by copilotd -->";
 
     /// <summary>
     /// Posts a comment on a GitHub issue. Appends a hidden marker so copilotd
     /// can distinguish its own comments from human replies.
     /// </summary>
-    public bool PostIssueComment(string repo, int issueNumber, string message)
+    public bool PostIssueComment(string repo, int issueNumber, string message, string machineIdentifier)
     {
-        var body = message + "\n\n" + CommentMarker;
+        var body = message + "\n\n" + BuildCommentMarker(machineIdentifier);
 
         // Use --body-file - to pipe via stdin, avoiding all shell escaping issues
         var args = $"issue comment {issueNumber} --repo {repo} --body-file -";
@@ -474,7 +480,7 @@ public sealed class GhCliService
 
     /// <summary>
     /// Checks whether there are new comments on an issue since the given timestamp,
-    /// excluding comments posted by copilotd itself (identified by <see cref="CommentMarker"/>).
+    /// excluding comments posted by copilotd itself (identified by the hidden copilotd marker).
     /// </summary>
     public bool HasNewCommentsSince(string repo, int issueNumber, DateTimeOffset since)
         => GetNewCommentSince(repo, issueNumber, since) is not null;
@@ -515,7 +521,7 @@ public sealed class GhCliService
                 if (comment.TryGetProperty("body", out var bodyEl))
                 {
                     var body = bodyEl.GetString();
-                    if (body is not null && body.Contains(CommentMarker, StringComparison.Ordinal))
+                    if (IsCopilotdComment(body))
                         continue;
                 }
 
@@ -615,7 +621,7 @@ public sealed class GhCliService
 
     /// <summary>
     /// Checks whether there are new review comments on a pull request since the given timestamp,
-    /// excluding comments posted by copilotd itself (identified by <see cref="CommentMarker"/>).
+    /// excluding comments posted by copilotd itself (identified by the hidden copilotd marker).
     /// Checks both PR review comments (from formal reviews) and regular PR comments.
     /// </summary>
     public bool HasNewPrReviewCommentsSince(string repo, int prNumber, DateTimeOffset since)
@@ -674,7 +680,7 @@ public sealed class GhCliService
                     if (review.TryGetProperty("body", out var bodyEl))
                     {
                         var body = bodyEl.GetString();
-                        if (body is not null && body.Contains(CommentMarker, StringComparison.Ordinal))
+                        if (IsCopilotdComment(body))
                             continue;
                     }
 
@@ -751,7 +757,7 @@ public sealed class GhCliService
         if (comment.TryGetProperty("body", out var bodyEl))
         {
             var body = bodyEl.GetString();
-            if (body is not null && body.Contains(CommentMarker, StringComparison.Ordinal))
+            if (IsCopilotdComment(body))
                 return null;
         }
 
@@ -761,6 +767,14 @@ public sealed class GhCliService
 
         return new NewCommentInfo(author, createdAt);
     }
+
+    private static string BuildCommentMarker(string machineIdentifier)
+        => $"<!-- posted by copilotd; machine-id: {machineIdentifier} -->";
+
+    private static bool IsCopilotdComment(string? body)
+        => body is not null
+           && (body.Contains(CommentMarkerPrefix, StringComparison.Ordinal)
+               || body.Contains(LegacyCommentMarker, StringComparison.Ordinal));
 
     // Reaction content constants for GitHub issue reactions
     internal const string ReactionEyes = "eyes";

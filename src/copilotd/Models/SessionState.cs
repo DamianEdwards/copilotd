@@ -12,6 +12,13 @@ public sealed class DaemonState
     public int SchemaVersion { get; set; } = 1;
 
     /// <summary>
+    /// Stable UUID assigned to this copilotd installation for cross-machine attribution.
+    /// Persisted in state so public metadata can identify which instance acted without
+    /// exposing the local machine name.
+    /// </summary>
+    public string? MachineIdentifier { get; set; }
+
+    /// <summary>
     /// All tracked dispatch sessions keyed by issue key ("org/repo#number").
     /// </summary>
     public Dictionary<string, DispatchSession> Sessions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -31,6 +38,17 @@ public sealed class DaemonState
     /// dispatch sessions to avoid interference with reconciliation and pruning.
     /// </summary>
     public ControlSessionInfo? ControlSession { get; set; }
+
+    /// <summary>
+    /// Returns the persisted machine identifier, assigning a new stable UUID when missing.
+    /// </summary>
+    public string EnsureMachineIdentifier()
+    {
+        if (string.IsNullOrWhiteSpace(MachineIdentifier))
+            MachineIdentifier = Guid.NewGuid().ToString("D");
+
+        return MachineIdentifier;
+    }
 }
 
 /// <summary>
@@ -232,8 +250,17 @@ public enum ControlSessionStatus
 /// </summary>
 public sealed class ControlSessionInfo
 {
-    /// <summary>Generated UUID for the copilot remote session.</summary>
+    /// <summary>
+    /// Copilot session ID when known. For named control sessions, copilotd may initially
+    /// resolve the live remote session via <see cref="CopilotSessionName"/> instead.
+    /// </summary>
     public string CopilotSessionId { get; set; } = "";
+
+    /// <summary>
+    /// Human-readable control session name shown in the remote sessions UI.
+    /// Includes the copilotd machine identifier, but never the real machine name.
+    /// </summary>
+    public string? CopilotSessionName { get; set; }
 
     /// <summary>OS process ID of the copilot process.</summary>
     public int? ProcessId { get; set; }

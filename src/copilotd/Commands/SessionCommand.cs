@@ -366,6 +366,7 @@ public static class SessionCommand
                 string? errorMessage = null;
                 long? oldReactionId = null;
                 string? ruleName = null;
+                string? machineIdentifier = null;
 
                 stateStore.WithStateLock(() =>
                 {
@@ -386,6 +387,11 @@ public static class SessionCommand
                     expectedSessionId = session.CopilotSessionId;
                     oldReactionId = session.IssueReactionId;
                     ruleName = session.RuleName;
+
+                    var hadMachineIdentifier = !string.IsNullOrWhiteSpace(state.MachineIdentifier);
+                    machineIdentifier = state.EnsureMachineIdentifier();
+                    if (!hadMachineIdentifier)
+                        stateStore.SaveState(state);
                 }, ct);
 
                 if (errorMessage is not null)
@@ -394,7 +400,7 @@ public static class SessionCommand
                     return 1;
                 }
 
-                if (!ghCli.PostIssueComment(repo!, issueNumber, message))
+                if (!ghCli.PostIssueComment(repo!, issueNumber, message, machineIdentifier!))
                 {
                     ConsoleOutput.Error($"Failed to post comment on {issueKey}.");
                     return 1;
