@@ -1,6 +1,6 @@
 #!/usr/bin/env dotnet
-#:package NuGet.Versioning@6.13.1
-#:package System.CommandLine@2.0.3
+#:package NuGet.Versioning@7.3.1
+#:package System.CommandLine@2.0.7
 #:property PublishAot=false
 
 using System.CommandLine;
