@@ -57,11 +57,12 @@ public sealed class ReconciliationEngine
         // Step 1: Verify all tracked non-terminal sessions against live processes
         VerifyTrackedSessions(state);
 
-        // Step 2: Gather all matching issues from configured rules
+        // Step 2: Gather all matching issues and pull requests from configured rules
         var (desiredDispatches, queriedRepos) = ComputeDesiredDispatches(config);
+        var (desiredPullRequestDispatches, queriedPullRequestRepos) = ComputeDesiredPullRequestDispatches(config);
 
         // Step 3: Reconcile desired vs observed
-        ReconcileDesiredVsObserved(config, state, desiredDispatches, queriedRepos);
+        ReconcileDesiredVsObserved(config, state, desiredDispatches, queriedRepos, desiredPullRequestDispatches, queriedPullRequestRepos);
 
         // Step 4: Dispatch pending sessions (respects MaxInstances)
         DispatchPendingSessions(config, state);
@@ -227,6 +228,49 @@ public sealed class ReconciliationEngine
     }
 
     /// <summary>
+    /// Step 2b: Query GitHub for all pull requests that currently match configured PR rules.
+    /// </summary>
+    private (Dictionary<string, (GitHubPullRequest PullRequest, string RuleName)> Desired, HashSet<string> QueriedRepos)
+        ComputeDesiredPullRequestDispatches(CopilotdConfig config)
+    {
+        var desired = new Dictionary<string, (GitHubPullRequest, string)>(StringComparer.OrdinalIgnoreCase);
+        var queriedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (ruleName, rule) in config.PullRequestRules)
+        {
+            foreach (var repo in rule.Repos)
+            {
+                try
+                {
+                    var pullRequests = _ghCli.QueryPullRequests(repo, rule);
+                    queriedRepos.Add(repo);
+
+                    foreach (var pullRequest in pullRequests)
+                    {
+                        if (!rule.Matches(pullRequest, _ghCli.HasWriteAccess))
+                            continue;
+
+                        if (!desired.ContainsKey(pullRequest.Key))
+                        {
+                            desired[pullRequest.Key] = (pullRequest, ruleName);
+                            _logger.LogDebug("Desired PR dispatch: {Key} via rule '{Rule}'", pullRequest.Key, ruleName);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error querying pull requests for {Repo} with rule '{Rule}', preserving existing sessions", repo, ruleName);
+                }
+            }
+        }
+
+        _logger.LogInformation("Found {Count} pull requests matching configured PR rules ({Queried}/{Total} repos queried successfully)",
+            desired.Count, queriedRepos.Count,
+            config.PullRequestRules.Values.SelectMany(r => r.Repos).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        return (desired, queriedRepos);
+    }
+
+    /// <summary>
     /// Step 3: Compare desired dispatches against tracked sessions.
     /// - Issues without active sessions → create pending
     /// - Tracked sessions whose issues no longer match (and repo was queried) → mark completed
@@ -237,18 +281,28 @@ public sealed class ReconciliationEngine
         CopilotdConfig config,
         DaemonState state,
         Dictionary<string, (GitHubIssue Issue, string RuleName)> desired,
-        HashSet<string> queriedRepos)
+        HashSet<string> queriedRepos,
+        Dictionary<string, (GitHubPullRequest PullRequest, string RuleName)> desiredPullRequests,
+        HashSet<string> queriedPullRequestRepos)
     {
-        // Handle sessions for issues that no longer match — only for successfully queried repos
+        // Handle sessions for subjects that no longer match — only for successfully queried repos
         var toTerminate = new List<DispatchSession>();
         foreach (var (key, session) in state.Sessions)
         {
-            // Clear CompletedBySession flag when the issue no longer matches rules,
-            // so that if the issue re-matches later it will be re-dispatched
+            var desiredContainsSession = session.SubjectKind == DispatchSubjectKind.PullRequest
+                ? desiredPullRequests.ContainsKey(key)
+                : desired.ContainsKey(key);
+            var repoWasQueried = session.SubjectKind == DispatchSubjectKind.PullRequest
+                ? queriedPullRequestRepos.Contains(session.Repo)
+                : queriedRepos.Contains(session.Repo);
+            var subjectLabel = session.SubjectKind == DispatchSubjectKind.PullRequest ? "Pull request" : "Issue";
+
+            // Clear CompletedBySession flag when the subject no longer matches rules,
+            // so that if the subject re-matches later it will be re-dispatched
             if (session.Status == SessionStatus.Completed && session.CompletedBySession
-                && !desired.ContainsKey(key) && queriedRepos.Contains(session.Repo))
+                && !desiredContainsSession && repoWasQueried)
             {
-                _logger.LogInformation("Issue {Key} no longer matches rules, clearing CompletedBySession flag", key);
+                _logger.LogInformation("{Subject} {Key} no longer matches rules, clearing CompletedBySession flag", subjectLabel, key);
                 session.CompletedBySession = false;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
             }
@@ -260,11 +314,11 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.Joined)
                 continue;
 
-            if (!desired.ContainsKey(key))
+            if (!desiredContainsSession)
             {
                 // Only act if the session's repo was successfully queried.
-                // If the repo query failed, we don't know if the issue still matches.
-                if (!queriedRepos.Contains(session.Repo))
+                // If the repo query failed, we don't know if the subject still matches.
+                if (!repoWasQueried)
                 {
                     _logger.LogDebug("Repo {Repo} query failed, preserving session {Key}", session.Repo, key);
                     continue;
@@ -273,7 +327,7 @@ public sealed class ReconciliationEngine
                 // WaitingForFeedback sessions have no process to terminate
                 if (session.Status is SessionStatus.WaitingForFeedback)
                 {
-                    _logger.LogInformation("Issue {Key} no longer matches rules, completing waiting session", key);
+                    _logger.LogInformation("{Subject} {Key} no longer matches rules, completing waiting session", subjectLabel, key);
                     session.Status = SessionStatus.Completed;
                     session.FailureDetail = null;
                     session.WaitingSince = null;
@@ -286,7 +340,7 @@ public sealed class ReconciliationEngine
                 // WaitingForReview sessions have no process to terminate
                 if (session.Status is SessionStatus.WaitingForReview)
                 {
-                    _logger.LogInformation("Issue {Key} no longer matches rules, completing PR review session", key);
+                    _logger.LogInformation("{Subject} {Key} no longer matches rules, completing PR review session", subjectLabel, key);
                     session.Status = SessionStatus.Completed;
                     session.FailureDetail = null;
                     session.WaitingSince = null;
@@ -296,7 +350,7 @@ public sealed class ReconciliationEngine
                     continue;
                 }
 
-                _logger.LogInformation("Issue {Key} no longer matches rules, terminating session", key);
+                _logger.LogInformation("{Subject} {Key} no longer matches rules, terminating session", subjectLabel, key);
                 toTerminate.Add(session);
             }
         }
@@ -324,6 +378,9 @@ public sealed class ReconciliationEngine
         {
             if (state.Sessions.TryGetValue(issueKey, out var existing))
             {
+                if (existing.SubjectKind != DispatchSubjectKind.Issue)
+                    continue;
+
                 // Backfill IssueAuthor for sessions created before this field existed
                 if (existing.IssueAuthor is null && issue.Author is not null)
                 {
@@ -595,10 +652,12 @@ public sealed class ReconciliationEngine
                 var newSession = new DispatchSession
                 {
                     IssueKey = issueKey,
+                    SubjectKind = DispatchSubjectKind.Issue,
                     Repo = issue.Repo,
                     IssueNumber = issue.Number,
                     RuleName = ruleName,
                     IssueAuthor = issue.Author,
+                    SubjectTitle = issue.Title,
                     CopilotSessionId = Guid.NewGuid().ToString(),
                     HasStarted = false,
                     Status = SessionStatus.Pending,
@@ -611,6 +670,205 @@ public sealed class ReconciliationEngine
                 TransitionReactionToIssue(newSession, config, GhCliService.ReactionEyes);
             }
         }
+
+        // Handle desired pull requests that need new or re-dispatched sessions
+        foreach (var (prKey, (pullRequest, ruleName)) in desiredPullRequests)
+        {
+            if (state.Sessions.TryGetValue(prKey, out var existing))
+            {
+                if (existing.SubjectKind != DispatchSubjectKind.PullRequest)
+                    continue;
+
+                UpdatePullRequestSessionMetadata(existing, pullRequest, ruleName, config);
+
+                switch (existing.Status)
+                {
+                    case SessionStatus.Running:
+                    case SessionStatus.Dispatching:
+                    case SessionStatus.Pending:
+                    case SessionStatus.Joined:
+                        continue;
+
+                    case SessionStatus.WaitingForFeedback:
+                        if (existing.WaitingSince is not null)
+                        {
+                            var feedbackInfo = _ghCli.GetNewPrReviewCommentSince(existing.Repo, existing.SubjectNumber, existing.WaitingSince.Value);
+                            if (feedbackInfo is not null)
+                            {
+                                if (!TryQueueFeedbackRedispatch(existing, prKey, feedbackInfo, config, isIssueComment: false))
+                                    continue;
+                            }
+                            else
+                            {
+                                _logger.LogDebug("PR-root session {Key} still waiting for feedback", prKey);
+                            }
+                        }
+                        continue;
+
+                    case SessionStatus.Orphaned when existing.CanRetry:
+                        _logger.LogInformation("Re-dispatching orphaned PR-root session {Key} (retry {N}/{Max})",
+                            prKey, existing.RetryCount + 1, DispatchSession.MaxRetries);
+                        _processManager.CleanupWorktree(existing, config, state);
+                        ResetForFreshDispatch(existing, preserveReviewPullRequest: true);
+                        existing.RetryCount++;
+                        existing.LastFailureAt = DateTimeOffset.UtcNow;
+                        TransitionReactionOnCurrentAnchor(existing, config, GhCliService.ReactionEyes);
+                        continue;
+
+                    case SessionStatus.Orphaned:
+                    case SessionStatus.Failed:
+                        if (!existing.CanRetry)
+                        {
+                            _logger.LogWarning("PR-root session {Key} exceeded max retries, marking failed", prKey);
+                            existing.Status = SessionStatus.Failed;
+                            existing.FailureDetail ??= $"The session exceeded the maximum retry count ({DispatchSession.MaxRetries}). " +
+                                $"Resolve the underlying issue, then run 'copilotd session reset {prKey}'.";
+                            existing.UpdatedAt = DateTimeOffset.UtcNow;
+                            TransitionReactionOnCurrentAnchor(existing, config, GhCliService.ReactionThumbsDown);
+                        }
+                        continue;
+
+                    case SessionStatus.Completed:
+                        if (existing.CompletedBySession
+                            && string.Equals(existing.PullRequestHeadSha, pullRequest.HeadSha, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.LogDebug("PR-root session {Key} was explicitly completed and head SHA did not change, skipping re-dispatch", prKey);
+                            continue;
+                        }
+
+                        _logger.LogInformation("PR {Key} matched after completion or new head SHA, re-dispatching", prKey);
+                        _processManager.CleanupWorktree(existing, config, state);
+                        ResetForFreshDispatch(existing, preserveReviewPullRequest: true);
+                        existing.PullRequestHeadSha = pullRequest.HeadSha;
+                        TransitionReactionToIssue(existing, config, GhCliService.ReactionEyes);
+                        continue;
+                }
+            }
+            else
+            {
+                var newSession = new DispatchSession
+                {
+                    IssueKey = prKey,
+                    SubjectKind = DispatchSubjectKind.PullRequest,
+                    Repo = pullRequest.Repo,
+                    IssueNumber = pullRequest.Number,
+                    RuleName = ruleName,
+                    IssueAuthor = pullRequest.Author,
+                    SubjectTitle = pullRequest.Title,
+                    PullRequestBaseBranch = pullRequest.BaseBranch,
+                    PullRequestHeadBranch = pullRequest.HeadBranch,
+                    PullRequestHeadRepo = pullRequest.HeadRepo,
+                    PullRequestHeadSha = pullRequest.HeadSha,
+                    PullRequestBranchStrategy = config.PullRequestRules.GetValueOrDefault(ruleName)?.BranchStrategy,
+                    CopilotSessionId = Guid.NewGuid().ToString(),
+                    HasStarted = false,
+                    Status = SessionStatus.Pending,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                };
+                state.Sessions[prKey] = newSession;
+
+                _logger.LogInformation("New pull request {Key} matched by rule '{Rule}', creating pending dispatch", prKey, ruleName);
+                TransitionReactionToIssue(newSession, config, GhCliService.ReactionEyes);
+            }
+        }
+    }
+
+    private void UpdatePullRequestSessionMetadata(
+        DispatchSession session,
+        GitHubPullRequest pullRequest,
+        string ruleName,
+        CopilotdConfig config)
+    {
+        session.RuleName = ruleName;
+        session.SubjectKind = DispatchSubjectKind.PullRequest;
+        session.IssueKey = pullRequest.Key;
+        session.Repo = pullRequest.Repo;
+        session.IssueNumber = pullRequest.Number;
+        session.IssueAuthor = pullRequest.Author;
+        session.SubjectTitle = pullRequest.Title;
+        session.PullRequestBaseBranch = pullRequest.BaseBranch;
+        session.PullRequestHeadBranch = pullRequest.HeadBranch;
+        session.PullRequestHeadRepo = pullRequest.HeadRepo;
+        session.PullRequestBranchStrategy = config.PullRequestRules.GetValueOrDefault(ruleName)?.BranchStrategy;
+
+        if (!string.IsNullOrWhiteSpace(pullRequest.HeadSha)
+            && (session.Status != SessionStatus.Completed || !session.CompletedBySession))
+        {
+            session.PullRequestHeadSha = pullRequest.HeadSha;
+        }
+
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    private bool TryQueueFeedbackRedispatch(
+        DispatchSession session,
+        string sessionKey,
+        GhCliService.NewCommentInfo commentInfo,
+        CopilotdConfig config,
+        bool isIssueComment)
+    {
+        if (session.RedispatchCount >= config.MaxRedispatches)
+        {
+            _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                "Use 'copilotd session reset' to re-enable. Ignoring feedback from {Author}",
+                sessionKey, config.MaxRedispatches, commentInfo.Author);
+            return false;
+        }
+
+        var trusted = IsCommentTrusted(session, commentInfo.Author, config, out var trustLevel);
+        if (trusted is null)
+        {
+            _logger.LogWarning("Could not evaluate trust for {Author} on {Key} (trust_level={TrustLevel}), will retry next cycle",
+                commentInfo.Author, sessionKey, trustLevel);
+            return false;
+        }
+
+        if (trusted == false)
+        {
+            _logger.LogInformation("Ignoring feedback from untrusted author {Author} on {Key} (trust_level={TrustLevel})",
+                commentInfo.Author, sessionKey, trustLevel);
+            session.WaitingSince = commentInfo.CreatedAt;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            return false;
+        }
+
+        _logger.LogInformation("New feedback from {Author} detected on {Key}, re-dispatching session (redispatch {N}/{Max})",
+            commentInfo.Author, sessionKey, session.RedispatchCount + 1, config.MaxRedispatches);
+        session.Status = SessionStatus.Pending;
+        session.FailureDetail = null;
+        session.RedispatchCount++;
+        session.LastRedispatchWasIssueComment = isIssueComment;
+        session.WaitingSince = null;
+        session.ProcessId = null;
+        session.ProcessStartTime = null;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+
+        if (isIssueComment && commentInfo.IssueCommentId.HasValue)
+            TransitionReactionToIssueComment(session, config, commentInfo.IssueCommentId.Value, GhCliService.ReactionEyes);
+        else
+            TransitionReactionOnCurrentAnchor(session, config, GhCliService.ReactionEyes);
+
+        return true;
+    }
+
+    private static void ResetForFreshDispatch(DispatchSession session, bool preserveReviewPullRequest)
+    {
+        session.Status = SessionStatus.Pending;
+        session.FailureDetail = null;
+        session.CompletedBySession = false;
+        if (!preserveReviewPullRequest)
+            session.PullRequestNumber = null;
+        session.RedispatchCount = 0;
+        session.LastRedispatchWasIssueComment = false;
+        session.CopilotSessionId = Guid.NewGuid().ToString();
+        session.CopilotSessionName = null;
+        session.HasStarted = false;
+        session.ProcessId = null;
+        session.ProcessStartTime = null;
+        session.LastVerifiedAt = null;
+        session.WaitingSince = null;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     /// <summary>
@@ -679,19 +937,20 @@ public sealed class ReconciliationEngine
                 continue;
             }
 
-            // For newly created worktrees, create the linked branch on GitHub first
+            // For newly created issue worktrees, create the linked branch on GitHub first
             // (that mutation creates the remote branch), then push locally to set
-            // upstream tracking. Both operations are best-effort.
+            // upstream tracking. PR worktrees are pushed according to their branch strategy.
             if (worktreeResult == WorktreeResult.CreatedNew && !string.IsNullOrEmpty(session.BranchName))
             {
-                var sha = _processManager.GetHeadSha(session);
-                if (sha is not null)
+                if (session.SubjectKind == DispatchSubjectKind.Issue)
                 {
-                    _ghCli.CreateLinkedBranchForIssue(session.Repo, session.IssueNumber, session.BranchName, sha);
+                    var sha = _processManager.GetHeadSha(session);
+                    if (sha is not null)
+                    {
+                        _ghCli.CreateLinkedBranchForIssue(session.Repo, session.IssueNumber, session.BranchName, sha);
+                    }
                 }
 
-                // Push the branch to the remote and set up tracking. If the linked branch
-                // was created successfully above, this becomes a no-op push plus upstream setup.
                 _processManager.PushBranch(session, config, state);
             }
 
@@ -740,8 +999,14 @@ public sealed class ReconciliationEngine
         CopilotdConfig config,
         out CommentTrustLevel effectiveTrustLevel)
     {
-        var rule = config.Rules.GetValueOrDefault(session.RuleName);
-        effectiveTrustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+        var issueRule = session.SubjectKind == DispatchSubjectKind.Issue
+            ? config.Rules.GetValueOrDefault(session.RuleName)
+            : null;
+        var pullRequestRule = session.SubjectKind == DispatchSubjectKind.PullRequest
+            ? config.PullRequestRules.GetValueOrDefault(session.RuleName)
+            : null;
+        var ruleOptions = (DispatchRuleOptions?)issueRule ?? pullRequestRule;
+        effectiveTrustLevel = ruleOptions?.TrustLevel ?? CommentTrustLevel.Collaborators;
 
         switch (effectiveTrustLevel)
         {
@@ -752,30 +1017,39 @@ public sealed class ReconciliationEngine
                 return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
 
             case CommentTrustLevel.IssueAuthor:
-                return session.IssueAuthor is not null
-                    && string.Equals(session.IssueAuthor, commentAuthor, StringComparison.OrdinalIgnoreCase);
+                return session.SubjectAuthor is not null
+                    && string.Equals(session.SubjectAuthor, commentAuthor, StringComparison.OrdinalIgnoreCase);
 
             case CommentTrustLevel.Assignees:
-                var assignees = _ghCli.GetIssueAssignees(session.Repo, session.IssueNumber);
+                if (session.SubjectKind == DispatchSubjectKind.PullRequest)
+                    return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
+
+                var assignees = _ghCli.GetIssueAssignees(session.Repo, session.SubjectNumber);
                 if (assignees is null)
                     return null; // API failure — retry next cycle
                 return assignees.Exists(a => string.Equals(a, commentAuthor, StringComparison.OrdinalIgnoreCase));
 
             case CommentTrustLevel.IssueAuthorAndCollaborators:
-                if (session.IssueAuthor is not null
-                    && string.Equals(session.IssueAuthor, commentAuthor, StringComparison.OrdinalIgnoreCase))
+                if (session.SubjectAuthor is not null
+                    && string.Equals(session.SubjectAuthor, commentAuthor, StringComparison.OrdinalIgnoreCase))
                     return true;
                 return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
 
             case CommentTrustLevel.MatchDispatchRule:
-                if (rule is null)
+                if (issueRule is null && pullRequestRule is null)
                     return _ghCli.HasWriteAccess(session.Repo, commentAuthor);
-                return rule.AuthorMode switch
+                var authorMode = session.SubjectKind == DispatchSubjectKind.PullRequest
+                    ? pullRequestRule!.AuthorMode
+                    : issueRule!.AuthorMode;
+                var authors = session.SubjectKind == DispatchSubjectKind.PullRequest
+                    ? pullRequestRule!.Authors
+                    : issueRule!.Authors;
+                return authorMode switch
                 {
                     // AuthorMode.Any means "no author filtering on dispatch" — but for re-dispatch
                     // trust, allowing anyone would be a security risk. Fall back to collaborators.
                     AuthorMode.Any => _ghCli.HasWriteAccess(session.Repo, commentAuthor),
-                    AuthorMode.Allowed => rule.Authors.Contains(commentAuthor, StringComparer.OrdinalIgnoreCase),
+                    AuthorMode.Allowed => authors.Contains(commentAuthor, StringComparer.OrdinalIgnoreCase),
                     AuthorMode.WriteAccess => _ghCli.HasWriteAccess(session.Repo, commentAuthor),
                     _ => _ghCli.HasWriteAccess(session.Repo, commentAuthor),
                 };

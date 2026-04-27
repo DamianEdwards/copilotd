@@ -1,5 +1,6 @@
 using System.CommandLine;
 using Copilotd.Infrastructure;
+using Copilotd.Models;
 using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -44,14 +45,15 @@ public static class ConfigCommand
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
                     table.AddRow("session_shutdown_delay_seconds", Markup.Escape(config.SessionShutdownDelaySeconds.ToString()));
-                    table.AddRow("rules", Markup.Escape($"{config.Rules.Count} rule(s)"));
+                    table.AddRow("issue_rules", Markup.Escape($"{config.Rules.Count} rule(s)"));
+                    table.AddRow("pull_request_rules", Markup.Escape($"{config.PullRequestRules.Count} rule(s)"));
 
                     if (config.Rules.Count > 0)
                     {
                         foreach (var (name, rule) in config.Rules)
                         {
                             var details = new List<string>();
-                            if (rule.User is not null) details.Add($"user={rule.User}");
+                            if (rule.Assignee is not null) details.Add($"assignee={rule.Assignee}");
                             if (rule.Labels.Count > 0) details.Add($"labels={string.Join(",", rule.Labels)}");
                             if (rule.Milestone is not null) details.Add($"milestone={rule.Milestone}");
                             if (rule.Type is not null) details.Add($"type={rule.Type}");
@@ -69,6 +71,37 @@ public static class ConfigCommand
 
                             table.AddRow(
                                 Markup.Escape($"  rule[{name}]"),
+                                Markup.Escape(details.Count > 0 ? string.Join(", ", details) : "(no conditions)"));
+                        }
+                    }
+
+                    if (config.PullRequestRules.Count > 0)
+                    {
+                        foreach (var (name, rule) in config.PullRequestRules)
+                        {
+                            var details = new List<string>();
+                            if (rule.Assignee is not null) details.Add($"assignee={rule.Assignee}");
+                            if (rule.Labels.Count > 0) details.Add($"labels={string.Join(",", rule.Labels)}");
+                            if (rule.BaseBranch is not null) details.Add($"base={rule.BaseBranch}");
+                            if (rule.HeadBranch is not null) details.Add($"head={rule.HeadBranch}");
+                            if (rule.HeadRepo is not null) details.Add($"head_repo={rule.HeadRepo}");
+                            if (rule.Draft is not null) details.Add($"draft={rule.Draft.Value.ToString().ToLowerInvariant()}");
+                            if (rule.ReviewDecision is not null) details.Add($"review_decision={rule.ReviewDecision}");
+                            details.Add($"branch_strategy={rule.BranchStrategy.ToString().ToLowerInvariant()}");
+                            if (rule.Repos.Count > 0) details.Add($"repos={string.Join(",", rule.Repos)}");
+                            if (rule.Yolo) details.Add("yolo=true");
+                            else
+                            {
+                                if (rule.AllowAllTools) details.Add("allow_all_tools=true");
+                                if (rule.AllowAllUrls) details.Add("allow_all_urls=true");
+                            }
+                            if (rule.Model is not null) details.Add($"model={rule.Model}");
+                            if (rule.ExtraPrompt is not null) details.Add($"extra_prompt={rule.ExtraPrompt}");
+                            if (rule.CustomPrompt is not null) details.Add($"custom_prompt={rule.CustomPrompt}");
+                            if (rule.CustomPrompt is not null) details.Add($"custom_prompt_mode={rule.CustomPromptMode.ToString().ToLowerInvariant()}");
+
+                            table.AddRow(
+                                Markup.Escape($"  pr_rule[{name}]"),
                                 Markup.Escape(details.Count > 0 ? string.Join(", ", details) : "(no conditions)"));
                         }
                     }
@@ -102,8 +135,9 @@ public static class ConfigCommand
                             copilotCli,
                             cfg,
                             stateStore.LoadState(),
-                            cfg.Rules.Values
-                                .SelectMany(rule => rule.Repos)
+                                cfg.Rules.Values.Cast<DispatchRuleOptions>()
+                                    .Concat(cfg.PullRequestRules.Values)
+                                    .SelectMany(rule => rule.Repos)
                                 .Distinct(StringComparer.OrdinalIgnoreCase)
                                 .ToList());
                         ConsoleOutput.Success($"repo_home set to: {cfg.RepoHome}");

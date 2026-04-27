@@ -238,8 +238,8 @@ public static class InitCommand
                 AnsiConsole.WriteLine();
 
                 // Build the default rule
-                var defaultRule = existingRule ?? new DispatchRule();
-                defaultRule.User = username;
+                var defaultRule = existingRule ?? new IssueDispatchRule();
+                defaultRule.Assignee = username;
                 defaultRule.Labels = labels;
                 defaultRule.AuthorMode = authorMode;
                 defaultRule.Authors = authors;
@@ -352,7 +352,7 @@ public static class InitCommand
                 summaryTable.AddRow("[blue]Default model[/]", Markup.Escape(config.DefaultModel ?? "(copilot default)"));
                 summaryTable.AddRow("", "");
                 summaryTable.AddRow("[bold blue]Default Rule[/]", "");
-                summaryTable.AddRow("[blue]  Assignee[/]", Markup.Escape(defaultRule.User ?? "*"));
+                summaryTable.AddRow("[blue]  Assignee[/]", Markup.Escape(defaultRule.Assignee ?? "*"));
                 summaryTable.AddRow("[blue]  Author filter[/]", Markup.Escape(FormatAuthorMode(defaultRule)));
                 summaryTable.AddRow("[blue]  Labels[/]", Markup.Escape(string.Join(", ", defaultRule.Labels)));
                 summaryTable.AddRow("[blue]  Permissions[/]", Markup.Escape(FormatPermissions(defaultRule)));
@@ -382,7 +382,7 @@ public static class InitCommand
         return command;
     }
 
-    private static string FormatAuthorMode(DispatchRule rule)
+    private static string FormatAuthorMode(IssueDispatchRule rule)
     {
         return rule.AuthorMode switch
         {
@@ -392,7 +392,7 @@ public static class InitCommand
         };
     }
 
-    private static string FormatPermissions(DispatchRule rule)
+    private static string FormatPermissions(DispatchRuleOptions rule)
     {
         if (rule.Yolo) return "--yolo";
         var parts = new List<string>();

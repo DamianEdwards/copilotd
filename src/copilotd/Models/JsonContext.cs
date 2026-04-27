@@ -256,20 +256,94 @@ public sealed class TolerantControlSessionStatusConverter : JsonConverter<Contro
 }
 
 /// <summary>
+/// AOT-compatible JSON converter for <see cref="DispatchSubjectKind"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="DispatchSubjectKind.Issue"/>.
+/// </summary>
+public sealed class TolerantDispatchSubjectKindConverter : JsonConverter<DispatchSubjectKind>
+{
+    public override DispatchSubjectKind Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<DispatchSubjectKind>(value, ignoreCase: true, out var kind))
+                return kind;
+
+            return DispatchSubjectKind.Issue;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(DispatchSubjectKind), intValue))
+                return (DispatchSubjectKind)intValue;
+
+            return DispatchSubjectKind.Issue;
+        }
+
+        return DispatchSubjectKind.Issue;
+    }
+
+    public override void Write(Utf8JsonWriter writer, DispatchSubjectKind value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
+/// AOT-compatible JSON converter for <see cref="PullRequestBranchStrategy"/> that gracefully handles
+/// unknown enum values by falling back to <see cref="PullRequestBranchStrategy.SourceBranch"/>.
+/// </summary>
+public sealed class TolerantPullRequestBranchStrategyConverter : JsonConverter<PullRequestBranchStrategy>
+{
+    public override PullRequestBranchStrategy Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString();
+            if (Enum.TryParse<PullRequestBranchStrategy>(value, ignoreCase: true, out var strategy))
+                return strategy;
+
+            return PullRequestBranchStrategy.SourceBranch;
+        }
+
+        if (reader.TokenType == JsonTokenType.Number)
+        {
+            var intValue = reader.GetInt32();
+            if (Enum.IsDefined(typeof(PullRequestBranchStrategy), intValue))
+                return (PullRequestBranchStrategy)intValue;
+
+            return PullRequestBranchStrategy.SourceBranch;
+        }
+
+        return PullRequestBranchStrategy.SourceBranch;
+    }
+
+    public override void Write(Utf8JsonWriter writer, PullRequestBranchStrategy value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString());
+    }
+}
+
+/// <summary>
 /// AOT-safe JSON serialization metadata for all persisted models.
 /// </summary>
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantReactionTargetTypeConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter), typeof(TolerantAuthorModeConverter), typeof(TolerantControlSessionStatusConverter)])]
+    Converters = [typeof(TolerantSessionStatusConverter), typeof(TolerantReactionTargetTypeConverter), typeof(TolerantUpdateStatusConverter), typeof(TolerantPromptModeConverter), typeof(TolerantCommentTrustLevelConverter), typeof(TolerantAuthorModeConverter), typeof(TolerantControlSessionStatusConverter), typeof(TolerantDispatchSubjectKindConverter), typeof(TolerantPullRequestBranchStrategyConverter)])]
 [JsonSerializable(typeof(CopilotdConfig))]
 [JsonSerializable(typeof(DaemonState))]
-[JsonSerializable(typeof(DispatchRule))]
+[JsonSerializable(typeof(DispatchRuleOptions))]
+[JsonSerializable(typeof(IssueDispatchRule))]
+[JsonSerializable(typeof(PullRequestDispatchRule))]
 [JsonSerializable(typeof(DispatchSession))]
 [JsonSerializable(typeof(ControlSessionInfo))]
 [JsonSerializable(typeof(GitHubIssue))]
 [JsonSerializable(typeof(List<GitHubIssue>))]
+[JsonSerializable(typeof(GitHubPullRequest))]
+[JsonSerializable(typeof(List<GitHubPullRequest>))]
 [JsonSerializable(typeof(List<GhRepo>))]
 [JsonSerializable(typeof(GhAuthStatus))]
 [JsonSerializable(typeof(UpdateState))]

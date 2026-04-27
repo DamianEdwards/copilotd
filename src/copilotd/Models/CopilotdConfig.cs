@@ -79,16 +79,22 @@ public sealed class CopilotdConfig
     public bool EnableControlSession { get; set; } = true;
 
     /// <summary>
-    /// Whether to post emoji reactions on issues to indicate session lifecycle status
+    /// Whether to post emoji reactions on issues/PRs to indicate session lifecycle status
     /// (👀 queued, 🚀 working, 👍 completed, 👎 failed). Default is true.
-    /// Can be overridden per-rule via <see cref="DispatchRule.EnableReactions"/>.
+    /// Can be overridden per-rule via <see cref="IssueDispatchRule.EnableReactions"/>.
     /// </summary>
     public bool EnableReactions { get; set; } = true;
 
     /// <summary>
-    /// Named dispatch rules. Key is the rule name.
+    /// Named issue dispatch rules. Key is the rule name.
     /// </summary>
-    public Dictionary<string, DispatchRule> Rules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, IssueDispatchRule> Rules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Named pull request dispatch rules. Key is the rule name. Empty by default;
+    /// PR dispatch is always opt-in.
+    /// </summary>
+    public Dictionary<string, PullRequestDispatchRule> PullRequestRules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public const string DefaultRuleName = "Default";
 
@@ -184,12 +190,22 @@ public sealed class CopilotdConfig
 }
 
 /// <summary>
-/// A named dispatch rule with match conditions and launch options.
+/// A named issue dispatch rule with match conditions and launch options.
 /// </summary>
-public sealed class DispatchRule
+public sealed class IssueDispatchRule : DispatchRuleOptions
 {
-    /// <summary>Assigned user to match (null = any).</summary>
-    public string? User { get; set; }
+    /// <summary>Assigned user to match (null = any). Stored as "user" for config compatibility.</summary>
+    [JsonPropertyName("user")]
+    public string? Assignee { get; set; }
+
+    /// <summary>Compatibility alias for older code paths that referred to the issue assignee as User.</summary>
+    [JsonIgnore]
+    [Obsolete("Use Assignee for issue dispatch rules.")]
+    public string? User
+    {
+        get => Assignee;
+        set => Assignee = value;
+    }
 
     /// <summary>Labels that must all be present on the issue.</summary>
     public List<string> Labels { get; set; } = [];
@@ -199,9 +215,6 @@ public sealed class DispatchRule
 
     /// <summary>Issue type filter, e.g. "bug", "feature" (null = any).</summary>
     public string? Type { get; set; }
-
-    /// <summary>Repositories this rule applies to (org/repo format).</summary>
-    public List<string> Repos { get; set; } = [];
 
     // --- Author filtering ---
 
@@ -218,57 +231,6 @@ public sealed class DispatchRule
     /// </summary>
     public List<string> Authors { get; set; } = [];
 
-    // --- Launch options ---
-
-    /// <summary>Whether to pass --yolo to copilot, which implies --allow-all-tools and --allow-all-urls.</summary>
-    public bool Yolo { get; set; }
-
-    /// <summary>Whether to pass --allow-all-tools to copilot. Defaults to true. Implied by Yolo.</summary>
-    public bool AllowAllTools { get; set; } = true;
-
-    /// <summary>Whether to pass --allow-all-urls to copilot. Defaults to false. Implied by Yolo.</summary>
-    public bool AllowAllUrls { get; set; }
-
-    /// <summary>
-    /// Model to use for sessions triggered by this rule. Overrides the global
-    /// <see cref="CopilotdConfig.DefaultModel"/> when set.
-    /// </summary>
-    public string? Model { get; set; }
-
-    /// <summary>
-    /// Controls which comment authors can trigger session re-dispatch.
-    /// <see cref="CommentTrustLevel.Collaborators"/>: only repo collaborators with write access (default).
-    /// <see cref="CommentTrustLevel.All"/>: any commenter can trigger re-dispatch.
-    /// <see cref="CommentTrustLevel.IssueAuthor"/>: only the original issue author.
-    /// <see cref="CommentTrustLevel.Assignees"/>: only current issue assignees.
-    /// <see cref="CommentTrustLevel.IssueAuthorAndCollaborators"/>: issue author or write-access collaborators.
-    /// <see cref="CommentTrustLevel.MatchDispatchRule"/>: commenter must pass the rule's author filtering.
-    /// </summary>
-    public CommentTrustLevel TrustLevel { get; set; } = CommentTrustLevel.Collaborators;
-
-    /// <summary>Extra prompt text appended when this rule triggers.</summary>
-    public string? ExtraPrompt { get; set; }
-
-    /// <summary>
-    /// Per-rule custom prompt text. When set, this is used as the custom prompt
-    /// for sessions matching this rule. See <see cref="CustomPromptMode"/> for
-    /// how it interacts with the global custom prompt.
-    /// </summary>
-    public string? CustomPrompt { get; set; }
-
-    /// <summary>
-    /// Controls how <see cref="CustomPrompt"/> interacts with the global custom prompt.
-    /// <see cref="PromptMode.Append"/>: rule prompt is appended after the global custom prompt (default).
-    /// <see cref="PromptMode.Override"/>: rule prompt replaces the global custom prompt entirely.
-    /// </summary>
-    public PromptMode CustomPromptMode { get; set; } = PromptMode.Append;
-
-    /// <summary>
-    /// Per-rule override for emoji reactions on issues. When null (default), falls back
-    /// to the global <see cref="CopilotdConfig.EnableReactions"/> setting.
-    /// </summary>
-    public bool? EnableReactions { get; set; }
-
     /// <summary>
     /// Returns true if the given issue matches all conditions on this rule.
     /// All conditions are logical AND.
@@ -283,7 +245,7 @@ public sealed class DispatchRule
     /// </summary>
     public bool Matches(GitHubIssue issue, Func<string, string, bool>? hasWriteAccess)
     {
-        if (User is not null && !string.Equals(User, issue.Assignee, StringComparison.OrdinalIgnoreCase))
+        if (Assignee is not null && !string.Equals(Assignee, issue.Assignee, StringComparison.OrdinalIgnoreCase))
             return false;
 
         if (Labels.Count > 0 && !Labels.All(l => issue.Labels.Contains(l, StringComparer.OrdinalIgnoreCase)))
@@ -312,6 +274,142 @@ public sealed class DispatchRule
 
         return true;
     }
+}
+
+/// <summary>
+/// A named pull request dispatch rule with PR-specific match conditions and launch options.
+/// </summary>
+public sealed class PullRequestDispatchRule : DispatchRuleOptions
+{
+    /// <summary>Assigned user to match (null = any).</summary>
+    public string? Assignee { get; set; }
+
+    /// <summary>Labels that must all be present on the PR.</summary>
+    public List<string> Labels { get; set; } = [];
+
+    /// <summary>Base branch the PR targets (null = any).</summary>
+    public string? BaseBranch { get; set; }
+
+    /// <summary>Head branch name to match (null = any).</summary>
+    public string? HeadBranch { get; set; }
+
+    /// <summary>Head repository slug to match, e.g. "org/repo" (null = any).</summary>
+    public string? HeadRepo { get; set; }
+
+    /// <summary>Draft-state filter (null = any draft state).</summary>
+    public bool? Draft { get; set; }
+
+    /// <summary>Review decision filter, e.g. APPROVED, REVIEW_REQUIRED, CHANGES_REQUESTED (null = any).</summary>
+    public string? ReviewDecision { get; set; }
+
+    /// <summary>
+    /// Controls how the PR author is checked when matching.
+    /// </summary>
+    public AuthorMode AuthorMode { get; set; } = AuthorMode.Any;
+
+    /// <summary>
+    /// Allowed PR authors when <see cref="AuthorMode"/> is <see cref="AuthorMode.Allowed"/>.
+    /// </summary>
+    public List<string> Authors { get; set; } = [];
+
+    /// <summary>How PR-root sessions prepare a worktree/branch.</summary>
+    public PullRequestBranchStrategy BranchStrategy { get; set; } = PullRequestBranchStrategy.SourceBranch;
+
+    /// <summary>
+    /// Returns true if the given pull request matches all conditions on this rule.
+    /// All conditions are logical AND.
+    /// </summary>
+    public bool Matches(GitHubPullRequest pullRequest, Func<string, string, bool>? hasWriteAccess)
+    {
+        if (Assignee is not null && !pullRequest.Assignees.Contains(Assignee, StringComparer.OrdinalIgnoreCase))
+            return false;
+
+        if (Labels.Count > 0 && !Labels.All(l => pullRequest.Labels.Contains(l, StringComparer.OrdinalIgnoreCase)))
+            return false;
+
+        if (BaseBranch is not null && !string.Equals(BaseBranch, pullRequest.BaseBranch, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (HeadBranch is not null && !string.Equals(HeadBranch, pullRequest.HeadBranch, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (HeadRepo is not null && !string.Equals(HeadRepo, pullRequest.HeadRepo, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (Draft.HasValue && Draft.Value != pullRequest.IsDraft)
+            return false;
+
+        if (ReviewDecision is not null && !string.Equals(ReviewDecision, pullRequest.ReviewDecision, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (AuthorMode == AuthorMode.Allowed)
+        {
+            if (pullRequest.Author is null || !Authors.Contains(pullRequest.Author, StringComparer.OrdinalIgnoreCase))
+                return false;
+        }
+        else if (AuthorMode == AuthorMode.WriteAccess)
+        {
+            if (pullRequest.Author is null)
+                return false;
+
+            if (hasWriteAccess is not null && !hasWriteAccess(pullRequest.Repo, pullRequest.Author))
+                return false;
+        }
+
+        return true;
+    }
+}
+
+/// <summary>
+/// Shared launch/prompt/trust options for issue and pull request dispatch rules.
+/// </summary>
+public abstract class DispatchRuleOptions
+{
+    /// <summary>Repositories this rule applies to (org/repo format).</summary>
+    public List<string> Repos { get; set; } = [];
+
+    /// <summary>Whether to pass --yolo to copilot, which implies --allow-all-tools and --allow-all-urls.</summary>
+    public bool Yolo { get; set; }
+
+    /// <summary>Whether to pass --allow-all-tools to copilot. Defaults to true. Implied by Yolo.</summary>
+    public bool AllowAllTools { get; set; } = true;
+
+    /// <summary>Whether to pass --allow-all-urls to copilot. Defaults to false. Implied by Yolo.</summary>
+    public bool AllowAllUrls { get; set; }
+
+    /// <summary>
+    /// Model to use for sessions triggered by this rule. Overrides the global
+    /// <see cref="CopilotdConfig.DefaultModel"/> when set.
+    /// </summary>
+    public string? Model { get; set; }
+
+    /// <summary>
+    /// Controls which comment authors can trigger session re-dispatch.
+    /// </summary>
+    public CommentTrustLevel TrustLevel { get; set; } = CommentTrustLevel.Collaborators;
+
+    /// <summary>Extra prompt text appended when this rule triggers.</summary>
+    public string? ExtraPrompt { get; set; }
+
+    /// <summary>
+    /// Per-rule custom prompt text. When set, this is used as the custom prompt
+    /// for sessions matching this rule. See <see cref="CustomPromptMode"/> for
+    /// how it interacts with the global custom prompt.
+    /// </summary>
+    public string? CustomPrompt { get; set; }
+
+    /// <summary>
+    /// Controls how <see cref="CustomPrompt"/> interacts with the global custom prompt.
+    /// <see cref="PromptMode.Append"/>: rule prompt is appended after the global custom prompt (default).
+    /// <see cref="PromptMode.Override"/>: rule prompt replaces the global custom prompt entirely.
+    /// </summary>
+    public PromptMode CustomPromptMode { get; set; } = PromptMode.Append;
+
+    /// <summary>
+    /// Per-rule override for emoji reactions on issues. When null (default), falls back
+    /// to the global <see cref="CopilotdConfig.EnableReactions"/> setting.
+    /// </summary>
+    public bool? EnableReactions { get; set; }
 }
 
 /// <summary>
@@ -364,9 +462,25 @@ public enum AuthorMode
     /// <summary>Any author matches (default, no filtering).</summary>
     Any,
 
-    /// <summary>Only authors in the rule's <see cref="DispatchRule.Authors"/> list match.</summary>
+    /// <summary>Only authors in the rule's author allow-list match.</summary>
     Allowed,
 
     /// <summary>Only authors with write (or higher) access to the repository match.</summary>
     WriteAccess,
+}
+
+/// <summary>
+/// Controls how a PR-root dispatch session prepares its branch/worktree.
+/// </summary>
+[JsonConverter(typeof(TolerantPullRequestBranchStrategyConverter))]
+public enum PullRequestBranchStrategy
+{
+    /// <summary>Check out and push to the PR source branch when it is writable.</summary>
+    SourceBranch,
+
+    /// <summary>Create a new copilotd branch from the PR head SHA.</summary>
+    ChildBranch,
+
+    /// <summary>Check out the PR head for inspection/commenting only; do not push changes.</summary>
+    ReadOnly,
 }

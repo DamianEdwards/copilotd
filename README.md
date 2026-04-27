@@ -1,10 +1,10 @@
 # copilotd
 
-**copilotd** is an orchestration daemon that watches GitHub repos for issues matching configurable dispatch rules and automatically spawns remote-enabled [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) sessions to work on them.
+**copilotd** is an orchestration daemon that watches GitHub repos for issues and pull requests matching configurable dispatch rules and automatically spawns remote-enabled [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) sessions to work on them.
 
-Instead of waiting for a developer to open a terminal and manually engage Copilot, copilotd continuously monitors your repositories. When an issue matches your rules—by label, assignee, milestone, or type, it automatically dispatches a Copilot CLI agent, creates an isolated worktree, asks clarifying questions via issue comments, writes code, opens a PR, and even responds to PR review feedback. All without human intervention.
+Instead of waiting for a developer to open a terminal and manually engage Copilot, copilotd continuously monitors your repositories. When an issue or pull request matches your rules, it automatically dispatches a Copilot CLI agent, creates an isolated worktree, asks clarifying questions via comments, writes or reviews code, opens or updates PRs, and responds to PR review feedback. All without human intervention.
 
-copilotd sits between GitHub Issues and the Copilot CLI running on your dev machine, acting as an always-on orchestration layer.
+copilotd sits between GitHub Issues, pull requests, and the Copilot CLI running on your dev machine, acting as an always-on orchestration layer.
 
 Available for Windows, macOS, and Linux.
 
@@ -15,7 +15,8 @@ Available for Windows, macOS, and Linux.
 ## Features
 
 - **Issue watching** — polls GitHub repos for issues matching configurable rules (assigned user, labels, milestone, issue type)
-- **Automatic dispatch** — launches `copilot --remote` sessions with templated prompts derived from issue metadata
+- **PR watching** — opt-in pull request rules can dispatch review, validation, or follow-up sessions using PR metadata (labels, assignee, base/head branch, draft state, review decision)
+- **Automatic dispatch** — launches `copilot --remote` sessions with templated prompts derived from issue or PR metadata
 - **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, extra prompts, repo assignments)
 - **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, PR review monitoring, and explicit completion signaling
 - **PR review feedback** — sessions that create PRs can wait for review comments and automatically re-dispatch to address feedback
@@ -121,7 +122,7 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd config` | Display current configuration |
 | `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `session_name_format`, `max_instances`, `session_shutdown_delay_seconds`) |
 | `copilotd rules list` | List all dispatch rules (`copilotd rule list` also works) |
-| `copilotd rules add <name>` | Add a new dispatch rule (`copilotd rule create <name>` and `copilotd rule new <name>` also work) |
+| `copilotd rules add <name>` | Add a new issue dispatch rule (`copilotd rule create <name>` and `copilotd rule new <name>` also work); use `--kind pr` for pull request rules |
 | `copilotd rules update <name>` | Update an existing rule (`copilotd rule edit <name>` also works) |
 | `copilotd rules delete <name>` | Delete a rule (the `Default` rule cannot be deleted) |
 
@@ -143,7 +144,7 @@ File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Ea
 
 ### Rules options
 
-Rules support conditions (`--assignee`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). All conditions are logical AND.
+Issue rules support conditions (`--assignee`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). Pull request rules are opt-in with `--kind pr` and support PR-specific conditions (`--base`, `--head`, `--head-repo`, `--draft`, `--review-decision`) plus `--branch-strategy`. All conditions are logical AND. `copilotd init` creates only the default issue rule; no PR rule is created by default.
 
 Aliases: `rule` for `rules`, `create`/`new` for `add`, and `edit` for `update`.
 
@@ -156,6 +157,9 @@ copilotd rules add "Complex tasks" --label complexity-high --model "claude-sonne
 
 # Add a rule with a per-rule custom prompt that overrides the global custom prompt
 copilotd rules add "Backend" --label area-backend --custom-prompt "Focus on API design" --custom-prompt-mode override
+
+# Add a PR review/validation rule
+copilotd rules add "PR validation" --kind pr --label needs-validation --base main --branch-strategy read-only --repo "org/repo"
 
 # Update labels on a rule
 copilotd rules update Default --delete-label copilotd --add-label dispatch
@@ -186,7 +190,15 @@ The built-in prompt and `session_name_format` support token replacement:
 | `$(issue.id)` | Issue number |
 | `$(issue.type)` | Issue type (e.g., `bug`) |
 | `$(issue.milestone)` | Milestone title |
-| `$(pr.id)` | Pull request number (available in PR review re-dispatch prompts) |
+| `$(subject.id)` | Root issue or pull request number |
+| `$(subject.kind)` | Root subject kind (`issue` or `pullrequest`) |
+| `$(subject.title)` | Root subject title when available |
+| `$(pr.id)` | Pull request number (the root PR for PR-dispatched sessions, or the review PR for issue-owned PR review prompts) |
+| `$(pr.title)` | Pull request title for PR-dispatched sessions |
+| `$(pr.base)` | Pull request base branch for PR-dispatched sessions |
+| `$(pr.head)` | Pull request head branch for PR-dispatched sessions |
+| `$(pr.head_repo)` | Pull request head repository for PR-dispatched sessions |
+| `$(pr.head_sha)` | Pull request head SHA for PR-dispatched sessions |
 | `$(org)` | Repository owner / organization |
 | `$(repo)` | Repository name only |
 | `$(issue_id)` | Issue number |
@@ -206,18 +218,18 @@ older persisted sessions that already have a resume ID continue to resume by ID.
 
 ## Session lifecycle
 
-Each dispatched copilot session follows a state machine:
+Each dispatched copilot session follows the same state machine whether the root subject is an issue or a pull request. Issue-root sessions can additionally enter `WaitingForReview` after they create a PR; PR-root sessions can be re-dispatched by trusted PR comments/reviews or by a new PR head SHA.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending : Issue matches rule
+    [*] --> Pending : Issue/PR matches rule
 
     Pending --> Dispatching : Launch
     Dispatching --> Running : Process alive
     Dispatching --> Failed : Launch failed
 
     Running --> Orphaned : Process died
-    Running --> Completed : Issue closed/unmatched (auto)
+    Running --> Completed : Subject closed/unmatched (auto)
     Running --> WaitingForFeedback : session comment
     Running --> WaitingForReview : session pr
 
@@ -240,11 +252,11 @@ stateDiagram-v2
 
 | From | To | Trigger |
 |------|----|---------|
-| *(new)* | **Pending** | Issue matches a dispatch rule |
+| *(new)* | **Pending** | Issue or pull request matches a dispatch rule |
 | **Pending** | **Dispatching** | Daemon launches copilot process (respects `max_instances` limit and retry backoff) |
 | **Dispatching** | **Running** | Process successfully started, PID tracked |
 | **Dispatching** | **Failed** | Process launch failed (increments retry count) |
-| **Running** | **Completed** | Issue no longer matches rules (closed, relabeled, etc.) — process gracefully terminated |
+| **Running** | **Completed** | Root issue or PR no longer matches rules (closed, relabeled, merged, etc.) — process gracefully terminated |
 | **Running** | **WaitingForFeedback** | Copilot calls `copilotd session comment` — process exits, session waits for new issue comments |
 | **Running** | **WaitingForReview** | Copilot calls `copilotd session pr <pr-number>` — process exits, session waits for PR review feedback |
 | **Running** | **Orphaned** | Process died unexpectedly (PID gone or reused) |
@@ -253,7 +265,7 @@ stateDiagram-v2
 | **Failed** | **Pending** | Issue still matches and retry count < 3 |
 | **WaitingForFeedback** | **Pending** | New comment detected from a trusted author (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity, and the lifecycle reaction moves to that triggering issue comment. Author trust is controlled by `trust_level` rule setting |
 | **WaitingForFeedback** | **Completed** | Issue no longer matches rules while waiting |
-| **WaitingForReview** | **Pending** | New review comment or changes-requested review detected on the PR, or a new trusted issue comment is added while review is pending — re-dispatched with the appropriate resume prompt. Issue-comment redispatches move the lifecycle reaction to the triggering issue comment |
+| **WaitingForReview** | **Pending** | New review-thread reply, PR comment, or changes-requested/commented review detected on the PR, or a new trusted issue comment is added while review is pending — re-dispatched with the appropriate resume prompt. Issue-comment redispatches move the lifecycle reaction to the triggering issue comment |
 | **WaitingForReview** | **Completed** | PR is merged or closed, or issue no longer matches rules |
 | **Completed** | **Pending** | Issue re-matches rules (e.g., reopened) — only if not explicitly completed by copilot |
 | Any non-terminal | **Completed** | Copilot calls `copilotd session complete` — sets `CompletedBySession` flag, prevents re-dispatch |
@@ -294,6 +306,18 @@ When a copilot session creates a pull request, it can enter a review monitoring 
 7. If the PR is merged or closed, the session is automatically completed
 
 The default prompt instructs copilot sessions to use `session pr` after creating a pull request. Multiple review rounds are supported — the session resumes with `--resume` for full conversation context continuity. For the issue-comment paths above, the lifecycle reaction follows the latest trusted issue comment; full PR-feedback anchoring remains future work.
+
+### PR dispatch rules
+
+Pull request dispatch rules live in the separate `pull_request_rules` config collection and are not created by default. They use the same `org/repo#number` session key format as issue sessions, with a stored subject kind to distinguish PR-root sessions from issue-root sessions.
+
+PR rules support three worktree strategies:
+
+| Strategy | Behavior |
+|----------|----------|
+| `source-branch` | Default. For same-repo PRs, checks out a local `copilotd/pr-<N>-...` branch from the PR head and pushes changes back to the PR source branch. Fork PRs fail closed instead of pushing to an unintended remote. |
+| `child-branch` | Creates a new `copilotd/pr-<N>-...` branch from the PR head SHA and pushes that branch; the agent should explain how to use it from the PR. |
+| `read-only` | Creates a detached worktree at the PR head for review/validation/comment-only workflows and skips pushing. |
 
 When re-dispatched for PR review, copilot is instructed to interact with the PR directly:
 - **General comments** — posted to the PR via `gh pr comment`
@@ -424,6 +448,17 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 | `custom_prompt_mode` | `append` | How rule custom prompt interacts with global: `append` or `override` |
 | `trust_level` | `collaborators` | Which comment authors can trigger session re-dispatch: `collaborators` (write access required), `all`, `issueAuthor`, `assignees`, `issueAuthorAndCollaborators`, or `matchDispatchRule` |
 
+Pull request rules support the shared settings above except issue-only `milestone` and `type`, and add these PR-specific settings:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `base_branch` | *(any)* | PR base branch to match |
+| `head_branch` | *(any)* | PR head branch to match |
+| `head_repo` | *(any)* | PR head repository in `org/repo` format |
+| `draft` | *(any)* | Match only draft (`true`) or ready (`false`) PRs |
+| `review_decision` | *(any)* | PR review decision to match, such as `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or `APPROVED` |
+| `branch_strategy` | `sourceBranch` | PR worktree/push behavior: `sourceBranch`, `childBranch`, or `readOnly` |
+
 File logs are written under `~/.copilotd/logs/` by default (or `COPILOTD_HOME\logs\` when `COPILOTD_HOME` is set):
 
 - Each daemon `run` instance writes to its own `logs\daemon_<uuid>\` folder
@@ -446,10 +481,10 @@ File logs are written under `~/.copilotd/logs/` by default (or `COPILOTD_HOME\lo
 
 ### Worktree isolation
 
-Each dispatched session works in its own git worktree on a new branch, ensuring:
+Each dispatched session works in its own git worktree, ensuring:
 - **No conflicts** between concurrent sessions on the same repo
-- **Clean starting state** from the latest default branch HEAD
-- **Isolated branches** — each session creates `copilotd/issue-<N>`
+- **Clean starting state** from the right source: issue sessions start from the latest default branch HEAD; PR sessions start from the PR head
+- **Isolated branches** — issue sessions create `copilotd/issue-<N>`; PR sessions use their configured branch strategy
 
 Directory layout:
 
@@ -457,6 +492,7 @@ Directory layout:
 <repo_home>/org/repo/                    ← main checkout (fetch-only base)
 <repo_home>/org/repo_sessions/issue-1/   ← worktree for issue #1
 <repo_home>/org/repo_sessions/issue-5/   ← worktree for issue #5
+<repo_home>/org/repo_sessions/pr-7/      ← worktree for pull request #7
 ```
 
 Worktrees are created before dispatch (`git fetch` + `git worktree add`) and cleaned up

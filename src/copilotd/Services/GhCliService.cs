@@ -300,7 +300,7 @@ public sealed class GhCliService
     /// <summary>
     /// Queries open issues for a repo matching the given rule conditions.
     /// </summary>
-    public List<GitHubIssue> QueryIssues(string repo, DispatchRule rule)
+    public List<GitHubIssue> QueryIssues(string repo, IssueDispatchRule rule)
     {
         var jsonFields = _supportsTypeField
             ? "number,title,author,assignees,labels,milestone,type"
@@ -308,8 +308,8 @@ public sealed class GhCliService
 
         var args = $"issue list --repo {repo} --state open --json {jsonFields} --limit 100";
 
-        if (rule.User is not null)
-            args += $" --assignee {rule.User}";
+        if (rule.Assignee is not null)
+            args += $" --assignee {rule.Assignee}";
 
         foreach (var label in rule.Labels)
             args += $" --label \"{label}\"";
@@ -326,8 +326,8 @@ public sealed class GhCliService
             _supportsTypeField = false;
             args = $"issue list --repo {repo} --state open --json number,title,author,assignees,labels,milestone --limit 100";
 
-            if (rule.User is not null)
-                args += $" --assignee {rule.User}";
+            if (rule.Assignee is not null)
+                args += $" --assignee {rule.Assignee}";
 
             foreach (var label in rule.Labels)
                 args += $" --label \"{label}\"";
@@ -408,6 +408,130 @@ public sealed class GhCliService
         }
 
         return issues;
+    }
+
+    /// <summary>
+    /// Queries open pull requests for a repo matching the given rule conditions.
+    /// </summary>
+    public List<GitHubPullRequest> QueryPullRequests(string repo, PullRequestDispatchRule rule)
+    {
+        const string jsonFields = "number,title,author,assignees,labels,baseRefName,headRefName,headRepository,headRepositoryOwner,headRefOid,isDraft,reviewDecision,state";
+        var args = $"pr list --repo {repo} --state open --json {jsonFields} --limit 100";
+
+        if (rule.Assignee is not null)
+            args += $" --assignee {rule.Assignee}";
+
+        foreach (var label in rule.Labels)
+            args += $" --label \"{label}\"";
+
+        if (rule.BaseBranch is not null)
+            args += $" --base \"{rule.BaseBranch}\"";
+
+        if (rule.AuthorMode == AuthorMode.Allowed && rule.Authors.Count == 1)
+            args += $" --author \"{rule.Authors[0]}\"";
+
+        var (exitCode, output) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query pull requests for {Repo}: {Output}", repo, output);
+            return [];
+        }
+
+        try
+        {
+            return ParsePullRequestsJson(output, repo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse pull request JSON for {Repo}", repo);
+            return [];
+        }
+    }
+
+    private static List<GitHubPullRequest> ParsePullRequestsJson(string json, string repo)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var pullRequests = new List<GitHubPullRequest>();
+
+        foreach (var element in doc.RootElement.EnumerateArray())
+        {
+            var pullRequest = new GitHubPullRequest
+            {
+                Number = element.GetProperty("number").GetInt32(),
+                Title = element.TryGetProperty("title", out var title) ? title.GetString() ?? "" : "",
+                Repo = repo,
+                BaseBranch = element.TryGetProperty("baseRefName", out var baseRefName) ? baseRefName.GetString() : null,
+                HeadBranch = element.TryGetProperty("headRefName", out var headRefName) ? headRefName.GetString() : null,
+                HeadSha = element.TryGetProperty("headRefOid", out var headRefOid) ? headRefOid.GetString() : null,
+                IsDraft = element.TryGetProperty("isDraft", out var isDraft) && isDraft.ValueKind == JsonValueKind.True,
+                ReviewDecision = element.TryGetProperty("reviewDecision", out var reviewDecision) ? reviewDecision.GetString() : null,
+                State = element.TryGetProperty("state", out var state) ? state.GetString() ?? "OPEN" : "OPEN",
+                Labels = [],
+                Assignees = [],
+            };
+
+            if (element.TryGetProperty("author", out var authorEl) && authorEl.ValueKind == JsonValueKind.Object)
+            {
+                pullRequest.Author = authorEl.TryGetProperty("login", out var authorLogin) ? authorLogin.GetString() : null;
+            }
+
+            if (element.TryGetProperty("assignees", out var assignees))
+            {
+                foreach (var assignee in assignees.EnumerateArray())
+                {
+                    var login = assignee.TryGetProperty("login", out var loginEl) ? loginEl.GetString() : null;
+                    if (login is not null)
+                        pullRequest.Assignees.Add(login);
+                }
+            }
+
+            if (element.TryGetProperty("labels", out var labels))
+            {
+                foreach (var label in labels.EnumerateArray())
+                {
+                    var name = label.TryGetProperty("name", out var nameEl) ? nameEl.GetString() : null;
+                    if (name is not null)
+                        pullRequest.Labels.Add(name);
+                }
+            }
+
+            pullRequest.HeadRepo = GetHeadRepositorySlug(element);
+            pullRequests.Add(pullRequest);
+        }
+
+        return pullRequests;
+    }
+
+    private static string? GetHeadRepositorySlug(JsonElement pullRequest)
+    {
+        if (pullRequest.TryGetProperty("headRepository", out var headRepo)
+            && headRepo.ValueKind == JsonValueKind.Object)
+        {
+            if (headRepo.TryGetProperty("nameWithOwner", out var nameWithOwner))
+                return nameWithOwner.GetString();
+
+            var name = headRepo.TryGetProperty("name", out var nameEl) ? nameEl.GetString() : null;
+            var owner = headRepo.TryGetProperty("owner", out var ownerEl) && ownerEl.ValueKind == JsonValueKind.Object
+                ? ownerEl.TryGetProperty("login", out var loginEl) ? loginEl.GetString() : null
+                : null;
+            if (owner is not null && name is not null)
+                return $"{owner}/{name}";
+        }
+
+        if (pullRequest.TryGetProperty("headRepositoryOwner", out var headRepoOwner)
+            && headRepoOwner.ValueKind == JsonValueKind.Object
+            && headRepoOwner.TryGetProperty("login", out var ownerLogin)
+            && pullRequest.TryGetProperty("headRepository", out var repoEl)
+            && repoEl.ValueKind == JsonValueKind.Object
+            && repoEl.TryGetProperty("name", out var repoName))
+        {
+            var owner = ownerLogin.GetString();
+            var name = repoName.GetString();
+            if (owner is not null && name is not null)
+                return $"{owner}/{name}";
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -543,6 +667,97 @@ public sealed class GhCliService
         }
     }
 
+    private NewCommentInfo? GetNewPrReviewThreadCommentSince(string repo, int prNumber, DateTimeOffset since)
+    {
+        var repoParts = repo.Split('/', 2);
+        if (repoParts.Length != 2)
+            return null;
+
+        var request = new JsonObject
+        {
+            ["query"] = """
+                query($owner: String!, $name: String!, $number: Int!) {
+                  repository(owner: $owner, name: $name) {
+                    pullRequest(number: $number) {
+                      reviewThreads(first: 100) {
+                        nodes {
+                          comments(first: 100) {
+                            nodes {
+                              databaseId
+                              body
+                              createdAt
+                              author {
+                                login
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """,
+            ["variables"] = new JsonObject
+            {
+                ["owner"] = repoParts[0],
+                ["name"] = repoParts[1],
+                ["number"] = prNumber,
+            },
+        };
+
+        var (exitCode, output) = RunGhWithStdin("api graphql --input -", request.ToJsonString());
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query PR review thread comments on {Repo}!{Pr}: {Output}", repo, prNumber, output);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.TryGetProperty("errors", out var errors))
+            {
+                _logger.LogWarning("GraphQL errors querying PR review thread comments on {Repo}!{Pr}: {Errors}", repo, prNumber, errors.ToString());
+                return null;
+            }
+
+            if (!doc.RootElement.TryGetProperty("data", out var data)
+                || !data.TryGetProperty("repository", out var repository)
+                || !repository.TryGetProperty("pullRequest", out var pullRequest)
+                || !pullRequest.TryGetProperty("reviewThreads", out var reviewThreads)
+                || !reviewThreads.TryGetProperty("nodes", out var threadNodes))
+            {
+                return null;
+            }
+
+            foreach (var thread in threadNodes.EnumerateArray())
+            {
+                if (!thread.TryGetProperty("comments", out var comments)
+                    || !comments.TryGetProperty("nodes", out var commentNodes))
+                {
+                    continue;
+                }
+
+                foreach (var comment in commentNodes.EnumerateArray())
+                {
+                    var info = ExtractNewNonBotComment(comment, since, "createdAt");
+                    if (info is null)
+                        continue;
+
+                    _logger.LogDebug("Found new PR review thread comment on {Repo}!{Pr} from {Author}", repo, prNumber, info.Author);
+                    return info;
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse PR review thread comments JSON for {Repo}!{Pr}", repo, prNumber);
+            return null;
+        }
+    }
+
     /// <summary>
     /// Checks whether a user has write (or higher) access to a repository.
     /// Results are cached for 15 minutes to avoid excessive API calls.
@@ -630,9 +845,8 @@ public sealed class GhCliService
 
     /// <summary>
     /// Returns info about the first new non-bot review comment or PR comment since the given timestamp,
-    /// or null if no new comments exist. Checks both regular PR comments and formal review submissions.
-    /// Note: Does not detect individual review-thread replies (only top-level comments and formal
-    /// review submissions). Detecting thread replies would require GraphQL queries against reviewThreads.
+    /// or null if no new comments exist. Checks regular PR comments, formal review submissions,
+    /// and individual review-thread replies.
     /// </summary>
     public NewCommentInfo? GetNewPrReviewCommentSince(string repo, int prNumber, DateTimeOffset since)
     {
@@ -641,6 +855,10 @@ public sealed class GhCliService
         if (exitCode != 0)
         {
             _logger.LogWarning("Failed to query PR comments on {Repo}#{Pr}: {Output}", repo, prNumber, output);
+            var threadComment = GetNewPrReviewThreadCommentSince(repo, prNumber, since);
+            if (threadComment is not null)
+                return threadComment;
+
             return null;
         }
 

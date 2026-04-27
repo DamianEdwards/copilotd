@@ -835,7 +835,7 @@ public static class SessionCommand
 
         ConsoleOutput.Info($"{list.Count} session(s)");
         Console.WriteLine();
-        ConsoleOutput.Info("Use 'copilotd session connect <issue>' to connect to a running remote session.");
+        ConsoleOutput.Info("Use 'copilotd session connect <subject>' to connect to a running remote session.");
 
         return 0;
     }
@@ -847,7 +847,8 @@ public static class SessionCommand
     {
         var table = new Table();
         table.Border(TableBorder.Rounded);
-        table.AddColumn("Issue");
+        table.AddColumn("Subject");
+        table.AddColumn("Kind");
         table.AddColumn("Rule");
         table.AddColumn("Status");
         table.AddColumn("PID");
@@ -877,7 +878,8 @@ public static class SessionCommand
                 : s.WorktreePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
 
             table.AddRow(
-                Markup.Escape(s.IssueKey),
+                Markup.Escape(s.SubjectKey),
+                Markup.Escape(s.SubjectKind.ToString()),
                 Markup.Escape(s.RuleName),
                 statusMarkup,
                 Markup.Escape(pid),
@@ -895,7 +897,7 @@ public static class SessionCommand
     {
         var failedSessions = sessions
             .Where(session => session.Status == SessionStatus.Failed)
-            .Select(session => session.IssueKey)
+            .Select(session => session.SubjectKey)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (failedSessions.Count == 0)
@@ -915,7 +917,7 @@ public static class SessionCommand
         {
             var url = remoteSessionUrls.TryResolve(session, currentUser)
                 ?? GetUnavailableRemoteSessionUrlMessage(session);
-            ConsoleOutput.Info($"  {session.IssueKey}:");
+            ConsoleOutput.Info($"  {session.SubjectKey}:");
             ConsoleOutput.Info($"    {url}");
         }
 
@@ -942,12 +944,14 @@ public static class SessionCommand
         table.AddColumn(new TableColumn("[bold]Field[/]").NoWrap());
         table.AddColumn(new TableColumn("[bold]Value[/]"));
 
-        table.AddRow("Issue", Markup.Escape(session.IssueKey));
+        table.AddRow("Subject", Markup.Escape(session.SubjectKey));
+        table.AddRow("Subject kind", Markup.Escape(session.SubjectKind.ToString()));
         table.AddRow("Repo", Markup.Escape(session.Repo));
-        table.AddRow("Issue number", Markup.Escape(session.IssueNumber.ToString()));
+        table.AddRow("Subject number", Markup.Escape(session.SubjectNumber.ToString()));
+        table.AddRow("Subject title", Markup.Escape(session.SubjectTitle ?? "(unknown)"));
         table.AddRow("Rule", Markup.Escape(session.RuleName));
         table.AddRow("Status", Markup.Escape(session.Status.ToString()));
-        table.AddRow("Issue author", Markup.Escape(session.IssueAuthor ?? "(unknown)"));
+        table.AddRow("Subject author", Markup.Escape(session.SubjectAuthor ?? "(unknown)"));
         table.AddRow("Created", Markup.Escape(session.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
         table.AddRow("Updated", Markup.Escape(session.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
         table.AddRow("Last verified", Markup.Escape(FormatOptionalTime(session.LastVerifiedAt)));
@@ -956,7 +960,15 @@ public static class SessionCommand
         table.AddRow("Redispatch count", Markup.Escape(session.RedispatchCount.ToString()));
         table.AddRow("Completed by session", Markup.Escape(session.CompletedBySession ? "yes" : "no"));
         table.AddRow("Waiting since", Markup.Escape(FormatOptionalTime(session.WaitingSince)));
-        table.AddRow("Pull request", Markup.Escape(session.PullRequestNumber?.ToString() ?? "-"));
+        table.AddRow("Review pull request", Markup.Escape(session.ReviewPullRequestNumber?.ToString() ?? "-"));
+        if (session.SubjectKind == DispatchSubjectKind.PullRequest)
+        {
+            table.AddRow("PR base", Markup.Escape(session.PullRequestBaseBranch ?? "-"));
+            table.AddRow("PR head", Markup.Escape(session.PullRequestHeadBranch ?? "-"));
+            table.AddRow("PR head repo", Markup.Escape(session.PullRequestHeadRepo ?? "-"));
+            table.AddRow("PR head SHA", Markup.Escape(session.PullRequestHeadSha ?? "-"));
+            table.AddRow("PR branch strategy", Markup.Escape(session.PullRequestBranchStrategy?.ToString() ?? "-"));
+        }
         table.AddRow("Process ID", Markup.Escape(session.ProcessId?.ToString() ?? "-"));
         table.AddRow("Process start", Markup.Escape(FormatOptionalTime(session.ProcessStartTime)));
         table.AddRow("Process liveness", Markup.Escape(FormatOptionalLiveness(liveness)));
@@ -974,7 +986,7 @@ public static class SessionCommand
         if (session.Status == SessionStatus.Failed && !string.IsNullOrWhiteSpace(session.FailureDetail))
         {
             Console.WriteLine();
-            ConsoleOutput.Warning($"After resolving the issue above, run 'copilotd session reset {session.IssueKey}' to queue a new dispatch.");
+            ConsoleOutput.Warning($"After resolving the problem above, run 'copilotd session reset {session.SubjectKey}' to queue a new dispatch.");
         }
     }
 
@@ -1032,6 +1044,8 @@ public static class SessionCommand
         => new()
         {
             IssueKey = session.IssueKey,
+            SubjectKind = session.SubjectKind,
+            SubjectTitle = session.SubjectTitle,
             Repo = session.Repo,
             IssueNumber = session.IssueNumber,
             RuleName = session.RuleName,
@@ -1051,6 +1065,11 @@ public static class SessionCommand
             CompletedBySession = session.CompletedBySession,
             WaitingSince = session.WaitingSince,
             PullRequestNumber = session.PullRequestNumber,
+            PullRequestBaseBranch = session.PullRequestBaseBranch,
+            PullRequestHeadBranch = session.PullRequestHeadBranch,
+            PullRequestHeadRepo = session.PullRequestHeadRepo,
+            PullRequestHeadSha = session.PullRequestHeadSha,
+            PullRequestBranchStrategy = session.PullRequestBranchStrategy,
             RedispatchCount = session.RedispatchCount,
             LastRedispatchWasIssueComment = session.LastRedispatchWasIssueComment,
             WorktreePath = session.WorktreePath,

@@ -73,6 +73,19 @@ public enum SessionStatus
 }
 
 /// <summary>
+/// The GitHub subject kind that caused a session to be dispatched.
+/// </summary>
+[JsonConverter(typeof(TolerantDispatchSubjectKindConverter))]
+public enum DispatchSubjectKind
+{
+    /// <summary>The root dispatch subject is an issue.</summary>
+    Issue,
+
+    /// <summary>The root dispatch subject is a pull request.</summary>
+    PullRequest,
+}
+
+/// <summary>
 /// The GitHub object currently hosting a session's lifecycle reaction.
 /// </summary>
 [JsonConverter(typeof(TolerantReactionTargetTypeConverter))]
@@ -101,24 +114,63 @@ public readonly record struct ReactionAnchor(ReactionTargetType TargetType, long
 /// </summary>
 public sealed class DispatchSession
 {
-    /// <summary>Issue key: "org/repo#number".</summary>
+    /// <summary>The kind of GitHub subject that caused this session to be dispatched.</summary>
+    public DispatchSubjectKind SubjectKind { get; set; } = DispatchSubjectKind.Issue;
+
+    /// <summary>
+    /// Subject key in "org/repo#number" format. Stored under the legacy issueKey
+    /// JSON name for compatibility with existing state files.
+    /// </summary>
+    [JsonPropertyName("issueKey")]
     public string IssueKey { get; set; } = "";
+
+    /// <summary>Subject key in "org/repo#number" format.</summary>
+    [JsonIgnore]
+    public string SubjectKey
+    {
+        get => IssueKey;
+        set => IssueKey = value;
+    }
 
     /// <summary>Repository in org/repo format.</summary>
     public string Repo { get; set; } = "";
 
-    /// <summary>Issue number.</summary>
+    /// <summary>
+    /// Subject number. Stored under the legacy issueNumber JSON name for compatibility
+    /// with existing state files.
+    /// </summary>
+    [JsonPropertyName("issueNumber")]
     public int IssueNumber { get; set; }
+
+    /// <summary>Root issue or PR number.</summary>
+    [JsonIgnore]
+    public int SubjectNumber
+    {
+        get => IssueNumber;
+        set => IssueNumber = value;
+    }
 
     /// <summary>Name of the rule that triggered this dispatch.</summary>
     public string RuleName { get; set; } = "";
 
     /// <summary>
-    /// The GitHub login of the issue author at the time of dispatch.
+    /// The GitHub login of the root subject author at the time of dispatch.
     /// Used by <see cref="CommentTrustLevel.IssueAuthor"/> and
     /// <see cref="CommentTrustLevel.IssueAuthorAndCollaborators"/> trust checks.
     /// </summary>
+    [JsonPropertyName("issueAuthor")]
     public string? IssueAuthor { get; set; }
+
+    /// <summary>GitHub login of the root subject author at dispatch time.</summary>
+    [JsonIgnore]
+    public string? SubjectAuthor
+    {
+        get => IssueAuthor;
+        set => IssueAuthor = value;
+    }
+
+    /// <summary>Title of the root subject at dispatch time, when available.</summary>
+    public string? SubjectTitle { get; set; }
 
     /// <summary>
     /// Stable local identifier for this tracked session. Existing persisted sessions also use this
@@ -183,10 +235,36 @@ public sealed class DispatchSession
     public DateTimeOffset? WaitingSince { get; set; }
 
     /// <summary>
-    /// The pull request number associated with this session, if one was created.
+    /// The pull request number associated with this issue-root session, if one was created.
     /// Set via 'copilotd session pr' and used to monitor for review comments.
     /// </summary>
+    [JsonPropertyName("pullRequestNumber")]
     public int? PullRequestNumber { get; set; }
+
+    /// <summary>
+    /// Pull request number monitored by an issue-root session for review feedback.
+    /// </summary>
+    [JsonIgnore]
+    public int? ReviewPullRequestNumber
+    {
+        get => PullRequestNumber;
+        set => PullRequestNumber = value;
+    }
+
+    /// <summary>PR base branch for PR-root sessions.</summary>
+    public string? PullRequestBaseBranch { get; set; }
+
+    /// <summary>PR head branch for PR-root sessions.</summary>
+    public string? PullRequestHeadBranch { get; set; }
+
+    /// <summary>PR head repository for PR-root sessions.</summary>
+    public string? PullRequestHeadRepo { get; set; }
+
+    /// <summary>PR head SHA that was last dispatched for a PR-root session.</summary>
+    public string? PullRequestHeadSha { get; set; }
+
+    /// <summary>Branch strategy used by PR-root sessions.</summary>
+    public PullRequestBranchStrategy? PullRequestBranchStrategy { get; set; }
 
     /// <summary>
     /// Number of times this session has been re-dispatched via comment/review feedback loops.
@@ -216,6 +294,7 @@ public sealed class DispatchSession
     /// The GitHub reaction ID currently posted by copilotd for lifecycle tracking.
     /// Kept under its legacy name for persisted-state compatibility.
     /// </summary>
+    [JsonPropertyName("issueReactionId")]
     public long? IssueReactionId { get; set; }
 
     /// <summary>

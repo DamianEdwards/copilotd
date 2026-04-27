@@ -59,6 +59,7 @@ public sealed partial class ProcessManager
         var copilotdCommand = _runtimeContext.GetCopilotdCallbackCommand();
         var machineIdentifier = _stateStore.EnsureMachineIdentifier();
         var prompt = BuildPrompt(customPrompt, issue, session, config, copilotdCommand, machineIdentifier);
+        var ruleOptions = GetRuleOptions(config, session);
         var hasExistingResumeContext = HasExistingResumeContext(session);
         var sessionName = session.CopilotSessionName;
         if (!hasExistingResumeContext && string.IsNullOrWhiteSpace(sessionName))
@@ -71,7 +72,7 @@ public sealed partial class ProcessManager
             session,
             prompt,
             sessionName,
-            config.Rules.GetValueOrDefault(session.RuleName),
+            ruleOptions,
             repoPath,
             config.DefaultModel,
             _runtimeContext.GetExtraAllowedDirectories());
@@ -750,13 +751,17 @@ public sealed partial class ProcessManager
 
     private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config, string copilotdCommand, string machineIdentifier)
     {
-        var prompt = session.RedispatchCount > 0
-            ? session.PullRequestNumber is not null && !session.LastRedispatchWasIssueComment
-                ? BuildPrReviewPrompt(issue, session)
-                : CopilotdConfig.IssueFeedbackPrompt
-            : CopilotdConfig.DefaultPrompt;
+        var prompt = session.SubjectKind == DispatchSubjectKind.PullRequest
+            ? session.RedispatchCount > 0
+                ? BuildPullRequestFeedbackPrompt(session)
+                : BuildPullRequestPrompt(session)
+            : session.RedispatchCount > 0
+                ? session.PullRequestNumber is not null && !session.LastRedispatchWasIssueComment
+                    ? BuildPrReviewPrompt(issue, session)
+                    : CopilotdConfig.IssueFeedbackPrompt
+                : CopilotdConfig.DefaultPrompt;
 
-        var rule = config.Rules.GetValueOrDefault(session.RuleName);
+        var rule = GetRuleOptions(config, session);
 
         // Resolve the effective custom prompt based on rule settings
         var effectiveCustomPrompt = ResolveCustomPrompt(globalCustomPrompt, rule);
@@ -809,11 +814,53 @@ public sealed partial class ProcessManager
             """;
     }
 
+    private static string BuildPullRequestPrompt(DispatchSession session)
+    {
+        var branchInstruction = session.PullRequestBranchStrategy switch
+        {
+            PullRequestBranchStrategy.ReadOnly => "You are in a read-only PR worktree. Do not commit or push changes; review, validate, and comment on the PR instead.",
+            PullRequestBranchStrategy.ChildBranch => "You are on a new copilotd branch created from the PR head. Commit any fixes here and push the branch; explain in the PR how to use it.",
+            _ => "You are on a branch based on the PR source branch. Commit fixes here and push them to update the existing PR.",
+        };
+
+        return $$"""
+            You are working on pull request #$(pr.id) in the $(issue.repo) repository.
+            Read the PR title, description, changed files, comments, and review feedback carefully.
+
+            Important:
+            - {{branchInstruction}}
+            - Focus only on changes relevant to this pull request.
+            - If you need clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
+            - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
+            """;
+    }
+
+    private static string BuildPullRequestFeedbackPrompt(DispatchSession session)
+    {
+        var branchInstruction = session.PullRequestBranchStrategy switch
+        {
+            PullRequestBranchStrategy.ReadOnly => "Continue reviewing or validating only; do not commit or push changes.",
+            PullRequestBranchStrategy.ChildBranch => "Continue on the copilotd branch created from the PR head; commit and push any follow-up fixes there.",
+            _ => "Continue on the branch used to update the existing PR; commit and push any follow-up fixes to the PR source branch.",
+        };
+
+        return $$"""
+            You are resuming work on pull request #$(pr.id) in the $(issue.repo) repository because new PR feedback or commits were detected.
+            Read the new PR comments, review feedback, and current diff carefully.
+
+            Important:
+            - {{branchInstruction}}
+            - Focus on the new PR feedback or new commits since the previous dispatch.
+            - If you need more clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
+            - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
+            """;
+    }
+
     /// <summary>
     /// Resolves the effective custom prompt by combining the global custom prompt
     /// with the rule's custom prompt based on the rule's <see cref="PromptMode"/>.
     /// </summary>
-    private static string ResolveCustomPrompt(string globalCustomPrompt, DispatchRule? rule)
+    private static string ResolveCustomPrompt(string globalCustomPrompt, DispatchRuleOptions? rule)
     {
         var ruleCustomPrompt = rule?.CustomPrompt;
 
@@ -896,7 +943,15 @@ public sealed partial class ProcessManager
             .Replace("$(issue.id)", issue.Number.ToString(), StringComparison.Ordinal)
             .Replace("$(issue.type)", issue.Type ?? "issue", StringComparison.Ordinal)
             .Replace("$(issue.milestone)", issue.Milestone ?? "none", StringComparison.Ordinal)
-            .Replace("$(pr.id)", session.PullRequestNumber?.ToString() ?? "", StringComparison.Ordinal)
+            .Replace("$(subject.id)", session.SubjectNumber.ToString(), StringComparison.Ordinal)
+            .Replace("$(subject.kind)", session.SubjectKind.ToString().ToLowerInvariant(), StringComparison.Ordinal)
+            .Replace("$(subject.title)", session.SubjectTitle ?? "", StringComparison.Ordinal)
+            .Replace("$(pr.id)", (session.SubjectKind == DispatchSubjectKind.PullRequest ? session.SubjectNumber : session.PullRequestNumber)?.ToString() ?? "", StringComparison.Ordinal)
+            .Replace("$(pr.title)", session.SubjectKind == DispatchSubjectKind.PullRequest ? session.SubjectTitle ?? "" : "", StringComparison.Ordinal)
+            .Replace("$(pr.base)", session.PullRequestBaseBranch ?? "", StringComparison.Ordinal)
+            .Replace("$(pr.head)", session.PullRequestHeadBranch ?? "", StringComparison.Ordinal)
+            .Replace("$(pr.head_repo)", session.PullRequestHeadRepo ?? "", StringComparison.Ordinal)
+            .Replace("$(pr.head_sha)", session.PullRequestHeadSha ?? "", StringComparison.Ordinal)
             .Replace("$(org)", org, StringComparison.Ordinal)
             .Replace("$(repo)", repo, StringComparison.Ordinal)
             .Replace("$(issue_id)", issue.Number.ToString(), StringComparison.Ordinal)
@@ -906,6 +961,11 @@ public sealed partial class ProcessManager
             .Replace("$(machine_name)", Environment.MachineName, StringComparison.Ordinal)
             .Replace("$(gh_user)", ghUser ?? "", StringComparison.Ordinal);
     }
+
+    private static DispatchRuleOptions? GetRuleOptions(CopilotdConfig config, DispatchSession session)
+        => session.SubjectKind == DispatchSubjectKind.PullRequest
+            ? config.PullRequestRules.GetValueOrDefault(session.RuleName)
+            : config.Rules.GetValueOrDefault(session.RuleName);
 
     private static (string Org, string Repo) SplitRepoSlug(string repoSlug)
     {
@@ -919,7 +979,7 @@ public sealed partial class ProcessManager
         return (repoSlug[..separatorIndex], repoSlug[(separatorIndex + 1)..]);
     }
 
-    private static string BuildArguments(DispatchSession session, string prompt, string? sessionName, DispatchRule? rule, string repoPath, string? defaultModel, IEnumerable<string> extraAllowedDirectories)
+    private static string BuildArguments(DispatchSession session, string prompt, string? sessionName, DispatchRuleOptions? rule, string repoPath, string? defaultModel, IEnumerable<string> extraAllowedDirectories)
     {
         var args = new List<string>
         {
@@ -1102,6 +1162,10 @@ public sealed partial class ProcessManager
         {
             return RefreshWorktree(session) ? WorktreeResult.Refreshed : WorktreeResult.Failed;
         }
+
+        if (session.SubjectKind == DispatchSubjectKind.PullRequest)
+            return PreparePullRequestWorktree(session, config, state);
+
         var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
         if (mainRepoPath is null || !Directory.Exists(mainRepoPath))
         {
@@ -1178,6 +1242,97 @@ public sealed partial class ProcessManager
         return WorktreeResult.CreatedNew;
     }
 
+    private WorktreeResult PreparePullRequestWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
+    {
+        var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
+        if (mainRepoPath is null || !Directory.Exists(mainRepoPath))
+        {
+            _logger.LogWarning("Main repo directory not found for {Repo}", session.Repo);
+            return WorktreeResult.Failed;
+        }
+
+        var sessionsDir = mainRepoPath + "_sessions";
+        var worktreePath = Path.Combine(sessionsDir, $"pr-{session.SubjectNumber}");
+
+        if (Directory.Exists(worktreePath))
+        {
+            _logger.LogDebug("Removing existing PR worktree at {Path}", worktreePath);
+            RunGit(mainRepoPath, $"worktree remove \"{worktreePath}\" --force");
+        }
+
+        RunGit(mainRepoPath, "worktree prune");
+
+        if (!string.IsNullOrEmpty(session.BranchName))
+        {
+            _logger.LogDebug("Cleaning up stale branch {Branch} from previous PR attempt", session.BranchName);
+            if (RunGit(mainRepoPath, $"branch -D {session.BranchName}"))
+                session.BranchName = null;
+        }
+
+        Directory.CreateDirectory(sessionsDir);
+
+        var strategy = session.PullRequestBranchStrategy ?? PullRequestBranchStrategy.SourceBranch;
+        var suffix = Guid.NewGuid().ToString("N")[..4];
+        var localBranchName = strategy == PullRequestBranchStrategy.ReadOnly
+            ? null
+            : $"copilotd/pr-{session.SubjectNumber}-{suffix}";
+
+        _logger.LogInformation("Creating PR worktree for {Key} at {Path} using {Strategy}", session.SubjectKey, worktreePath, strategy);
+
+        switch (strategy)
+        {
+            case PullRequestBranchStrategy.SourceBranch:
+                if (string.IsNullOrWhiteSpace(session.PullRequestHeadRepo))
+                {
+                    _logger.LogWarning("Cannot use SourceBranch for {Key}: PR head repo is unknown", session.SubjectKey);
+                    return WorktreeResult.Failed;
+                }
+
+                if (!string.Equals(session.Repo, session.PullRequestHeadRepo, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning("Cannot use SourceBranch for {Key}: PR head repo {HeadRepo} differs from base repo {Repo}",
+                        session.SubjectKey, session.PullRequestHeadRepo, session.Repo);
+                    return WorktreeResult.Failed;
+                }
+
+                if (string.IsNullOrWhiteSpace(session.PullRequestHeadBranch))
+                {
+                    _logger.LogWarning("Cannot use SourceBranch for {Key}: PR head branch is unknown", session.SubjectKey);
+                    return WorktreeResult.Failed;
+                }
+
+                if (!RunGit(mainRepoPath, $"fetch origin {session.PullRequestHeadBranch}"))
+                    return WorktreeResult.Failed;
+
+                session.BranchName = localBranchName;
+                if (!RunGit(mainRepoPath, $"worktree add \"{worktreePath}\" -b {localBranchName} origin/{session.PullRequestHeadBranch}"))
+                    return WorktreeResult.Failed;
+                break;
+
+            case PullRequestBranchStrategy.ChildBranch:
+                if (!RunGit(mainRepoPath, $"fetch origin pull/{session.SubjectNumber}/head"))
+                    return WorktreeResult.Failed;
+
+                session.BranchName = localBranchName;
+                if (!RunGit(mainRepoPath, $"worktree add \"{worktreePath}\" -b {localBranchName} FETCH_HEAD"))
+                    return WorktreeResult.Failed;
+                break;
+
+            case PullRequestBranchStrategy.ReadOnly:
+                if (!RunGit(mainRepoPath, $"fetch origin pull/{session.SubjectNumber}/head"))
+                    return WorktreeResult.Failed;
+
+                session.BranchName = null;
+                if (!RunGit(mainRepoPath, $"worktree add \"{worktreePath}\" --detach FETCH_HEAD"))
+                    return WorktreeResult.Failed;
+                break;
+        }
+
+        session.WorktreePath = worktreePath;
+        _logger.LogInformation("PR worktree ready for {Key} at {Path}", session.SubjectKey, worktreePath);
+        return WorktreeResult.CreatedNew;
+    }
+
     /// <summary>
     /// Refreshes an existing worktree by pulling the latest changes from origin.
     /// Used when re-dispatching a session for PR review feedback.
@@ -1234,7 +1389,13 @@ public sealed partial class ProcessManager
         // Only clear BranchName on success so a future cleanup can retry.
         if (mainRepoPath is not null)
         {
-            var branchName = session.BranchName ?? $"copilotd/issue-{session.IssueNumber}";
+            var branchName = session.BranchName;
+            if (branchName is null && session.SubjectKind == DispatchSubjectKind.Issue)
+                branchName = $"copilotd/issue-{session.IssueNumber}";
+
+            if (branchName is null)
+                return;
+
             if (RunGit(mainRepoPath, $"branch -D {branchName}"))
             {
                 session.BranchName = null;
@@ -1396,6 +1557,13 @@ public sealed partial class ProcessManager
     /// </summary>
     public bool PushBranch(DispatchSession session, CopilotdConfig config, DaemonState state)
     {
+        if (session.SubjectKind == DispatchSubjectKind.PullRequest
+            && session.PullRequestBranchStrategy == PullRequestBranchStrategy.ReadOnly)
+        {
+            _logger.LogInformation("Skipping push for read-only PR session {Key}", session.SubjectKey);
+            return true;
+        }
+
         if (string.IsNullOrEmpty(session.BranchName))
         {
             _logger.LogWarning("Cannot push branch for {Key}: no branch name set", session.IssueKey);
@@ -1413,6 +1581,14 @@ public sealed partial class ProcessManager
                 _logger.LogWarning("Cannot push branch for {Key}: no working directory found", session.IssueKey);
                 return false;
             }
+        }
+
+        if (session.SubjectKind == DispatchSubjectKind.PullRequest
+            && session.PullRequestBranchStrategy == PullRequestBranchStrategy.SourceBranch
+            && !string.IsNullOrWhiteSpace(session.PullRequestHeadBranch))
+        {
+            _logger.LogInformation("Pushing PR session {Key} HEAD to origin/{Branch}", session.SubjectKey, session.PullRequestHeadBranch);
+            return RunGit(workDir, $"push origin HEAD:{session.PullRequestHeadBranch}");
         }
 
         _logger.LogInformation("Pushing branch {Branch} to origin for {Key}", session.BranchName, session.IssueKey);
