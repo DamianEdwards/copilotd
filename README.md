@@ -63,9 +63,10 @@ The `init` command is an interactive wizard that walks you through:
 1. **Dependency & auth checks** — verifies `gh` and `copilot` CLIs are installed (showing versions) and authenticated
 2. **Repo home** — where your repository clones live on disk
 3. **Global settings** — max concurrent sessions, default model
-4. **Default rule** — author filtering, required labels, tool permissions (yolo/allow-all-tools/allow-all-urls), model override
-5. **Repository selection** — pick which repos to watch (shows clone status)
-6. **Folder trust checks** — for cloned repos, prompts to add the repo path and daemon worktree root to Copilot's trusted folders when needed for unattended dispatch
+4. **Dispatch sources** — choose whether to dispatch from issues, pull requests, or both
+5. **Default issue and/or PR rules** — author filtering, required labels, tool permissions (yolo/allow-all-tools/allow-all-urls), model override, plus PR-specific branch settings when PR dispatch is enabled
+6. **Repository selection** — pick which repos to watch (shows clone status)
+7. **Folder trust checks** — for cloned repos, prompts to add the repo path and daemon worktree root to Copilot's trusted folders when needed for unattended dispatch
 
 After setup, a configuration summary and concrete next-step commands are displayed.
 
@@ -144,7 +145,7 @@ File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Ea
 
 ### Rules options
 
-Issue rules support conditions (`--assignee`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). Pull request rules are opt-in with `--kind pr` and support PR-specific conditions (`--base`, `--head`, `--head-repo`, `--draft`, `--review-decision`) plus `--branch-strategy`. All conditions are logical AND. `copilotd init` creates only the default issue rule; no PR rule is created by default.
+Issue rules support conditions (`--assignee`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). Pull request rules are opt-in with `--kind pr` and support PR-specific conditions (`--base`, `--head`, `--head-repo`, `--draft`, `--review-decision`) plus `--branch-strategy`. All conditions are logical AND. `copilotd init` asks whether to create a default issue rule, a default PR rule, or both.
 
 Aliases: `rule` for `rules`, `create`/`new` for `add`, and `edit` for `update`.
 
@@ -309,7 +310,7 @@ The default prompt instructs copilot sessions to use `session pr` after creating
 
 ### PR dispatch rules
 
-Pull request dispatch rules live in the separate `pull_request_rules` config collection and are not created by default. They use the same `org/repo#number` session key format as issue sessions, with a stored subject kind to distinguish PR-root sessions from issue-root sessions.
+Pull request dispatch rules live in the separate `pull_request_rules` config collection and are opt-in. They can be created from `copilotd init` when you choose PR dispatch, or later with `copilotd rules add <name> --kind pr`. They use the same `org/repo#number` session key format as issue sessions, with a stored subject kind to distinguish PR-root sessions from issue-root sessions.
 
 PR rules support three worktree strategies:
 

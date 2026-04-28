@@ -12,6 +12,8 @@ namespace Copilotd.Commands;
 
 public static class InitCommand
 {
+    private const string DefaultPullRequestRuleName = "Default PR";
+
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("init", "Initialize copilotd configuration (first-run setup)");
@@ -134,122 +136,323 @@ public static class InitCommand
                 config.DefaultModel = string.IsNullOrWhiteSpace(modelInput) ? null : modelInput.Trim();
                 AnsiConsole.WriteLine();
 
-                // ── Phase 4: Default Rule Setup ───────────────────────────
-                AnsiConsole.Write(new Rule("[bold blue]Default Dispatch Rule[/]").LeftJustified());
+                // ── Phase 4: Dispatch Source Selection ─────────────────────
+                AnsiConsole.Write(new Rule("[bold blue]Dispatch Sources[/]").LeftJustified());
                 AnsiConsole.WriteLine();
-                AnsiConsole.MarkupLine("[grey]The default rule controls which issues copilotd will pick up and dispatch.[/]");
+                AnsiConsole.MarkupLine("[grey]Choose which GitHub subjects copilotd should dispatch from by default.[/]");
+                var dispatchSource = AnsiConsole.Prompt(
+                    new SelectionPrompt<DispatchSourceSelection>()
+                        .Title("What should copilotd dispatch from?")
+                        .AddChoices(DispatchSourceSelection.Issues, DispatchSourceSelection.PullRequests, DispatchSourceSelection.Both)
+                        .UseConverter(FormatDispatchSourceSelection)
+                        .HighlightStyle(new Style(Color.Blue)));
+                var configureIssueDispatch = dispatchSource is DispatchSourceSelection.Issues or DispatchSourceSelection.Both;
+                var configurePullRequestDispatch = dispatchSource is DispatchSourceSelection.PullRequests or DispatchSourceSelection.Both;
                 AnsiConsole.WriteLine();
 
+                IssueDispatchRule? defaultIssueRule = null;
+                PullRequestDispatchRule? defaultPullRequestRule = null;
                 var existingIssueRule = config.IssueRules.GetValueOrDefault(CopilotdConfig.DefaultRuleName);
 
-                // Author filtering
-                const string AuthorAny = "Any author";
-                const string AuthorWriteAccess = "Only authors with write access to the repo";
-                var authorOnlyMe = $"Only me ({Markup.Escape(username ?? "unknown")})";
+                if (!configureIssueDispatch && config.IssueRules.Remove(CopilotdConfig.DefaultRuleName))
+                    ConsoleOutput.Info("Removed the default issue dispatch rule because issue dispatch was not selected.");
+                if (!configurePullRequestDispatch && config.PullRequestRules.Remove(DefaultPullRequestRuleName))
+                    ConsoleOutput.Info("Removed the default PR dispatch rule because PR dispatch was not selected.");
 
-                // Determine existing selection for re-run and build choices with it first
-                var authorDefault = existingIssueRule?.AuthorMode switch
+                if (configureIssueDispatch)
                 {
-                    AuthorMode.Allowed when existingIssueRule.Authors.Count == 1
-                        && string.Equals(existingIssueRule.Authors[0], username, StringComparison.OrdinalIgnoreCase)
-                        => authorOnlyMe,
-                    AuthorMode.WriteAccess => AuthorWriteAccess,
-                    _ => AuthorAny
-                };
+                    // ── Phase 5a: Default Issue Dispatch Rule Setup ────────────
+                    AnsiConsole.Write(new Rule("[bold blue]Default Issue Dispatch Rule[/]").LeftJustified());
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.MarkupLine("[grey]The default issue rule controls which issues copilotd will pick up and dispatch.[/]");
+                    AnsiConsole.WriteLine();
 
-                // Build choices with the current/default selection first so Spectre highlights it
-                var authorChoices = new List<string> { authorDefault };
-                foreach (var c in new[] { AuthorAny, authorOnlyMe, AuthorWriteAccess })
-                {
-                    if (c != authorDefault) authorChoices.Add(c);
+                    // Author filtering
+                    const string AuthorAny = "Any author";
+                    const string AuthorWriteAccess = "Only authors with write access to the repo";
+                    var authorOnlyMe = $"Only me ({Markup.Escape(username ?? "unknown")})";
+
+                    // Determine existing selection for re-run and build choices with it first
+                    var authorDefault = existingIssueRule?.AuthorMode switch
+                    {
+                        AuthorMode.Allowed when existingIssueRule.Authors.Count == 1
+                            && string.Equals(existingIssueRule.Authors[0], username, StringComparison.OrdinalIgnoreCase)
+                            => authorOnlyMe,
+                        AuthorMode.WriteAccess => AuthorWriteAccess,
+                        _ => AuthorAny
+                    };
+
+                    // Build choices with the current/default selection first so Spectre highlights it
+                    var authorChoices = new List<string> { authorDefault };
+                    foreach (var c in new[] { AuthorAny, authorOnlyMe, AuthorWriteAccess })
+                    {
+                        if (c != authorDefault) authorChoices.Add(c);
+                    }
+
+                    // Don't offer "Only me" if username couldn't be determined
+                    if (username is null)
+                        authorChoices.Remove(authorOnlyMe);
+
+                    var authorChoice = AnsiConsole.Prompt(
+                        new SelectionPrompt<string>()
+                            .Title("Who can create issues that copilotd will dispatch?")
+                            .AddChoices(authorChoices)
+                            .HighlightStyle(new Style(Color.Blue)));
+                    AnsiConsole.MarkupLine($"  Issue authors: [blue]{Markup.Escape(authorChoice)}[/]");
+
+                    AuthorMode authorMode;
+                    List<string> authors = [];
+                    if (authorChoice == authorOnlyMe)
+                    {
+                        authorMode = AuthorMode.Allowed;
+                        authors = [username!];
+                    }
+                    else if (authorChoice == AuthorWriteAccess)
+                    {
+                        authorMode = AuthorMode.WriteAccess;
+                    }
+                    else
+                    {
+                        authorMode = AuthorMode.Any;
+                    }
+                    AnsiConsole.WriteLine();
+
+                    // Labels
+                    AnsiConsole.MarkupLine("[grey]Issues must have ALL of these labels to be dispatched.[/]");
+                    var existingLabels = existingIssueRule?.Labels.Count > 0
+                        ? string.Join(", ", existingIssueRule.Labels)
+                        : "copilotd";
+                    var labelsInput = AnsiConsole.Prompt(
+                        new TextPrompt<string>("Required label(s) (comma-separated):")
+                            .DefaultValue(existingLabels));
+                    var labels = labelsInput
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    AnsiConsole.MarkupLine($"  Labels: [blue]{Markup.Escape(string.Join(", ", labels))}[/]");
+                    AnsiConsole.WriteLine();
+
+                    // Yolo / tool permissions
+                    AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools and --allow-all-urls).[/]");
+                    var existingYolo = existingIssueRule?.Yolo ?? false;
+                    var yolo = AnsiConsole.Confirm("Enable yolo mode?", existingYolo);
+                    AnsiConsole.MarkupLine($"  Yolo mode: [blue]{(yolo ? "yes" : "no")}[/]");
+
+                    bool allowAllTools = true;
+                    bool allowAllUrls = false;
+                    if (!yolo)
+                    {
+                        AnsiConsole.MarkupLine("[grey]Allow copilot to use all available tools without prompting.[/]");
+                        allowAllTools = AnsiConsole.Confirm("Allow all tools?", existingIssueRule?.AllowAllTools ?? true);
+                        AnsiConsole.MarkupLine($"  Allow all tools: [blue]{(allowAllTools ? "yes" : "no")}[/]");
+                        AnsiConsole.MarkupLine("[grey]Allow copilot to access any URL without prompting.[/]");
+                        allowAllUrls = AnsiConsole.Confirm("Allow all URLs?", existingIssueRule?.AllowAllUrls ?? false);
+                        AnsiConsole.MarkupLine($"  Allow all URLs: [blue]{(allowAllUrls ? "yes" : "no")}[/]");
+                    }
+                    AnsiConsole.WriteLine();
+
+                    // Rule model override
+                    AnsiConsole.MarkupLine("[grey]Optionally override the default model for sessions matching this rule.[/]");
+                    var existingRuleModel = existingIssueRule?.Model ?? "";
+                    var ruleModelInput = AnsiConsole.Prompt(
+                        new TextPrompt<string>("Model override for default rule (empty to inherit global):")
+                            .DefaultValue(existingRuleModel)
+                            .AllowEmpty());
+                    var ruleModel = string.IsNullOrWhiteSpace(ruleModelInput) ? null : ruleModelInput.Trim();
+                    AnsiConsole.MarkupLine($"  Model override: [blue]{Markup.Escape(ruleModel ?? "(inherit global)")}[/]");
+                    AnsiConsole.WriteLine();
+
+                    // Build the default rule
+                    defaultIssueRule = existingIssueRule ?? new IssueDispatchRule();
+                    defaultIssueRule.Assignee = username;
+                    defaultIssueRule.Labels = labels;
+                    defaultIssueRule.AuthorMode = authorMode;
+                    defaultIssueRule.Authors = authors;
+                    defaultIssueRule.Yolo = yolo;
+                    defaultIssueRule.AllowAllTools = yolo || allowAllTools;
+                    defaultIssueRule.AllowAllUrls = yolo || allowAllUrls;
+                    defaultIssueRule.Model = ruleModel;
+                    config.IssueRules[CopilotdConfig.DefaultRuleName] = defaultIssueRule;
                 }
 
-                // Don't offer "Only me" if username couldn't be determined
-                if (username is null)
-                    authorChoices.Remove(authorOnlyMe);
-
-                var authorChoice = AnsiConsole.Prompt(
-                    new SelectionPrompt<string>()
-                        .Title("Who can create issues that copilotd will dispatch?")
-                        .AddChoices(authorChoices)
-                        .HighlightStyle(new Style(Color.Blue)));
-                AnsiConsole.MarkupLine($"  Issue authors: [blue]{Markup.Escape(authorChoice)}[/]");
-
-                AuthorMode authorMode;
-                List<string> authors = [];
-                if (authorChoice == authorOnlyMe)
+                if (configurePullRequestDispatch)
                 {
-                    authorMode = AuthorMode.Allowed;
-                    authors = [username!];
+                    // ── Phase 5b: Default Pull Request Dispatch Rule Setup ─────
+                    AnsiConsole.Write(new Rule("[bold blue]Default Pull Request Dispatch Rule[/]").LeftJustified());
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.MarkupLine("[grey]The default PR rule controls which pull requests copilotd will pick up and dispatch.[/]");
+                    AnsiConsole.WriteLine();
+
+                    var existingPullRequestRule = config.PullRequestRules.GetValueOrDefault(DefaultPullRequestRuleName);
+
+                    const string PrAuthorAny = "Any author";
+                    const string PrAuthorWriteAccess = "Only authors with write access to the repo";
+                    var prAuthorOnlyMe = $"Only me ({Markup.Escape(username ?? "unknown")})";
+                    var prAuthorDefault = existingPullRequestRule?.AuthorMode switch
+                    {
+                        AuthorMode.Allowed when existingPullRequestRule.Authors.Count == 1
+                            && string.Equals(existingPullRequestRule.Authors[0], username, StringComparison.OrdinalIgnoreCase)
+                            => prAuthorOnlyMe,
+                        AuthorMode.WriteAccess => PrAuthorWriteAccess,
+                        _ => PrAuthorAny
+                    };
+
+                    var prAuthorChoices = new List<string> { prAuthorDefault };
+                    foreach (var c in new[] { PrAuthorAny, prAuthorOnlyMe, PrAuthorWriteAccess })
+                    {
+                        if (c != prAuthorDefault) prAuthorChoices.Add(c);
+                    }
+
+                    if (username is null)
+                        prAuthorChoices.Remove(prAuthorOnlyMe);
+
+                    var prAuthorChoice = AnsiConsole.Prompt(
+                        new SelectionPrompt<string>()
+                            .Title("Who can create pull requests that copilotd will dispatch?")
+                            .AddChoices(prAuthorChoices)
+                            .HighlightStyle(new Style(Color.Blue)));
+                    AnsiConsole.MarkupLine($"  PR authors: [blue]{Markup.Escape(prAuthorChoice)}[/]");
+
+                    AuthorMode prAuthorMode;
+                    List<string> prAuthors = [];
+                    if (prAuthorChoice == prAuthorOnlyMe)
+                    {
+                        prAuthorMode = AuthorMode.Allowed;
+                        prAuthors = [username!];
+                    }
+                    else if (prAuthorChoice == PrAuthorWriteAccess)
+                    {
+                        prAuthorMode = AuthorMode.WriteAccess;
+                    }
+                    else
+                    {
+                        prAuthorMode = AuthorMode.Any;
+                    }
+                    AnsiConsole.WriteLine();
+
+                    AnsiConsole.MarkupLine("[grey]Pull requests must have ALL of these labels to be dispatched. Leave empty for any label set.[/]");
+                    var existingPrLabels = existingPullRequestRule?.Labels.Count > 0
+                        ? string.Join(", ", existingPullRequestRule.Labels)
+                        : "";
+                    var prLabelsInput = AnsiConsole.Prompt(
+                        new TextPrompt<string>("Required PR label(s) (comma-separated, empty for none):")
+                            .DefaultValue(existingPrLabels)
+                            .AllowEmpty());
+                    var prLabels = prLabelsInput
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    AnsiConsole.MarkupLine($"  PR labels: [blue]{Markup.Escape(prLabels.Count > 0 ? string.Join(", ", prLabels) : "(none)")}[/]");
+                    AnsiConsole.WriteLine();
+
+                    AnsiConsole.MarkupLine("[grey]Optionally restrict PR dispatch to a target/base branch, e.g. main. Leave empty for any base branch.[/]");
+                    var prBaseBranchInput = AnsiConsole.Prompt(
+                        new TextPrompt<string>("PR base branch:")
+                            .DefaultValue(existingPullRequestRule?.BaseBranch ?? "")
+                            .AllowEmpty());
+                    var prBaseBranch = string.IsNullOrWhiteSpace(prBaseBranchInput) ? null : prBaseBranchInput.Trim();
+                    AnsiConsole.MarkupLine($"  PR base branch: [blue]{Markup.Escape(prBaseBranch ?? "(any)")}[/]");
+                    AnsiConsole.WriteLine();
+
+                    const string DraftAny = "Any draft state";
+                    const string DraftOnly = "Draft PRs only";
+                    const string ReadyOnly = "Ready PRs only";
+                    var draftDefault = existingPullRequestRule?.Draft switch
+                    {
+                        true => DraftOnly,
+                        false => ReadyOnly,
+                        _ => DraftAny
+                    };
+                    var draftChoices = new List<string> { draftDefault };
+                    foreach (var c in new[] { DraftAny, DraftOnly, ReadyOnly })
+                    {
+                        if (c != draftDefault) draftChoices.Add(c);
+                    }
+                    var draftChoice = AnsiConsole.Prompt(
+                        new SelectionPrompt<string>()
+                            .Title("Which PR draft state should be dispatched?")
+                            .AddChoices(draftChoices)
+                            .HighlightStyle(new Style(Color.Blue)));
+                    bool? draft = draftChoice switch
+                    {
+                        DraftOnly => true,
+                        ReadyOnly => false,
+                        _ => null
+                    };
+                    AnsiConsole.MarkupLine($"  PR draft state: [blue]{Markup.Escape(draftChoice)}[/]");
+                    AnsiConsole.WriteLine();
+
+                    const string SourceBranch = "Update the PR source branch (same-repo PRs only)";
+                    const string ChildBranch = "Create a new child branch from the PR";
+                    const string ReadOnly = "Read-only review/validation";
+                    var branchStrategyDefault = existingPullRequestRule?.BranchStrategy switch
+                    {
+                        PullRequestBranchStrategy.ChildBranch => ChildBranch,
+                        PullRequestBranchStrategy.ReadOnly => ReadOnly,
+                        _ => SourceBranch
+                    };
+                    var branchStrategyChoices = new List<string> { branchStrategyDefault };
+                    foreach (var c in new[] { SourceBranch, ChildBranch, ReadOnly })
+                    {
+                        if (c != branchStrategyDefault) branchStrategyChoices.Add(c);
+                    }
+                    var branchStrategyChoice = AnsiConsole.Prompt(
+                        new SelectionPrompt<string>()
+                            .Title("How should PR-dispatched sessions handle branches?")
+                            .AddChoices(branchStrategyChoices)
+                            .HighlightStyle(new Style(Color.Blue)));
+                    var branchStrategy = branchStrategyChoice switch
+                    {
+                        ChildBranch => PullRequestBranchStrategy.ChildBranch,
+                        ReadOnly => PullRequestBranchStrategy.ReadOnly,
+                        _ => PullRequestBranchStrategy.SourceBranch
+                    };
+                    AnsiConsole.MarkupLine($"  PR branch strategy: [blue]{Markup.Escape(branchStrategyChoice)}[/]");
+                    AnsiConsole.WriteLine();
+
+                    AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools and --allow-all-urls).[/]");
+                    var existingPrYolo = existingPullRequestRule?.Yolo ?? false;
+                    var prYolo = AnsiConsole.Confirm("Enable yolo mode for PR sessions?", existingPrYolo);
+                    AnsiConsole.MarkupLine($"  Yolo mode: [blue]{(prYolo ? "yes" : "no")}[/]");
+
+                    bool prAllowAllTools = true;
+                    bool prAllowAllUrls = false;
+                    if (!prYolo)
+                    {
+                        AnsiConsole.MarkupLine("[grey]Allow copilot to use all available tools without prompting.[/]");
+                        prAllowAllTools = AnsiConsole.Confirm("Allow all tools for PR sessions?", existingPullRequestRule?.AllowAllTools ?? true);
+                        AnsiConsole.MarkupLine($"  Allow all tools: [blue]{(prAllowAllTools ? "yes" : "no")}[/]");
+                        AnsiConsole.MarkupLine("[grey]Allow copilot to access any URL without prompting.[/]");
+                        prAllowAllUrls = AnsiConsole.Confirm("Allow all URLs for PR sessions?", existingPullRequestRule?.AllowAllUrls ?? false);
+                        AnsiConsole.MarkupLine($"  Allow all URLs: [blue]{(prAllowAllUrls ? "yes" : "no")}[/]");
+                    }
+                    AnsiConsole.WriteLine();
+
+                    AnsiConsole.MarkupLine("[grey]Optionally override the default model for PR sessions matching this rule.[/]");
+                    var existingPrRuleModel = existingPullRequestRule?.Model ?? "";
+                    var prRuleModelInput = AnsiConsole.Prompt(
+                        new TextPrompt<string>("Model override for default PR rule (empty to inherit global):")
+                            .DefaultValue(existingPrRuleModel)
+                            .AllowEmpty());
+                    var prRuleModel = string.IsNullOrWhiteSpace(prRuleModelInput) ? null : prRuleModelInput.Trim();
+                    AnsiConsole.MarkupLine($"  Model override: [blue]{Markup.Escape(prRuleModel ?? "(inherit global)")}[/]");
+                    AnsiConsole.WriteLine();
+
+                    defaultPullRequestRule = existingPullRequestRule ?? new PullRequestDispatchRule();
+                    defaultPullRequestRule.Labels = prLabels;
+                    defaultPullRequestRule.BaseBranch = prBaseBranch;
+                    defaultPullRequestRule.Draft = draft;
+                    defaultPullRequestRule.AuthorMode = prAuthorMode;
+                    defaultPullRequestRule.Authors = prAuthors;
+                    defaultPullRequestRule.BranchStrategy = branchStrategy;
+                    defaultPullRequestRule.Yolo = prYolo;
+                    defaultPullRequestRule.AllowAllTools = prYolo || prAllowAllTools;
+                    defaultPullRequestRule.AllowAllUrls = prYolo || prAllowAllUrls;
+                    defaultPullRequestRule.Model = prRuleModel;
+                    config.PullRequestRules[DefaultPullRequestRuleName] = defaultPullRequestRule;
                 }
-                else if (authorChoice == AuthorWriteAccess)
-                {
-                    authorMode = AuthorMode.WriteAccess;
-                }
-                else
-                {
-                    authorMode = AuthorMode.Any;
-                }
-                AnsiConsole.WriteLine();
 
-                // Labels
-                AnsiConsole.MarkupLine("[grey]Issues must have ALL of these labels to be dispatched.[/]");
-                var existingLabels = existingIssueRule?.Labels.Count > 0
-                    ? string.Join(", ", existingIssueRule.Labels)
-                    : "copilotd";
-                var labelsInput = AnsiConsole.Prompt(
-                    new TextPrompt<string>("Required label(s) (comma-separated):")
-                        .DefaultValue(existingLabels));
-                var labels = labelsInput
-                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                AnsiConsole.MarkupLine($"  Labels: [blue]{Markup.Escape(string.Join(", ", labels))}[/]");
-                AnsiConsole.WriteLine();
-
-                // Yolo / tool permissions
-                AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools and --allow-all-urls).[/]");
-                var existingYolo = existingIssueRule?.Yolo ?? false;
-                var yolo = AnsiConsole.Confirm("Enable yolo mode?", existingYolo);
-                AnsiConsole.MarkupLine($"  Yolo mode: [blue]{(yolo ? "yes" : "no")}[/]");
-
-                bool allowAllTools = true;
-                bool allowAllUrls = false;
-                if (!yolo)
-                {
-                    AnsiConsole.MarkupLine("[grey]Allow copilot to use all available tools without prompting.[/]");
-                    allowAllTools = AnsiConsole.Confirm("Allow all tools?", existingIssueRule?.AllowAllTools ?? true);
-                    AnsiConsole.MarkupLine($"  Allow all tools: [blue]{(allowAllTools ? "yes" : "no")}[/]");
-                    AnsiConsole.MarkupLine("[grey]Allow copilot to access any URL without prompting.[/]");
-                    allowAllUrls = AnsiConsole.Confirm("Allow all URLs?", existingIssueRule?.AllowAllUrls ?? false);
-                    AnsiConsole.MarkupLine($"  Allow all URLs: [blue]{(allowAllUrls ? "yes" : "no")}[/]");
-                }
-                AnsiConsole.WriteLine();
-
-                // Rule model override
-                AnsiConsole.MarkupLine("[grey]Optionally override the default model for sessions matching this rule.[/]");
-                var existingRuleModel = existingIssueRule?.Model ?? "";
-                var ruleModelInput = AnsiConsole.Prompt(
-                    new TextPrompt<string>("Model override for default rule (empty to inherit global):")
-                        .DefaultValue(existingRuleModel)
-                        .AllowEmpty());
-                var ruleModel = string.IsNullOrWhiteSpace(ruleModelInput) ? null : ruleModelInput.Trim();
-                AnsiConsole.MarkupLine($"  Model override: [blue]{Markup.Escape(ruleModel ?? "(inherit global)")}[/]");
-                AnsiConsole.WriteLine();
-
-                // Build the default rule
-                var defaultIssueRule = existingIssueRule ?? new IssueDispatchRule();
-                defaultIssueRule.Assignee = username;
-                defaultIssueRule.Labels = labels;
-                defaultIssueRule.AuthorMode = authorMode;
-                defaultIssueRule.Authors = authors;
-                defaultIssueRule.Yolo = yolo;
-                defaultIssueRule.AllowAllTools = yolo || allowAllTools;
-                defaultIssueRule.AllowAllUrls = yolo || allowAllUrls;
-                defaultIssueRule.Model = ruleModel;
-                config.IssueRules[CopilotdConfig.DefaultRuleName] = defaultIssueRule;
-
-                // ── Phase 5: Repo Selection ───────────────────────────────
+                // ── Phase 6: Repo Selection ───────────────────────────────
                 AnsiConsole.Write(new Rule("[bold blue]Repository Selection[/]").LeftJustified());
                 AnsiConsole.WriteLine();
 
@@ -279,7 +482,13 @@ public static class InitCommand
                     }
                 }
 
-                MergeExistingRepos(repos, existingIssueRule?.Repos ?? [], username);
+                var existingDefaultRuleRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (defaultIssueRule is not null)
+                    existingDefaultRuleRepos.UnionWith(defaultIssueRule.Repos);
+                if (defaultPullRequestRule is not null)
+                    existingDefaultRuleRepos.UnionWith(defaultPullRequestRule.Repos);
+
+                MergeExistingRepos(repos, existingDefaultRuleRepos.ToList(), username);
                 repos = repos
                     .DistinctBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
                     .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
@@ -304,7 +513,7 @@ public static class InitCommand
                     AnsiConsole.MarkupLine("[grey]Use the group picker to edit one slice at a time. Only cloned repos can dispatch — repos are not auto-cloned.[/]");
                     AnsiConsole.WriteLine();
 
-                    var selected = PromptForRepoSelection(repos, clonedRepoSlugs, existingIssueRule?.Repos ?? [], ghCli, username);
+                    var selected = PromptForRepoSelection(repos, clonedRepoSlugs, existingDefaultRuleRepos.ToList(), ghCli, username);
 
                     var notClonedSelected = selected.Where(r => !cloneStatus.GetValueOrDefault(r)).ToList();
                     if (notClonedSelected.Count > 0)
@@ -321,7 +530,10 @@ public static class InitCommand
                         ConsoleOutput.Warning("No repos selected. You can add repos to rules later.");
                     }
 
-                    defaultIssueRule.Repos = selected;
+                    if (defaultIssueRule is not null)
+                        defaultIssueRule.Repos = selected;
+                    if (defaultPullRequestRule is not null)
+                        defaultPullRequestRule.Repos = selected;
                     CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
                         copilotTrust,
                         repoResolver,
@@ -332,7 +544,7 @@ public static class InitCommand
                 }
                 AnsiConsole.WriteLine();
 
-                // ── Phase 6: Save & Summary ───────────────────────────────
+                // ── Phase 7: Save & Summary ───────────────────────────────
                 stateStore.SaveConfig(config);
 
                 AnsiConsole.Write(new Rule("[bold green]Configuration Saved[/]").LeftJustified());
@@ -351,14 +563,31 @@ public static class InitCommand
                 summaryTable.AddRow("[blue]Max concurrent sessions[/]", Markup.Escape(config.MaxInstances.ToString()));
                 summaryTable.AddRow("[blue]Default model[/]", Markup.Escape(config.DefaultModel ?? "(copilot default)"));
                 summaryTable.AddRow("", "");
-                summaryTable.AddRow("[bold blue]Default Rule[/]", "");
-                summaryTable.AddRow("[blue]  Assignee[/]", Markup.Escape(defaultIssueRule.Assignee ?? "*"));
-                summaryTable.AddRow("[blue]  Author filter[/]", Markup.Escape(FormatAuthorMode(defaultIssueRule)));
-                summaryTable.AddRow("[blue]  Labels[/]", Markup.Escape(string.Join(", ", defaultIssueRule.Labels)));
-                summaryTable.AddRow("[blue]  Permissions[/]", Markup.Escape(FormatPermissions(defaultIssueRule)));
-                summaryTable.AddRow("[blue]  Model override[/]", Markup.Escape(defaultIssueRule.Model ?? "(inherit global)"));
-                summaryTable.AddRow("[blue]  Repos[/]", Markup.Escape(
-                    defaultIssueRule.Repos.Count > 0 ? string.Join(", ", defaultIssueRule.Repos) : "(none)"));
+                if (defaultIssueRule is not null)
+                {
+                    summaryTable.AddRow("[bold blue]Default Issue Rule[/]", "");
+                    summaryTable.AddRow("[blue]  Assignee[/]", Markup.Escape(defaultIssueRule.Assignee ?? "*"));
+                    summaryTable.AddRow("[blue]  Author filter[/]", Markup.Escape(FormatAuthorMode(defaultIssueRule)));
+                    summaryTable.AddRow("[blue]  Labels[/]", Markup.Escape(string.Join(", ", defaultIssueRule.Labels)));
+                    summaryTable.AddRow("[blue]  Permissions[/]", Markup.Escape(FormatPermissions(defaultIssueRule)));
+                    summaryTable.AddRow("[blue]  Model override[/]", Markup.Escape(defaultIssueRule.Model ?? "(inherit global)"));
+                    summaryTable.AddRow("[blue]  Repos[/]", Markup.Escape(
+                        defaultIssueRule.Repos.Count > 0 ? string.Join(", ", defaultIssueRule.Repos) : "(none)"));
+                }
+
+                if (defaultPullRequestRule is not null)
+                {
+                    summaryTable.AddRow("[bold blue]Default Pull Request Rule[/]", Markup.Escape(DefaultPullRequestRuleName));
+                    summaryTable.AddRow("[blue]  Author filter[/]", Markup.Escape(FormatAuthorMode(defaultPullRequestRule)));
+                    summaryTable.AddRow("[blue]  Labels[/]", Markup.Escape(defaultPullRequestRule.Labels.Count > 0 ? string.Join(", ", defaultPullRequestRule.Labels) : "(none)"));
+                    summaryTable.AddRow("[blue]  Base branch[/]", Markup.Escape(defaultPullRequestRule.BaseBranch ?? "(any)"));
+                    summaryTable.AddRow("[blue]  Draft state[/]", Markup.Escape(FormatDraftState(defaultPullRequestRule.Draft)));
+                    summaryTable.AddRow("[blue]  Branch strategy[/]", Markup.Escape(defaultPullRequestRule.BranchStrategy.ToString()));
+                    summaryTable.AddRow("[blue]  Permissions[/]", Markup.Escape(FormatPermissions(defaultPullRequestRule)));
+                    summaryTable.AddRow("[blue]  Model override[/]", Markup.Escape(defaultPullRequestRule.Model ?? "(inherit global)"));
+                    summaryTable.AddRow("[blue]  Repos[/]", Markup.Escape(
+                        defaultPullRequestRule.Repos.Count > 0 ? string.Join(", ", defaultPullRequestRule.Repos) : "(none)"));
+                }
 
                 AnsiConsole.Write(summaryTable);
                 AnsiConsole.WriteLine();
@@ -368,8 +597,12 @@ public static class InitCommand
                 AnsiConsole.WriteLine();
                 AnsiConsole.MarkupLine("  [blue]copilotd run[/]                                           Start the daemon");
                 AnsiConsole.MarkupLine("  [blue]copilotd run --interval 15 --log-level debug[/]           Start with verbose logging");
-                AnsiConsole.MarkupLine("  [blue]copilotd rules update Default --add-repo org/repo[/]      Add another repo to the default rule");
-                AnsiConsole.MarkupLine("  [blue]copilotd rules add MyRule --label bug --yolo[/]           Create a new dispatch rule");
+                if (defaultIssueRule is not null)
+                    AnsiConsole.MarkupLine("  [blue]copilotd rules update Default --add-repo org/repo[/]     Add a repo to the default issue rule");
+                if (defaultPullRequestRule is not null)
+                    AnsiConsole.MarkupLine("  [blue]copilotd rules update \"Default PR\" --add-repo org/repo[/]  Add a repo to the default PR rule");
+                AnsiConsole.MarkupLine("  [blue]copilotd rules add MyRule --kind issue --label bug --yolo[/]       Create a new issue dispatch rule");
+                AnsiConsole.MarkupLine("  [blue]copilotd rules add MyPrRule --kind pr --label review[/]            Create a new PR dispatch rule");
                 AnsiConsole.MarkupLine("  [blue]copilotd config --set max_instances=5[/]                  Change concurrency limit");
                 AnsiConsole.MarkupLine("  [blue]copilotd config --set default_model=claude-sonnet-4[/]    Set the default model");
                 AnsiConsole.MarkupLine("  [blue]copilotd status[/]                                        Check daemon health and sessions");
@@ -389,6 +622,37 @@ public static class InitCommand
             AuthorMode.Allowed => string.Join(", ", rule.Authors),
             AuthorMode.WriteAccess => "(write access only)",
             _ => "(any)",
+        };
+    }
+
+    private static string FormatAuthorMode(PullRequestDispatchRule rule)
+    {
+        return rule.AuthorMode switch
+        {
+            AuthorMode.Allowed => string.Join(", ", rule.Authors),
+            AuthorMode.WriteAccess => "(write access only)",
+            _ => "(any)",
+        };
+    }
+
+    private static string FormatDraftState(bool? draft)
+    {
+        return draft switch
+        {
+            true => "Draft PRs only",
+            false => "Ready PRs only",
+            _ => "(any)",
+        };
+    }
+
+    private static string FormatDispatchSourceSelection(DispatchSourceSelection selection)
+    {
+        return selection switch
+        {
+            DispatchSourceSelection.Issues => "Issues",
+            DispatchSourceSelection.PullRequests => "Pull requests",
+            DispatchSourceSelection.Both => "Issues and pull requests",
+            _ => selection.ToString(),
         };
     }
 
@@ -900,6 +1164,13 @@ public static class InitCommand
         OpenWriteAccessNotCloned,
         ReviewSelected,
         Done,
+    }
+
+    private enum DispatchSourceSelection
+    {
+        Issues,
+        PullRequests,
+        Both,
     }
 
     private enum WriteAccessNotClonedMenuAction

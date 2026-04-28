@@ -106,7 +106,7 @@ public static class RulesCommand
         AnsiConsole.MarkupLine("[bold]Issue dispatch rules[/]");
         if (issueRuleList.Count == 0)
         {
-            RenderNoRulesMessage("issue", issueRuleCount == 0, "copilotd rules add --kind issue <name>");
+            RenderNoRulesMessage("issue", issueRuleCount == 0, "copilotd rules add <name> --kind issue");
         }
         else
         {
@@ -143,7 +143,7 @@ public static class RulesCommand
         AnsiConsole.MarkupLine("[bold]Pull request dispatch rules[/]");
         if (pullRequestRuleList.Count == 0)
         {
-            RenderNoRulesMessage("pull request", pullRequestRuleCount == 0, "copilotd rules add --kind pr <name>");
+            RenderNoRulesMessage("pull request", pullRequestRuleCount == 0, "copilotd rules add <name> --kind pr");
         }
         else
         {
