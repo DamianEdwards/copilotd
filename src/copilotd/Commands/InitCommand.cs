@@ -595,17 +595,25 @@ public static class InitCommand
                 // Next steps
                 AnsiConsole.Write(new Rule("[bold blue]Next Steps[/]").LeftJustified());
                 AnsiConsole.WriteLine();
-                AnsiConsole.MarkupLine("  [blue]copilotd run[/]                                           Start the daemon");
-                AnsiConsole.MarkupLine("  [blue]copilotd run --interval 15 --log-level debug[/]           Start with verbose logging");
+
+                var nextStepsTable = new Table()
+                    .Border(TableBorder.None)
+                    .HideHeaders();
+                nextStepsTable.AddColumn(new TableColumn("").NoWrap());
+                nextStepsTable.AddColumn("");
+
+                AddNextStep(nextStepsTable, "copilotd run", "Start the daemon");
+                AddNextStep(nextStepsTable, "copilotd run --interval 15 --log-level debug", "Start with verbose logging");
                 if (defaultIssueRule is not null)
-                    AnsiConsole.MarkupLine("  [blue]copilotd rules update Default --add-repo org/repo[/]     Add a repo to the default issue rule");
+                    AddNextStep(nextStepsTable, "copilotd rules update Default --add-repo org/repo", "Add a repo to the default issue rule");
                 if (defaultPullRequestRule is not null)
-                    AnsiConsole.MarkupLine("  [blue]copilotd rules update \"Default PR\" --add-repo org/repo[/]  Add a repo to the default PR rule");
-                AnsiConsole.MarkupLine("  [blue]copilotd rules add MyRule --kind issue --label bug --yolo[/]       Create a new issue dispatch rule");
-                AnsiConsole.MarkupLine("  [blue]copilotd rules add MyPrRule --kind pr --label review[/]            Create a new PR dispatch rule");
-                AnsiConsole.MarkupLine("  [blue]copilotd config --set max_instances=5[/]                  Change concurrency limit");
-                AnsiConsole.MarkupLine("  [blue]copilotd config --set default_model=claude-sonnet-4[/]    Set the default model");
-                AnsiConsole.MarkupLine("  [blue]copilotd status[/]                                        Check daemon health and sessions");
+                    AddNextStep(nextStepsTable, "copilotd rules update \"Default PR\" --add-repo org/repo", "Add a repo to the default PR rule");
+                AddNextStep(nextStepsTable, "copilotd rules add MyRule --kind issue --label bug --yolo", "Create a new issue dispatch rule");
+                AddNextStep(nextStepsTable, "copilotd rules add MyPrRule --kind pr --label review", "Create a new PR dispatch rule");
+                AddNextStep(nextStepsTable, "copilotd config --set max_instances=5", "Change concurrency limit");
+                AddNextStep(nextStepsTable, "copilotd config --set default_model=claude-sonnet-4", "Set the default model");
+                AddNextStep(nextStepsTable, "copilotd status", "Check daemon health and sessions");
+                AnsiConsole.Write(nextStepsTable);
                 AnsiConsole.WriteLine();
 
                 return 0;
@@ -623,6 +631,11 @@ public static class InitCommand
             AuthorMode.WriteAccess => "(write access only)",
             _ => "(any)",
         };
+    }
+
+    private static void AddNextStep(Table table, string command, string description)
+    {
+        table.AddRow($"  [blue]{Markup.Escape(command)}[/]", Markup.Escape(description));
     }
 
     private static string FormatAuthorMode(PullRequestDispatchRule rule)
