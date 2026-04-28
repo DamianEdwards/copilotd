@@ -761,19 +761,19 @@ public sealed partial class ProcessManager
                     : CopilotdConfig.IssueFeedbackPrompt
                 : CopilotdConfig.DefaultPrompt;
 
-        var rule = GetRuleOptions(config, session);
+        var ruleOptions = GetRuleOptions(config, session);
 
         // Resolve the effective custom prompt based on rule settings
-        var effectiveCustomPrompt = ResolveCustomPrompt(globalCustomPrompt, rule);
+        var effectiveCustomPrompt = ResolveCustomPrompt(globalCustomPrompt, ruleOptions);
 
         if (!string.IsNullOrWhiteSpace(effectiveCustomPrompt))
         {
             prompt += "\n\nThe user has supplied the following additional context:\n\n" + effectiveCustomPrompt;
         }
 
-        if (!string.IsNullOrWhiteSpace(rule?.ExtraPrompt))
+        if (!string.IsNullOrWhiteSpace(ruleOptions?.ExtraPrompt))
         {
-            prompt += "\n\n" + rule.ExtraPrompt;
+            prompt += "\n\n" + ruleOptions.ExtraPrompt;
         }
 
         // Append security context when re-dispatching in response to comments
@@ -965,7 +965,7 @@ public sealed partial class ProcessManager
     private static DispatchRuleOptions? GetRuleOptions(CopilotdConfig config, DispatchSession session)
         => session.SubjectKind == DispatchSubjectKind.PullRequest
             ? config.PullRequestRules.GetValueOrDefault(session.RuleName)
-            : config.Rules.GetValueOrDefault(session.RuleName);
+            : config.IssueRules.GetValueOrDefault(session.RuleName);
 
     private static (string Org, string Repo) SplitRepoSlug(string repoSlug)
     {

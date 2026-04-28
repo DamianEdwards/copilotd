@@ -5,13 +5,13 @@ using Microsoft.Extensions.Logging;
 namespace Copilotd.Services;
 
 /// <summary>
-/// The reconciliation engine. Compares desired dispatches (from rules + issues)
+/// The reconciliation engine. Compares desired dispatches (from rules + issues/PRs)
 /// against observed state (persisted sessions + live processes) and takes
 /// corrective action to converge.
 ///
 /// Truth sources (in order of precedence for conflicts):
 /// 1. Live process status (ground truth for "is it actually running?")
-/// 2. Current GitHub issue matches (ground truth for "should it be running?")
+/// 2. Current GitHub issue/PR matches (ground truth for "should it be running?")
 /// 3. Persisted state (bookkeeping, used as starting point)
 /// </summary>
 public sealed class ReconciliationEngine
@@ -57,12 +57,12 @@ public sealed class ReconciliationEngine
         // Step 1: Verify all tracked non-terminal sessions against live processes
         VerifyTrackedSessions(state);
 
-        // Step 2: Gather all matching issues and pull requests from configured rules
-        var (desiredDispatches, queriedRepos) = ComputeDesiredDispatches(config);
+        // Step 2: Gather all matching issues and pull requests from configured issue/PR rules
+        var (desiredIssueDispatches, queriedIssueRepos) = ComputeDesiredIssueDispatches(config);
         var (desiredPullRequestDispatches, queriedPullRequestRepos) = ComputeDesiredPullRequestDispatches(config);
 
         // Step 3: Reconcile desired vs observed
-        ReconcileDesiredVsObserved(config, state, desiredDispatches, queriedRepos, desiredPullRequestDispatches, queriedPullRequestRepos);
+        ReconcileDesiredVsObserved(config, state, desiredIssueDispatches, queriedIssueRepos, desiredPullRequestDispatches, queriedPullRequestRepos);
 
         // Step 4: Dispatch pending sessions (respects MaxInstances)
         DispatchPendingSessions(config, state);
@@ -180,51 +180,51 @@ public sealed class ReconciliationEngine
     }
 
     /// <summary>
-    /// Step 2: Query GitHub for all issues that currently match configured rules.
-    /// Returns the desired dispatches and the set of repos that were successfully queried.
+    /// Step 2: Query GitHub for all issues that currently match configured issue rules.
+    /// Returns the desired issue dispatches and the set of repos that were successfully queried.
     /// Only repos in the queried set should be used for termination decisions — if a repo
     /// query fails, existing sessions for that repo are preserved.
     /// </summary>
     private (Dictionary<string, (GitHubIssue Issue, string RuleName)> Desired, HashSet<string> QueriedRepos)
-        ComputeDesiredDispatches(CopilotdConfig config)
+        ComputeDesiredIssueDispatches(CopilotdConfig config)
     {
-        var desired = new Dictionary<string, (GitHubIssue, string)>(StringComparer.OrdinalIgnoreCase);
-        var queriedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var desiredIssues = new Dictionary<string, (GitHubIssue, string)>(StringComparer.OrdinalIgnoreCase);
+        var queriedIssueRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var (ruleName, rule) in config.Rules)
+        foreach (var (issueRuleName, issueRule) in config.IssueRules)
         {
-            foreach (var repo in rule.Repos)
+            foreach (var repo in issueRule.Repos)
             {
                 try
                 {
-                    var issues = _ghCli.QueryIssues(repo, rule);
-                    queriedRepos.Add(repo);
+                    var issues = _ghCli.QueryIssues(repo, issueRule);
+                    queriedIssueRepos.Add(repo);
 
                     foreach (var issue in issues)
                     {
-                        // Double-check rule match (gh filters are best-effort)
+                        // Double-check issue rule match (gh filters are best-effort)
                         // Pass HasWriteAccess for AuthorMode.WriteAccess checks
-                        if (!rule.Matches(issue, _ghCli.HasWriteAccess))
+                        if (!issueRule.Matches(issue, _ghCli.HasWriteAccess))
                             continue;
 
-                        if (!desired.ContainsKey(issue.Key))
+                        if (!desiredIssues.ContainsKey(issue.Key))
                         {
-                            desired[issue.Key] = (issue, ruleName);
-                            _logger.LogDebug("Desired dispatch: {Key} via rule '{Rule}'", issue.Key, ruleName);
+                            desiredIssues[issue.Key] = (issue, issueRuleName);
+                            _logger.LogDebug("Desired issue dispatch: {Key} via issue rule '{Rule}'", issue.Key, issueRuleName);
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Error querying issues for {Repo} with rule '{Rule}', preserving existing sessions", repo, ruleName);
+                    _logger.LogWarning(ex, "Error querying issues for {Repo} with issue rule '{Rule}', preserving existing sessions", repo, issueRuleName);
                 }
             }
         }
 
-        _logger.LogInformation("Found {Count} issues matching configured rules ({Queried}/{Total} repos queried successfully)",
-            desired.Count, queriedRepos.Count,
-            config.Rules.Values.SelectMany(r => r.Repos).Distinct(StringComparer.OrdinalIgnoreCase).Count());
-        return (desired, queriedRepos);
+        _logger.LogInformation("Found {Count} issues matching configured issue rules ({Queried}/{Total} repos queried successfully)",
+            desiredIssues.Count, queriedIssueRepos.Count,
+            config.IssueRules.Values.SelectMany(r => r.Repos).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        return (desiredIssues, queriedIssueRepos);
     }
 
     /// <summary>
@@ -233,55 +233,55 @@ public sealed class ReconciliationEngine
     private (Dictionary<string, (GitHubPullRequest PullRequest, string RuleName)> Desired, HashSet<string> QueriedRepos)
         ComputeDesiredPullRequestDispatches(CopilotdConfig config)
     {
-        var desired = new Dictionary<string, (GitHubPullRequest, string)>(StringComparer.OrdinalIgnoreCase);
-        var queriedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var desiredPullRequests = new Dictionary<string, (GitHubPullRequest, string)>(StringComparer.OrdinalIgnoreCase);
+        var queriedPullRequestRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var (ruleName, rule) in config.PullRequestRules)
+        foreach (var (pullRequestRuleName, pullRequestRule) in config.PullRequestRules)
         {
-            foreach (var repo in rule.Repos)
+            foreach (var repo in pullRequestRule.Repos)
             {
                 try
                 {
-                    var pullRequests = _ghCli.QueryPullRequests(repo, rule);
-                    queriedRepos.Add(repo);
+                    var pullRequests = _ghCli.QueryPullRequests(repo, pullRequestRule);
+                    queriedPullRequestRepos.Add(repo);
 
                     foreach (var pullRequest in pullRequests)
                     {
-                        if (!rule.Matches(pullRequest, _ghCli.HasWriteAccess))
+                        if (!pullRequestRule.Matches(pullRequest, _ghCli.HasWriteAccess))
                             continue;
 
-                        if (!desired.ContainsKey(pullRequest.Key))
+                        if (!desiredPullRequests.ContainsKey(pullRequest.Key))
                         {
-                            desired[pullRequest.Key] = (pullRequest, ruleName);
-                            _logger.LogDebug("Desired PR dispatch: {Key} via rule '{Rule}'", pullRequest.Key, ruleName);
+                            desiredPullRequests[pullRequest.Key] = (pullRequest, pullRequestRuleName);
+                            _logger.LogDebug("Desired PR dispatch: {Key} via PR rule '{Rule}'", pullRequest.Key, pullRequestRuleName);
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Error querying pull requests for {Repo} with rule '{Rule}', preserving existing sessions", repo, ruleName);
+                    _logger.LogWarning(ex, "Error querying pull requests for {Repo} with PR rule '{Rule}', preserving existing sessions", repo, pullRequestRuleName);
                 }
             }
         }
 
         _logger.LogInformation("Found {Count} pull requests matching configured PR rules ({Queried}/{Total} repos queried successfully)",
-            desired.Count, queriedRepos.Count,
+            desiredPullRequests.Count, queriedPullRequestRepos.Count,
             config.PullRequestRules.Values.SelectMany(r => r.Repos).Distinct(StringComparer.OrdinalIgnoreCase).Count());
-        return (desired, queriedRepos);
+        return (desiredPullRequests, queriedPullRequestRepos);
     }
 
     /// <summary>
     /// Step 3: Compare desired dispatches against tracked sessions.
     /// - Issues without active sessions → create pending
-    /// - Tracked sessions whose issues no longer match (and repo was queried) → mark completed
+    /// - Tracked sessions whose subjects no longer match (and repo was queried) → mark completed
     /// - Orphaned sessions for still-matching issues → re-dispatch if retries remain
     /// - Completed sessions for still-matching issues → re-dispatch with new session ID
     /// </summary>
     private void ReconcileDesiredVsObserved(
         CopilotdConfig config,
         DaemonState state,
-        Dictionary<string, (GitHubIssue Issue, string RuleName)> desired,
-        HashSet<string> queriedRepos,
+        Dictionary<string, (GitHubIssue Issue, string RuleName)> desiredIssues,
+        HashSet<string> queriedIssueRepos,
         Dictionary<string, (GitHubPullRequest PullRequest, string RuleName)> desiredPullRequests,
         HashSet<string> queriedPullRequestRepos)
     {
@@ -291,18 +291,18 @@ public sealed class ReconciliationEngine
         {
             var desiredContainsSession = session.SubjectKind == DispatchSubjectKind.PullRequest
                 ? desiredPullRequests.ContainsKey(key)
-                : desired.ContainsKey(key);
+                : desiredIssues.ContainsKey(key);
             var repoWasQueried = session.SubjectKind == DispatchSubjectKind.PullRequest
                 ? queriedPullRequestRepos.Contains(session.Repo)
-                : queriedRepos.Contains(session.Repo);
+                : queriedIssueRepos.Contains(session.Repo);
             var subjectLabel = session.SubjectKind == DispatchSubjectKind.PullRequest ? "Pull request" : "Issue";
 
-            // Clear CompletedBySession flag when the subject no longer matches rules,
+            // Clear CompletedBySession flag when the subject no longer matches issue/PR rules,
             // so that if the subject re-matches later it will be re-dispatched
             if (session.Status == SessionStatus.Completed && session.CompletedBySession
                 && !desiredContainsSession && repoWasQueried)
             {
-                _logger.LogInformation("{Subject} {Key} no longer matches rules, clearing CompletedBySession flag", subjectLabel, key);
+                _logger.LogInformation("{Subject} {Key} no longer matches issue/PR rules, clearing CompletedBySession flag", subjectLabel, key);
                 session.CompletedBySession = false;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
             }
@@ -327,7 +327,7 @@ public sealed class ReconciliationEngine
                 // WaitingForFeedback sessions have no process to terminate
                 if (session.Status is SessionStatus.WaitingForFeedback)
                 {
-                    _logger.LogInformation("{Subject} {Key} no longer matches rules, completing waiting session", subjectLabel, key);
+                    _logger.LogInformation("{Subject} {Key} no longer matches issue/PR rules, completing waiting session", subjectLabel, key);
                     session.Status = SessionStatus.Completed;
                     session.FailureDetail = null;
                     session.WaitingSince = null;
@@ -340,7 +340,7 @@ public sealed class ReconciliationEngine
                 // WaitingForReview sessions have no process to terminate
                 if (session.Status is SessionStatus.WaitingForReview)
                 {
-                    _logger.LogInformation("{Subject} {Key} no longer matches rules, completing PR review session", subjectLabel, key);
+                    _logger.LogInformation("{Subject} {Key} no longer matches issue/PR rules, completing PR review session", subjectLabel, key);
                     session.Status = SessionStatus.Completed;
                     session.FailureDetail = null;
                     session.WaitingSince = null;
@@ -350,7 +350,7 @@ public sealed class ReconciliationEngine
                     continue;
                 }
 
-                _logger.LogInformation("{Subject} {Key} no longer matches rules, terminating session", subjectLabel, key);
+                _logger.LogInformation("{Subject} {Key} no longer matches issue/PR rules, terminating session", subjectLabel, key);
                 toTerminate.Add(session);
             }
         }
@@ -374,7 +374,7 @@ public sealed class ReconciliationEngine
         }
 
         // Handle desired issues that need new or re-dispatched sessions
-        foreach (var (issueKey, (issue, ruleName)) in desired)
+        foreach (var (issueKey, (issue, issueRuleName)) in desiredIssues)
         {
             if (state.Sessions.TryGetValue(issueKey, out var existing))
             {
@@ -655,7 +655,7 @@ public sealed class ReconciliationEngine
                     SubjectKind = DispatchSubjectKind.Issue,
                     Repo = issue.Repo,
                     IssueNumber = issue.Number,
-                    RuleName = ruleName,
+                    RuleName = issueRuleName,
                     IssueAuthor = issue.Author,
                     SubjectTitle = issue.Title,
                     CopilotSessionId = Guid.NewGuid().ToString(),
@@ -666,20 +666,20 @@ public sealed class ReconciliationEngine
                 };
                 state.Sessions[issueKey] = newSession;
 
-                _logger.LogInformation("New issue {Key} matched by rule '{Rule}', creating pending dispatch", issueKey, ruleName);
+                _logger.LogInformation("New issue {Key} matched by issue rule '{Rule}', creating pending dispatch", issueKey, issueRuleName);
                 TransitionReactionToIssue(newSession, config, GhCliService.ReactionEyes);
             }
         }
 
         // Handle desired pull requests that need new or re-dispatched sessions
-        foreach (var (prKey, (pullRequest, ruleName)) in desiredPullRequests)
+        foreach (var (prKey, (pullRequest, pullRequestRuleName)) in desiredPullRequests)
         {
             if (state.Sessions.TryGetValue(prKey, out var existing))
             {
                 if (existing.SubjectKind != DispatchSubjectKind.PullRequest)
                     continue;
 
-                UpdatePullRequestSessionMetadata(existing, pullRequest, ruleName, config);
+                UpdatePullRequestSessionMetadata(existing, pullRequest, pullRequestRuleName, config);
 
                 switch (existing.Status)
                 {
@@ -752,14 +752,14 @@ public sealed class ReconciliationEngine
                     SubjectKind = DispatchSubjectKind.PullRequest,
                     Repo = pullRequest.Repo,
                     IssueNumber = pullRequest.Number,
-                    RuleName = ruleName,
+                    RuleName = pullRequestRuleName,
                     IssueAuthor = pullRequest.Author,
                     SubjectTitle = pullRequest.Title,
                     PullRequestBaseBranch = pullRequest.BaseBranch,
                     PullRequestHeadBranch = pullRequest.HeadBranch,
                     PullRequestHeadRepo = pullRequest.HeadRepo,
                     PullRequestHeadSha = pullRequest.HeadSha,
-                    PullRequestBranchStrategy = config.PullRequestRules.GetValueOrDefault(ruleName)?.BranchStrategy,
+                    PullRequestBranchStrategy = config.PullRequestRules.GetValueOrDefault(pullRequestRuleName)?.BranchStrategy,
                     CopilotSessionId = Guid.NewGuid().ToString(),
                     HasStarted = false,
                     Status = SessionStatus.Pending,
@@ -768,7 +768,7 @@ public sealed class ReconciliationEngine
                 };
                 state.Sessions[prKey] = newSession;
 
-                _logger.LogInformation("New pull request {Key} matched by rule '{Rule}', creating pending dispatch", prKey, ruleName);
+                _logger.LogInformation("New pull request {Key} matched by PR rule '{Rule}', creating pending dispatch", prKey, pullRequestRuleName);
                 TransitionReactionToIssue(newSession, config, GhCliService.ReactionEyes);
             }
         }
@@ -1000,7 +1000,7 @@ public sealed class ReconciliationEngine
         out CommentTrustLevel effectiveTrustLevel)
     {
         var issueRule = session.SubjectKind == DispatchSubjectKind.Issue
-            ? config.Rules.GetValueOrDefault(session.RuleName)
+            ? config.IssueRules.GetValueOrDefault(session.RuleName)
             : null;
         var pullRequestRule = session.SubjectKind == DispatchSubjectKind.PullRequest
             ? config.PullRequestRules.GetValueOrDefault(session.RuleName)
@@ -1101,10 +1101,14 @@ public sealed class ReconciliationEngine
     /// <summary>
     /// Checks whether reactions are enabled for a session based on rule + global config.
     /// </summary>
-    private static bool AreReactionsEnabled(CopilotdConfig config, string ruleName)
+    private static bool AreReactionsEnabled(CopilotdConfig config, DispatchSession session)
     {
-        if (config.Rules.TryGetValue(ruleName, out var rule) && rule.EnableReactions.HasValue)
-            return rule.EnableReactions.Value;
+        var ruleOptions = session.SubjectKind == DispatchSubjectKind.PullRequest
+            ? (DispatchRuleOptions?)config.PullRequestRules.GetValueOrDefault(session.RuleName)
+            : config.IssueRules.GetValueOrDefault(session.RuleName);
+        if (ruleOptions?.EnableReactions is { } enableReactions)
+            return enableReactions;
+
         return config.EnableReactions;
     }
 
@@ -1132,7 +1136,7 @@ public sealed class ReconciliationEngine
     /// </summary>
     private void TransitionReaction(DispatchSession session, CopilotdConfig config, ReactionAnchor anchor, string? newContent)
     {
-        if (!AreReactionsEnabled(config, session.RuleName))
+        if (!AreReactionsEnabled(config, session))
             return;
 
         if (session.IssueReactionId.HasValue)

@@ -72,7 +72,8 @@ public static class StatusCommand
                     ConsoleOutput.Info($"  Last poll: {SessionCommand.FormatTime(state.LastPollTime.Value)}");
                 }
 
-                var watchedRepos = config.Rules.Values
+                var watchedRepos = config.IssueRules.Values.Cast<DispatchRuleOptions>()
+                    .Concat(config.PullRequestRules.Values)
                     .SelectMany(r => r.Repos)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
@@ -81,7 +82,8 @@ public static class StatusCommand
                     ConsoleOutput.Info($"  Watching:  {string.Join(", ", watchedRepos)}");
                 }
 
-                ConsoleOutput.Info($"  Rules:     {config.Rules.Count}");
+                ConsoleOutput.Info($"  Issue rules: {config.IssueRules.Count}");
+                ConsoleOutput.Info($"  PR rules:    {config.PullRequestRules.Count}");
                 if (daemonInfo is { LogInstanceId: { Length: > 0 } daemonLogInstanceId })
                     ConsoleOutput.Info($"  Logs:      {logFileManager.GetDaemonLogDirectoryForDisplay(daemonLogInstanceId)}");
                 ConsoleOutput.Info($"  Machine:   {Environment.MachineName}");

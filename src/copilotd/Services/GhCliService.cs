@@ -300,7 +300,7 @@ public sealed class GhCliService
     /// <summary>
     /// Queries open issues for a repo matching the given rule conditions.
     /// </summary>
-    public List<GitHubIssue> QueryIssues(string repo, IssueDispatchRule rule)
+    public List<GitHubIssue> QueryIssues(string repo, IssueDispatchRule issueRule)
     {
         var jsonFields = _supportsTypeField
             ? "number,title,author,assignees,labels,milestone,type"
@@ -308,14 +308,14 @@ public sealed class GhCliService
 
         var args = $"issue list --repo {repo} --state open --json {jsonFields} --limit 100";
 
-        if (rule.Assignee is not null)
-            args += $" --assignee {rule.Assignee}";
+        if (issueRule.Assignee is not null)
+            args += $" --assignee {issueRule.Assignee}";
 
-        foreach (var label in rule.Labels)
+        foreach (var label in issueRule.Labels)
             args += $" --label \"{label}\"";
 
-        if (rule.Milestone is not null)
-            args += $" --milestone \"{rule.Milestone}\"";
+        if (issueRule.Milestone is not null)
+            args += $" --milestone \"{issueRule.Milestone}\"";
 
         var (exitCode, output) = RunGh(args);
 
@@ -326,14 +326,14 @@ public sealed class GhCliService
             _supportsTypeField = false;
             args = $"issue list --repo {repo} --state open --json number,title,author,assignees,labels,milestone --limit 100";
 
-            if (rule.Assignee is not null)
-                args += $" --assignee {rule.Assignee}";
+            if (issueRule.Assignee is not null)
+                args += $" --assignee {issueRule.Assignee}";
 
-            foreach (var label in rule.Labels)
+            foreach (var label in issueRule.Labels)
                 args += $" --label \"{label}\"";
 
-            if (rule.Milestone is not null)
-                args += $" --milestone \"{rule.Milestone}\"";
+            if (issueRule.Milestone is not null)
+                args += $" --milestone \"{issueRule.Milestone}\"";
 
             (exitCode, output) = RunGh(args);
         }
@@ -413,22 +413,22 @@ public sealed class GhCliService
     /// <summary>
     /// Queries open pull requests for a repo matching the given rule conditions.
     /// </summary>
-    public List<GitHubPullRequest> QueryPullRequests(string repo, PullRequestDispatchRule rule)
+    public List<GitHubPullRequest> QueryPullRequests(string repo, PullRequestDispatchRule pullRequestRule)
     {
         const string jsonFields = "number,title,author,assignees,labels,baseRefName,headRefName,headRepository,headRepositoryOwner,headRefOid,isDraft,reviewDecision,state";
         var args = $"pr list --repo {repo} --state open --json {jsonFields} --limit 100";
 
-        if (rule.Assignee is not null)
-            args += $" --assignee {rule.Assignee}";
+        if (pullRequestRule.Assignee is not null)
+            args += $" --assignee {pullRequestRule.Assignee}";
 
-        foreach (var label in rule.Labels)
+        foreach (var label in pullRequestRule.Labels)
             args += $" --label \"{label}\"";
 
-        if (rule.BaseBranch is not null)
-            args += $" --base \"{rule.BaseBranch}\"";
+        if (pullRequestRule.BaseBranch is not null)
+            args += $" --base \"{pullRequestRule.BaseBranch}\"";
 
-        if (rule.AuthorMode == AuthorMode.Allowed && rule.Authors.Count == 1)
-            args += $" --author \"{rule.Authors[0]}\"";
+        if (pullRequestRule.AuthorMode == AuthorMode.Allowed && pullRequestRule.Authors.Count == 1)
+            args += $" --author \"{pullRequestRule.Authors[0]}\"";
 
         var (exitCode, output) = RunGh(args);
         if (exitCode != 0)

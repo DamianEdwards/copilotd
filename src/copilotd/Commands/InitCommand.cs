@@ -140,7 +140,7 @@ public static class InitCommand
                 AnsiConsole.MarkupLine("[grey]The default rule controls which issues copilotd will pick up and dispatch.[/]");
                 AnsiConsole.WriteLine();
 
-                var existingRule = config.Rules.GetValueOrDefault(CopilotdConfig.DefaultRuleName);
+                var existingIssueRule = config.IssueRules.GetValueOrDefault(CopilotdConfig.DefaultRuleName);
 
                 // Author filtering
                 const string AuthorAny = "Any author";
@@ -148,10 +148,10 @@ public static class InitCommand
                 var authorOnlyMe = $"Only me ({Markup.Escape(username ?? "unknown")})";
 
                 // Determine existing selection for re-run and build choices with it first
-                var authorDefault = existingRule?.AuthorMode switch
+                var authorDefault = existingIssueRule?.AuthorMode switch
                 {
-                    AuthorMode.Allowed when existingRule.Authors.Count == 1
-                        && string.Equals(existingRule.Authors[0], username, StringComparison.OrdinalIgnoreCase)
+                    AuthorMode.Allowed when existingIssueRule.Authors.Count == 1
+                        && string.Equals(existingIssueRule.Authors[0], username, StringComparison.OrdinalIgnoreCase)
                         => authorOnlyMe,
                     AuthorMode.WriteAccess => AuthorWriteAccess,
                     _ => AuthorAny
@@ -194,8 +194,8 @@ public static class InitCommand
 
                 // Labels
                 AnsiConsole.MarkupLine("[grey]Issues must have ALL of these labels to be dispatched.[/]");
-                var existingLabels = existingRule?.Labels.Count > 0
-                    ? string.Join(", ", existingRule.Labels)
+                var existingLabels = existingIssueRule?.Labels.Count > 0
+                    ? string.Join(", ", existingIssueRule.Labels)
                     : "copilotd";
                 var labelsInput = AnsiConsole.Prompt(
                     new TextPrompt<string>("Required label(s) (comma-separated):")
@@ -209,7 +209,7 @@ public static class InitCommand
 
                 // Yolo / tool permissions
                 AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools and --allow-all-urls).[/]");
-                var existingYolo = existingRule?.Yolo ?? false;
+                var existingYolo = existingIssueRule?.Yolo ?? false;
                 var yolo = AnsiConsole.Confirm("Enable yolo mode?", existingYolo);
                 AnsiConsole.MarkupLine($"  Yolo mode: [blue]{(yolo ? "yes" : "no")}[/]");
 
@@ -218,17 +218,17 @@ public static class InitCommand
                 if (!yolo)
                 {
                     AnsiConsole.MarkupLine("[grey]Allow copilot to use all available tools without prompting.[/]");
-                    allowAllTools = AnsiConsole.Confirm("Allow all tools?", existingRule?.AllowAllTools ?? true);
+                    allowAllTools = AnsiConsole.Confirm("Allow all tools?", existingIssueRule?.AllowAllTools ?? true);
                     AnsiConsole.MarkupLine($"  Allow all tools: [blue]{(allowAllTools ? "yes" : "no")}[/]");
                     AnsiConsole.MarkupLine("[grey]Allow copilot to access any URL without prompting.[/]");
-                    allowAllUrls = AnsiConsole.Confirm("Allow all URLs?", existingRule?.AllowAllUrls ?? false);
+                    allowAllUrls = AnsiConsole.Confirm("Allow all URLs?", existingIssueRule?.AllowAllUrls ?? false);
                     AnsiConsole.MarkupLine($"  Allow all URLs: [blue]{(allowAllUrls ? "yes" : "no")}[/]");
                 }
                 AnsiConsole.WriteLine();
 
                 // Rule model override
                 AnsiConsole.MarkupLine("[grey]Optionally override the default model for sessions matching this rule.[/]");
-                var existingRuleModel = existingRule?.Model ?? "";
+                var existingRuleModel = existingIssueRule?.Model ?? "";
                 var ruleModelInput = AnsiConsole.Prompt(
                     new TextPrompt<string>("Model override for default rule (empty to inherit global):")
                         .DefaultValue(existingRuleModel)
@@ -238,16 +238,16 @@ public static class InitCommand
                 AnsiConsole.WriteLine();
 
                 // Build the default rule
-                var defaultRule = existingRule ?? new IssueDispatchRule();
-                defaultRule.Assignee = username;
-                defaultRule.Labels = labels;
-                defaultRule.AuthorMode = authorMode;
-                defaultRule.Authors = authors;
-                defaultRule.Yolo = yolo;
-                defaultRule.AllowAllTools = yolo || allowAllTools;
-                defaultRule.AllowAllUrls = yolo || allowAllUrls;
-                defaultRule.Model = ruleModel;
-                config.Rules[CopilotdConfig.DefaultRuleName] = defaultRule;
+                var defaultIssueRule = existingIssueRule ?? new IssueDispatchRule();
+                defaultIssueRule.Assignee = username;
+                defaultIssueRule.Labels = labels;
+                defaultIssueRule.AuthorMode = authorMode;
+                defaultIssueRule.Authors = authors;
+                defaultIssueRule.Yolo = yolo;
+                defaultIssueRule.AllowAllTools = yolo || allowAllTools;
+                defaultIssueRule.AllowAllUrls = yolo || allowAllUrls;
+                defaultIssueRule.Model = ruleModel;
+                config.IssueRules[CopilotdConfig.DefaultRuleName] = defaultIssueRule;
 
                 // ── Phase 5: Repo Selection ───────────────────────────────
                 AnsiConsole.Write(new Rule("[bold blue]Repository Selection[/]").LeftJustified());
@@ -279,7 +279,7 @@ public static class InitCommand
                     }
                 }
 
-                MergeExistingRepos(repos, existingRule?.Repos ?? [], username);
+                MergeExistingRepos(repos, existingIssueRule?.Repos ?? [], username);
                 repos = repos
                     .DistinctBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
                     .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
@@ -304,7 +304,7 @@ public static class InitCommand
                     AnsiConsole.MarkupLine("[grey]Use the group picker to edit one slice at a time. Only cloned repos can dispatch — repos are not auto-cloned.[/]");
                     AnsiConsole.WriteLine();
 
-                    var selected = PromptForRepoSelection(repos, clonedRepoSlugs, existingRule?.Repos ?? [], ghCli, username);
+                    var selected = PromptForRepoSelection(repos, clonedRepoSlugs, existingIssueRule?.Repos ?? [], ghCli, username);
 
                     var notClonedSelected = selected.Where(r => !cloneStatus.GetValueOrDefault(r)).ToList();
                     if (notClonedSelected.Count > 0)
@@ -321,7 +321,7 @@ public static class InitCommand
                         ConsoleOutput.Warning("No repos selected. You can add repos to rules later.");
                     }
 
-                    defaultRule.Repos = selected;
+                    defaultIssueRule.Repos = selected;
                     CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
                         copilotTrust,
                         repoResolver,
@@ -352,13 +352,13 @@ public static class InitCommand
                 summaryTable.AddRow("[blue]Default model[/]", Markup.Escape(config.DefaultModel ?? "(copilot default)"));
                 summaryTable.AddRow("", "");
                 summaryTable.AddRow("[bold blue]Default Rule[/]", "");
-                summaryTable.AddRow("[blue]  Assignee[/]", Markup.Escape(defaultRule.Assignee ?? "*"));
-                summaryTable.AddRow("[blue]  Author filter[/]", Markup.Escape(FormatAuthorMode(defaultRule)));
-                summaryTable.AddRow("[blue]  Labels[/]", Markup.Escape(string.Join(", ", defaultRule.Labels)));
-                summaryTable.AddRow("[blue]  Permissions[/]", Markup.Escape(FormatPermissions(defaultRule)));
-                summaryTable.AddRow("[blue]  Model override[/]", Markup.Escape(defaultRule.Model ?? "(inherit global)"));
+                summaryTable.AddRow("[blue]  Assignee[/]", Markup.Escape(defaultIssueRule.Assignee ?? "*"));
+                summaryTable.AddRow("[blue]  Author filter[/]", Markup.Escape(FormatAuthorMode(defaultIssueRule)));
+                summaryTable.AddRow("[blue]  Labels[/]", Markup.Escape(string.Join(", ", defaultIssueRule.Labels)));
+                summaryTable.AddRow("[blue]  Permissions[/]", Markup.Escape(FormatPermissions(defaultIssueRule)));
+                summaryTable.AddRow("[blue]  Model override[/]", Markup.Escape(defaultIssueRule.Model ?? "(inherit global)"));
                 summaryTable.AddRow("[blue]  Repos[/]", Markup.Escape(
-                    defaultRule.Repos.Count > 0 ? string.Join(", ", defaultRule.Repos) : "(none)"));
+                    defaultIssueRule.Repos.Count > 0 ? string.Join(", ", defaultIssueRule.Repos) : "(none)"));
 
                 AnsiConsole.Write(summaryTable);
                 AnsiConsole.WriteLine();

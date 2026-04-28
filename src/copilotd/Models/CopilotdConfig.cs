@@ -86,9 +86,11 @@ public sealed class CopilotdConfig
     public bool EnableReactions { get; set; } = true;
 
     /// <summary>
-    /// Named issue dispatch rules. Key is the rule name.
+    /// Named issue dispatch rules. Key is the rule name. Stored as "rules" for
+    /// compatibility with existing config files.
     /// </summary>
-    public Dictionary<string, IssueDispatchRule> Rules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    [JsonPropertyName("rules")]
+    public Dictionary<string, IssueDispatchRule> IssueRules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Named pull request dispatch rules. Key is the rule name. Empty by default;

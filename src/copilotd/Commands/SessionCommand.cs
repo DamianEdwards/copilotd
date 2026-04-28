@@ -1100,10 +1100,15 @@ public static class SessionCommand
     /// <summary>
     /// Checks whether reactions are enabled for a session based on rule + global config.
     /// </summary>
-    private static bool AreReactionsEnabled(CopilotdConfig config, string ruleName)
+    private static bool AreReactionsEnabled(CopilotdConfig config, string dispatchRuleName)
     {
-        if (config.Rules.TryGetValue(ruleName, out var rule) && rule.EnableReactions.HasValue)
-            return rule.EnableReactions.Value;
+        var ruleOptions = config.IssueRules.TryGetValue(dispatchRuleName, out var issueRule)
+            ? (DispatchRuleOptions)issueRule
+            : config.PullRequestRules.GetValueOrDefault(dispatchRuleName);
+
+        if (ruleOptions?.EnableReactions is { } enableReactions)
+            return enableReactions;
+
         return config.EnableReactions;
     }
 
