@@ -75,6 +75,8 @@ public static class RulesCommand
 
     private static int RenderRulesList(CopilotdConfig config, string? repoFilter, string? assigneeFilter, bool assigneeFlagPresent)
     {
+        var issueRuleCount = config.IssueRules.Count;
+        var pullRequestRuleCount = config.PullRequestRules.Count;
         var issueRules = config.IssueRules.AsEnumerable();
         var pullRequestRules = config.PullRequestRules.AsEnumerable();
 
@@ -98,69 +100,94 @@ public static class RulesCommand
             }
         }
 
+        var issueRuleList = issueRules.ToList();
+        var pullRequestRuleList = pullRequestRules.ToList();
+
         AnsiConsole.MarkupLine("[bold]Issue dispatch rules[/]");
-        var table = new Table();
-        table.ShowRowSeparators = true;
-        table.AddColumn(new TableColumn("[bold]Name[/]"));
-        table.AddColumn(new TableColumn("[bold]Assignee[/]"));
-        table.AddColumn(new TableColumn("[bold]Authors[/]"));
-        table.AddColumn(new TableColumn("[bold]Labels[/]"));
-        table.AddColumn(new TableColumn("[bold]Milestone[/]"));
-        table.AddColumn(new TableColumn("[bold]Type[/]"));
-        table.AddColumn(new TableColumn("[bold]Repos[/]"));
-        table.AddColumn(new TableColumn("[bold]Launch Options[/]"));
-
-        foreach (var kvp in issueRules)
+        if (issueRuleList.Count == 0)
         {
-            var name = kvp.Key;
-            var issueRule = kvp.Value;
-            table.AddRow(
-                Markup.Escape(name),
-                Markup.Escape(issueRule.Assignee ?? "*"),
-                Markup.Escape(FormatAuthorMode(issueRule)),
-                Markup.Escape(string.Join(", ", issueRule.Labels)),
-                Markup.Escape(issueRule.Milestone ?? "*"),
-                Markup.Escape(issueRule.Type ?? "*"),
-                Markup.Escape(string.Join(", ", issueRule.Repos)),
-                Markup.Escape(FormatLaunchOptions(issueRule)));
+            RenderNoRulesMessage("issue", issueRuleCount == 0, "copilotd rules add --kind issue <name>");
         }
+        else
+        {
+            var table = new Table();
+            table.ShowRowSeparators = true;
+            table.AddColumn(new TableColumn("[bold]Name[/]"));
+            table.AddColumn(new TableColumn("[bold]Assignee[/]"));
+            table.AddColumn(new TableColumn("[bold]Authors[/]"));
+            table.AddColumn(new TableColumn("[bold]Labels[/]"));
+            table.AddColumn(new TableColumn("[bold]Milestone[/]"));
+            table.AddColumn(new TableColumn("[bold]Type[/]"));
+            table.AddColumn(new TableColumn("[bold]Repos[/]"));
+            table.AddColumn(new TableColumn("[bold]Launch Options[/]"));
 
-        AnsiConsole.Write(table);
+            foreach (var kvp in issueRuleList)
+            {
+                var name = kvp.Key;
+                var issueRule = kvp.Value;
+                table.AddRow(
+                    Markup.Escape(name),
+                    Markup.Escape(issueRule.Assignee ?? "*"),
+                    Markup.Escape(FormatAuthorMode(issueRule)),
+                    Markup.Escape(string.Join(", ", issueRule.Labels)),
+                    Markup.Escape(issueRule.Milestone ?? "*"),
+                    Markup.Escape(issueRule.Type ?? "*"),
+                    Markup.Escape(string.Join(", ", issueRule.Repos)),
+                    Markup.Escape(FormatLaunchOptions(issueRule)));
+            }
+
+            AnsiConsole.Write(table);
+        }
 
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[bold]Pull request dispatch rules[/]");
-        var prTable = new Table();
-        prTable.ShowRowSeparators = true;
-        prTable.AddColumn(new TableColumn("[bold]Name[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Assignee[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Authors[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Labels[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Base[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Draft[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Review[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Branch[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Repos[/]"));
-        prTable.AddColumn(new TableColumn("[bold]Launch Options[/]"));
-
-        foreach (var kvp in pullRequestRules)
+        if (pullRequestRuleList.Count == 0)
         {
-            var name = kvp.Key;
-            var pullRequestRule = kvp.Value;
-            prTable.AddRow(
-                Markup.Escape(name),
-                Markup.Escape(pullRequestRule.Assignee ?? "*"),
-                Markup.Escape(FormatAuthorMode(pullRequestRule)),
-                Markup.Escape(string.Join(", ", pullRequestRule.Labels)),
-                Markup.Escape(pullRequestRule.BaseBranch ?? "*"),
-                Markup.Escape(pullRequestRule.Draft?.ToString() ?? "*"),
-                Markup.Escape(pullRequestRule.ReviewDecision ?? "*"),
-                Markup.Escape(pullRequestRule.BranchStrategy.ToString()),
-                Markup.Escape(string.Join(", ", pullRequestRule.Repos)),
-                Markup.Escape(FormatLaunchOptions(pullRequestRule)));
+            RenderNoRulesMessage("pull request", pullRequestRuleCount == 0, "copilotd rules add --kind pr <name>");
         }
+        else
+        {
+            var prTable = new Table();
+            prTable.ShowRowSeparators = true;
+            prTable.AddColumn(new TableColumn("[bold]Name[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Assignee[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Authors[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Labels[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Base[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Draft[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Review[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Branch[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Repos[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Launch Options[/]"));
 
-        AnsiConsole.Write(prTable);
+            foreach (var kvp in pullRequestRuleList)
+            {
+                var name = kvp.Key;
+                var pullRequestRule = kvp.Value;
+                prTable.AddRow(
+                    Markup.Escape(name),
+                    Markup.Escape(pullRequestRule.Assignee ?? "*"),
+                    Markup.Escape(FormatAuthorMode(pullRequestRule)),
+                    Markup.Escape(string.Join(", ", pullRequestRule.Labels)),
+                    Markup.Escape(pullRequestRule.BaseBranch ?? "*"),
+                    Markup.Escape(pullRequestRule.Draft?.ToString() ?? "*"),
+                    Markup.Escape(pullRequestRule.ReviewDecision ?? "*"),
+                    Markup.Escape(pullRequestRule.BranchStrategy.ToString()),
+                    Markup.Escape(string.Join(", ", pullRequestRule.Repos)),
+                    Markup.Escape(FormatLaunchOptions(pullRequestRule)));
+            }
+
+            AnsiConsole.Write(prTable);
+        }
         return 0;
+    }
+
+    private static void RenderNoRulesMessage(string dispatchType, bool noneDefined, string addCommand)
+    {
+        var reason = noneDefined
+            ? $"No {dispatchType} dispatch rules are currently defined."
+            : $"No {dispatchType} dispatch rules match the current filters.";
+        AnsiConsole.MarkupLine($"[grey]{Markup.Escape(reason)} Run [blue]{Markup.Escape(addCommand)}[/] to define one.[/]");
     }
 
     private static string FormatLaunchOptions(DispatchRuleOptions dispatchRule)
