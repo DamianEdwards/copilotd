@@ -119,7 +119,7 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd session pr <pr-number> <issue>` | Associate a PR with a session and wait for review feedback (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
-| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `session_name_format`, `max_instances`, `session_shutdown_delay_seconds`) |
+| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `session_name_format`, `current_user`, `enable_control_session`, `max_instances`, `session_shutdown_delay_seconds`) |
 | `copilotd rules list` | List all dispatch rules (`copilotd rule list` also works) |
 | `copilotd rules add <name>` | Add a new dispatch rule (`copilotd rule create <name>` and `copilotd rule new <name>` also work) |
 | `copilotd rules update <name>` | Update an existing rule (`copilotd rule edit <name>` also works) |
@@ -368,7 +368,7 @@ sessions, and more — all via natural language.
 | `copilotd rules list` | Show configured dispatch rules |
 | `copilotd config` | Show current configuration |
 
-To disable the control session, set `enable_control_session` to `false` in `~/.copilotd/config.json` (or `COPILOTD_HOME\config.json` when `COPILOTD_HOME` is set).
+To disable the control session, run `copilotd config --set enable_control_session=false`, or set `enable_control_session` to `false` in `~/.copilotd/config.json` (or `COPILOTD_HOME\config.json` when `COPILOTD_HOME` is set).
 
 ### Terminal states and pruning
 

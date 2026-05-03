@@ -42,6 +42,7 @@ public static class ConfigCommand
                     table.AddRow("custom_prompt", Markup.Escape(string.IsNullOrEmpty(config.Prompt) ? "(not set)" : config.Prompt));
                     table.AddRow("session_name_format", Markup.Escape(string.IsNullOrWhiteSpace(config.SessionNameFormat) ? "(disabled)" : config.SessionNameFormat));
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
+                    table.AddRow("enable_control_session", Markup.Escape(config.EnableControlSession.ToString().ToLowerInvariant()));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
                     table.AddRow("session_shutdown_delay_seconds", Markup.Escape(config.SessionShutdownDelaySeconds.ToString()));
                     table.AddRow("rules", Markup.Escape($"{config.Rules.Count} rule(s)"));
@@ -130,6 +131,26 @@ public static class ConfigCommand
                             : $"session_name_format set to: {cfg.SessionNameFormat}");
                         break;
 
+                    case "current_user":
+                        cfg.CurrentUser = string.IsNullOrWhiteSpace(value) ? null : value;
+                        ConsoleOutput.Success(cfg.CurrentUser is not null
+                            ? $"current_user set to: {cfg.CurrentUser}"
+                            : "current_user cleared.");
+                        break;
+
+                    case "enable_control_session":
+                        if (TryParseBoolean(value, out var enableControlSession))
+                        {
+                            cfg.EnableControlSession = enableControlSession;
+                            ConsoleOutput.Success($"enable_control_session set to: {cfg.EnableControlSession.ToString().ToLowerInvariant()}");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error("enable_control_session must be true or false");
+                            return 1;
+                        }
+                        break;
+
                     case "max_instances":
                         if (int.TryParse(value, out var maxInst) && maxInst > 0)
                         {
@@ -159,7 +180,7 @@ public static class ConfigCommand
 
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, session_name_format, max_instances, session_shutdown_delay_seconds");
+                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, session_name_format, current_user, enable_control_session, max_instances, session_shutdown_delay_seconds");
                         return 1;
                 }
 
@@ -169,5 +190,30 @@ public static class ConfigCommand
         });
 
         return command;
+    }
+
+    private static bool TryParseBoolean(string value, out bool result)
+    {
+        if (bool.TryParse(value, out result))
+            return true;
+
+        if (string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "on", StringComparison.OrdinalIgnoreCase))
+        {
+            result = true;
+            return true;
+        }
+
+        if (string.Equals(value, "0", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "no", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "off", StringComparison.OrdinalIgnoreCase))
+        {
+            result = false;
+            return true;
+        }
+
+        result = false;
+        return false;
     }
 }
