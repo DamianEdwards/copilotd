@@ -8,6 +8,8 @@ copilotd sits between GitHub Issues, pull requests, and the Copilot CLI running 
 
 Available for Windows, macOS, and Linux.
 
+Temporary e2e verification marker: pr192-20260503153942.
+
 ## Watch the introduction video
 
 [![Introducing copilotd](https://img.youtube.com/vi/zT6N_l12ofU/maxresdefault.jpg)](https://www.youtube.com/watch?v=zT6N_l12ofU)
