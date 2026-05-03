@@ -229,7 +229,13 @@ public sealed class CopilotTrustService
                 };
             }
 
-            if (root["trustedFolders"] is not JsonArray trustedFoldersNode)
+            if (!root.TryGetPropertyValue("trustedFolders", out var trustedFoldersNode))
+            {
+                trustedFoldersNode = new JsonArray();
+                root["trustedFolders"] = trustedFoldersNode;
+            }
+
+            if (trustedFoldersNode is not JsonArray trustedFoldersArray)
             {
                 return new ConfigReadResult
                 {
@@ -239,7 +245,7 @@ public sealed class CopilotTrustService
             }
 
             var trustedFolders = new List<string>();
-            foreach (var item in trustedFoldersNode)
+            foreach (var item in trustedFoldersArray)
             {
                 if (item is not JsonValue jsonValue)
                 {
