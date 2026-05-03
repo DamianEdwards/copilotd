@@ -308,7 +308,16 @@ public sealed class ReconciliationEngine
             }
 
             if (session.IsTerminal)
+            {
+                if (!desiredContainsSession && repoWasQueried
+                    && (!string.IsNullOrEmpty(session.WorktreePath) || !string.IsNullOrEmpty(session.BranchName)))
+                {
+                    _logger.LogInformation("{Subject} {Key} no longer matches issue/PR rules, cleaning up terminal session worktree", subjectLabel, key);
+                    _processManager.CleanupWorktree(session, config, state);
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                }
                 continue;
+            }
 
             // Never terminate user-controlled sessions
             if (session.Status is SessionStatus.Joined)
