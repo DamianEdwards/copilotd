@@ -527,8 +527,7 @@ public sealed partial class ProcessManager
             UpdatedAt = DateTimeOffset.UtcNow,
         };
 
-        var prompt = CopilotdConfig.ControlSessionPrompt
-            .Replace("$(copilotd.command)", _runtimeContext.GetCopilotdCallbackCommand(), StringComparison.Ordinal);
+        var prompt = ExpandCopilotdCommand(CopilotdConfig.ControlSessionPrompt, _runtimeContext.GetCopilotdCallbackCommand());
         var args = BuildControlSessionArguments(session, prompt, config.DefaultModel, _runtimeContext);
         _logger.LogInformation("Launching control session {SessionName}", session.CopilotSessionName);
         _logger.LogDebug("copilot {Args}", args);
@@ -939,30 +938,66 @@ public sealed partial class ProcessManager
     {
         var (org, repo) = SplitRepoSlug(issue.Repo);
 
-        return template
-            .Replace("$(copilotd.command)", copilotdCommand, StringComparison.Ordinal)
-            .Replace("$(issue.repo)", issue.Repo, StringComparison.Ordinal)
-            .Replace("$(issue.id)", issue.Number.ToString(), StringComparison.Ordinal)
-            .Replace("$(issue.type)", issue.Type ?? "issue", StringComparison.Ordinal)
-            .Replace("$(issue.milestone)", issue.Milestone ?? "none", StringComparison.Ordinal)
-            .Replace("$(subject.id)", session.SubjectNumber.ToString(), StringComparison.Ordinal)
-            .Replace("$(subject.kind)", session.SubjectKind.ToString().ToLowerInvariant(), StringComparison.Ordinal)
-            .Replace("$(subject.title)", session.SubjectTitle ?? "", StringComparison.Ordinal)
-            .Replace("$(pr.id)", (session.SubjectKind == DispatchSubjectKind.PullRequest ? session.SubjectNumber : session.PullRequestNumber)?.ToString() ?? "", StringComparison.Ordinal)
-            .Replace("$(pr.title)", session.SubjectKind == DispatchSubjectKind.PullRequest ? session.SubjectTitle ?? "" : "", StringComparison.Ordinal)
-            .Replace("$(pr.base)", session.PullRequestBaseBranch ?? "", StringComparison.Ordinal)
-            .Replace("$(pr.head)", session.PullRequestHeadBranch ?? "", StringComparison.Ordinal)
-            .Replace("$(pr.head_repo)", session.PullRequestHeadRepo ?? "", StringComparison.Ordinal)
-            .Replace("$(pr.head_sha)", session.PullRequestHeadSha ?? "", StringComparison.Ordinal)
-            .Replace("$(org)", org, StringComparison.Ordinal)
-            .Replace("$(repo)", repo, StringComparison.Ordinal)
-            .Replace("$(issue_id)", issue.Number.ToString(), StringComparison.Ordinal)
-            .Replace("$(session_id)", session.CopilotSessionId, StringComparison.Ordinal)
-            .Replace("$(machine_id)", machineIdentifier, StringComparison.Ordinal)
-            .Replace("$(machine_identifier)", machineIdentifier, StringComparison.Ordinal)
-            .Replace("$(machine_name)", Environment.MachineName, StringComparison.Ordinal)
-            .Replace("$(gh_user)", ghUser ?? "", StringComparison.Ordinal);
+        string? issueNumber = null;
+        string? subjectNumber = null;
+        string? subjectKind = null;
+        string? pullRequestNumber = null;
+
+        return TemplateExpander.Expand(template, token =>
+        {
+            if (token.SequenceEqual("copilotd.command"))
+                return copilotdCommand;
+            if (token.SequenceEqual("issue.repo"))
+                return issue.Repo;
+            if (token.SequenceEqual("issue.id"))
+                return issueNumber ??= issue.Number.ToString();
+            if (token.SequenceEqual("issue.type"))
+                return issue.Type ?? "issue";
+            if (token.SequenceEqual("issue.milestone"))
+                return issue.Milestone ?? "none";
+            if (token.SequenceEqual("subject.id"))
+                return subjectNumber ??= session.SubjectNumber.ToString();
+            if (token.SequenceEqual("subject.kind"))
+                return subjectKind ??= session.SubjectKind.ToString().ToLowerInvariant();
+            if (token.SequenceEqual("subject.title"))
+                return session.SubjectTitle ?? "";
+            if (token.SequenceEqual("pr.id"))
+                return pullRequestNumber ??= (session.SubjectKind == DispatchSubjectKind.PullRequest ? session.SubjectNumber : session.PullRequestNumber)?.ToString() ?? "";
+            if (token.SequenceEqual("pr.title"))
+                return session.SubjectKind == DispatchSubjectKind.PullRequest ? session.SubjectTitle ?? "" : "";
+            if (token.SequenceEqual("pr.base"))
+                return session.PullRequestBaseBranch ?? "";
+            if (token.SequenceEqual("pr.head"))
+                return session.PullRequestHeadBranch ?? "";
+            if (token.SequenceEqual("pr.head_repo"))
+                return session.PullRequestHeadRepo ?? "";
+            if (token.SequenceEqual("pr.head_sha"))
+                return session.PullRequestHeadSha ?? "";
+            if (token.SequenceEqual("org"))
+                return org;
+            if (token.SequenceEqual("repo"))
+                return repo;
+            if (token.SequenceEqual("issue_id"))
+                return issueNumber ??= issue.Number.ToString();
+            if (token.SequenceEqual("session_id"))
+                return session.CopilotSessionId;
+            if (token.SequenceEqual("machine_id"))
+                return machineIdentifier;
+            if (token.SequenceEqual("machine_identifier"))
+                return machineIdentifier;
+            if (token.SequenceEqual("machine_name"))
+                return Environment.MachineName;
+            if (token.SequenceEqual("gh_user"))
+                return ghUser ?? "";
+
+            return null;
+        });
     }
+
+    private static string ExpandCopilotdCommand(string template, string copilotdCommand)
+        => TemplateExpander.Expand(
+            template,
+            token => token.SequenceEqual("copilotd.command") ? copilotdCommand : null);
 
     private static DispatchRuleOptions? GetRuleOptions(CopilotdConfig config, DispatchSession session)
         => session.SubjectKind == DispatchSubjectKind.PullRequest

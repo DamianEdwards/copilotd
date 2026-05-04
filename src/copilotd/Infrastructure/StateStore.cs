@@ -223,7 +223,9 @@ public sealed class StateStore
     private static IEnumerable<string> GetDefaultPromptVariants()
     {
         yield return CopilotdConfig.DefaultPrompt;
-        yield return CopilotdConfig.DefaultPrompt.Replace("$(copilotd.command)", "copilotd", StringComparison.Ordinal);
+        yield return TemplateExpander.Expand(
+            CopilotdConfig.DefaultPrompt,
+            static token => token.SequenceEqual("copilotd.command") ? "copilotd" : null);
     }
 
     private static string NormalizeForComparison(string s)
