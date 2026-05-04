@@ -32,6 +32,10 @@ State converges through this loop — every inconsistency (crashed process, stal
 
 ## Key Conventions
 
+### PowerShell Safety
+
+PowerShell variable names are case-insensitive, so `$home` resolves to the built-in read-only `$HOME` variable. Never use `$home` as a scratch or target variable name in scripts. Use specific names such as `$userProfile`, `$homeDir`, `$copilotHomePath`, or `$targetRoot` instead, especially before destructive operations like `Remove-Item -Recurse`.
+
 ### System.CommandLine v2.0.5 API
 
 This version has non-obvious differences from older/newer versions:
