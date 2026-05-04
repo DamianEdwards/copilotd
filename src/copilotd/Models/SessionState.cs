@@ -290,6 +290,15 @@ public sealed class DispatchSession
     /// </summary>
     public string? BranchName { get; set; }
 
+    /// <summary>The last Copilot hook event reported for this session.</summary>
+    public string? LastHookEvent { get; set; }
+
+    /// <summary>When the last Copilot hook event was reported.</summary>
+    public DateTimeOffset? LastHookEventAt { get; set; }
+
+    /// <summary>Short diagnostic detail from the last Copilot hook event.</summary>
+    public string? LastHookDetail { get; set; }
+
     /// <summary>
     /// The GitHub reaction ID currently posted by copilotd for lifecycle tracking.
     /// Kept under its legacy name for persisted-state compatibility.

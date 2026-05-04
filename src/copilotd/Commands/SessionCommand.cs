@@ -2,6 +2,8 @@ using System.CommandLine;
 using System.CommandLine.Help;
 using System.CommandLine.Parsing;
 using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
 using Copilotd.Services;
@@ -27,6 +29,7 @@ public static class SessionCommand
         command.Subcommands.Add(CreateConnectCommand(services));
         command.Subcommands.Add(CreateCommentCommand(services));
         command.Subcommands.Add(CreateCompleteCommand(services));
+        command.Subcommands.Add(CreateEventCommand(services));
         command.Subcommands.Add(CreatePrCommand(services));
         command.Subcommands.Add(CreateResetCommand(services));
 
@@ -64,6 +67,218 @@ public static class SessionCommand
         });
 
         return command;
+    }
+
+    // ---- event subcommand ----
+
+    private static Command CreateEventCommand(IServiceProvider services)
+    {
+        var command = new Command("event", "Internal hook callback for dispatched copilot sessions")
+        {
+            Hidden = true,
+        };
+
+        var eventArg = new Argument<string>("event") { Description = "Hook event type" };
+        command.Arguments.Add(eventArg);
+
+        var issueArg = new Argument<string>("issue") { Description = "Issue key (e.g., owner/repo#123)" };
+        command.Arguments.Add(issueArg);
+
+        var sessionIdOption = new Option<string?>("--session-id")
+        {
+            Description = "Expected copilotd session ID",
+        };
+        command.Options.Add(sessionIdOption);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            try
+            {
+                var stateStore = services.GetRequiredService<StateStore>();
+                var runtimeContext = services.GetRequiredService<RuntimeContext>();
+                var eventName = parseResult.GetValue(eventArg)!;
+                var issueKey = parseResult.GetValue(issueArg)!;
+                var expectedSessionId = parseResult.GetValue(sessionIdOption);
+                var payload = Console.IsInputRedirected
+                    ? await Console.In.ReadToEndAsync(ct)
+                    : "";
+
+                return HandleSessionEvent(stateStore, runtimeContext.GetCopilotdCallbackCommand(), eventName, issueKey, expectedSessionId, payload, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Session hook event callback failed");
+                if (string.Equals(parseResult.GetValue(eventArg), "agent-stop", StringComparison.OrdinalIgnoreCase))
+                    WriteAgentStopAllow();
+                return 0;
+            }
+        });
+
+        return command;
+    }
+
+    private static int HandleSessionEvent(
+        StateStore stateStore,
+        string copilotdCommand,
+        string eventName,
+        string issueKey,
+        string? expectedSessionId,
+        string payload,
+        CancellationToken ct)
+    {
+        var normalizedEvent = NormalizeHookEventName(eventName);
+        var detail = ExtractHookDetail(normalizedEvent, payload);
+        var decision = AgentStopDecision.Allow;
+
+        stateStore.WithStateLock(() =>
+        {
+            var state = stateStore.LoadState();
+            if (!state.Sessions.TryGetValue(issueKey, out var session))
+                return;
+
+            if (!string.IsNullOrWhiteSpace(expectedSessionId)
+                && !string.Equals(session.CopilotSessionId, expectedSessionId, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            session.LastHookEvent = normalizedEvent;
+            session.LastHookEventAt = DateTimeOffset.UtcNow;
+            session.LastHookDetail = detail;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+
+            if (normalizedEvent == "agent-stop"
+                && session.Status is SessionStatus.Running or SessionStatus.Dispatching)
+            {
+                decision = AgentStopDecision.Block;
+            }
+            else if (normalizedEvent == "session-end"
+                     && session.Status is SessionStatus.Running or SessionStatus.Dispatching)
+            {
+                var reason = ExtractString(payload, "reason") ?? "unknown";
+                session.Status = SessionStatus.Orphaned;
+                session.FailureDetail = $"Copilot hook reported sessionEnd reason '{reason}' before the session reached a completed or waiting state.";
+                session.LastFailureAt = DateTimeOffset.UtcNow;
+                ClearTrackedProcess(session);
+            }
+
+            stateStore.SaveState(state);
+        }, ct);
+
+        if (normalizedEvent == "agent-stop")
+        {
+            if (decision == AgentStopDecision.Block)
+                WriteAgentStopBlock(issueKey, copilotdCommand);
+            else
+                WriteAgentStopAllow();
+        }
+
+        return 0;
+    }
+
+    private static string NormalizeHookEventName(string eventName)
+        => eventName.Trim().ToLowerInvariant() switch
+        {
+            "agentstop" or "agent-stop" or "stop" => "agent-stop",
+            "sessionend" or "session-end" => "session-end",
+            "erroroccurred" or "error-occurred" => "error-occurred",
+            _ => eventName.Trim(),
+        };
+
+    private static string? ExtractHookDetail(string normalizedEvent, string payload)
+        => normalizedEvent switch
+        {
+            "session-end" => ExtractString(payload, "reason") is { } reason ? $"reason={reason}" : null,
+            "error-occurred" => ExtractErrorDetail(payload),
+            "agent-stop" => ExtractString(payload, "stopReason") is { } reason
+                ? $"stopReason={reason}"
+                : ExtractString(payload, "stop_reason") is { } snakeReason
+                    ? $"stopReason={snakeReason}"
+                    : null,
+            _ => null,
+        };
+
+    private static string? ExtractErrorDetail(string payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            if (!document.RootElement.TryGetProperty("error", out var error))
+                return null;
+
+            var name = error.TryGetProperty("name", out var nameElement)
+                ? nameElement.GetString()
+                : null;
+            var message = error.TryGetProperty("message", out var messageElement)
+                ? messageElement.GetString()
+                : null;
+
+            return string.IsNullOrWhiteSpace(name)
+                ? message
+                : string.IsNullOrWhiteSpace(message)
+                    ? name
+                    : $"{name}: {message}";
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ExtractString(string payload, string propertyName)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            return document.RootElement.TryGetProperty(propertyName, out var value)
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static void WriteAgentStopBlock(string issueKey, string copilotdCommand)
+    {
+        var reason = $"""
+            copilotd is still tracking {issueKey} as an active session. Before ending this turn, run one of the copilotd lifecycle commands and verify it succeeds:
+            - `{copilotdCommand} session complete {issueKey}` when all requested work is finished
+            - `{copilotdCommand} session pr <pr-number> {issueKey}` after opening or updating a pull request that should be monitored for review feedback
+            - `{copilotdCommand} session comment {issueKey} --message "..."` when you need clarification or feedback before continuing
+
+            Do not stop until the session has transitioned to completed, waiting for feedback, or waiting for review.
+            """;
+
+        Console.WriteLine($$"""{"decision":"block","reason":{{ToJsonStringLiteral(reason)}}}""");
+    }
+
+    private static void WriteAgentStopAllow()
+        => Console.WriteLine("""{"decision":"allow"}""");
+
+    private static string ToJsonStringLiteral(string value)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStringValue(value);
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private enum AgentStopDecision
+    {
+        Allow,
+        Block,
     }
 
     // ---- list subcommand ----
@@ -979,6 +1194,9 @@ public static class SessionCommand
         table.AddRow("Repo path", Markup.Escape(NormalizeDisplayPath(repoPath) ?? "-"));
         table.AddRow("Worktree path", Markup.Escape(NormalizeDisplayPath(session.WorktreePath) ?? "-"));
         table.AddRow("Branch", Markup.Escape(session.BranchName ?? "-"));
+        table.AddRow("Last hook event", Markup.Escape(session.LastHookEvent ?? "-"));
+        table.AddRow("Last hook event at", Markup.Escape(FormatOptionalTime(session.LastHookEventAt)));
+        table.AddRow("Last hook detail", Markup.Escape(session.LastHookDetail ?? "-"));
         table.AddRow("Failure detail", Markup.Escape(session.FailureDetail ?? "(none)"));
 
         AnsiConsole.Write(table);
@@ -1074,6 +1292,9 @@ public static class SessionCommand
             LastRedispatchWasIssueComment = session.LastRedispatchWasIssueComment,
             WorktreePath = session.WorktreePath,
             BranchName = session.BranchName,
+            LastHookEvent = session.LastHookEvent,
+            LastHookEventAt = session.LastHookEventAt,
+            LastHookDetail = session.LastHookDetail,
             IssueReactionId = session.IssueReactionId,
             ReactionTargetType = session.ReactionTargetType,
             ReactionTargetCommentId = session.ReactionTargetCommentId,

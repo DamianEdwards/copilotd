@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Copilotd.Commands;
 using Copilotd.Models;
 using Copilotd.Services;
@@ -20,6 +21,7 @@ public sealed partial class ProcessManager
     private static readonly TimeSpan WindowsCopilotChildDiscoveryTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan WindowsCopilotChildDiscoveryPollInterval = TimeSpan.FromMilliseconds(100);
     private static readonly NuGetVersion MinimumNamedSessionVersion = new(1, 0, 35);
+    private const string HookConfigRelativePath = ".github/hooks/copilotd.hooks.json";
 
     private readonly StateStore _stateStore;
     private readonly RepoPathResolver _repoResolver;
@@ -1160,11 +1162,21 @@ public sealed partial class ProcessManager
         // If the session already has a worktree (PR review re-dispatch), refresh it
         if (!string.IsNullOrEmpty(session.WorktreePath) && Directory.Exists(session.WorktreePath))
         {
-            return RefreshWorktree(session) ? WorktreeResult.Refreshed : WorktreeResult.Failed;
+            if (!RefreshWorktree(session))
+                return WorktreeResult.Failed;
+
+            InstallSessionHooks(session);
+            return WorktreeResult.Refreshed;
         }
 
         if (session.SubjectKind == DispatchSubjectKind.PullRequest)
-            return PreparePullRequestWorktree(session, config, state);
+        {
+            var result = PreparePullRequestWorktree(session, config, state);
+            if (result != WorktreeResult.Failed)
+                InstallSessionHooks(session);
+
+            return result;
+        }
 
         var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
         if (mainRepoPath is null || !Directory.Exists(mainRepoPath))
@@ -1239,7 +1251,177 @@ public sealed partial class ProcessManager
 
         session.WorktreePath = worktreePath;
         _logger.LogInformation("Worktree ready for {Key} at {Path}", session.IssueKey, worktreePath);
+        InstallSessionHooks(session);
         return WorktreeResult.CreatedNew;
+    }
+
+    private bool InstallSessionHooks(DispatchSession session)
+    {
+        if (string.IsNullOrWhiteSpace(session.WorktreePath))
+        {
+            _logger.LogWarning("Cannot install Copilot hooks for {Key}: session has no worktree path", session.SubjectKey);
+            return false;
+        }
+
+        try
+        {
+            var hooksDir = Path.Combine(session.WorktreePath, ".github", "hooks");
+            Directory.CreateDirectory(hooksDir);
+
+            var hookConfigPath = Path.Combine(session.WorktreePath, HookConfigRelativePath);
+            WriteHookConfig(hookConfigPath, session);
+            AddWorktreeExclude(session.WorktreePath, HookConfigRelativePath);
+
+            _logger.LogDebug("Installed Copilot hook config for {Key} at {Path}", session.SubjectKey, hookConfigPath);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to install Copilot hooks for {Key}", session.SubjectKey);
+            return false;
+        }
+    }
+
+    private void WriteHookConfig(string hookConfigPath, DispatchSession session)
+    {
+        using var stream = File.Create(hookConfigPath);
+        using var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true });
+
+        writer.WriteStartObject();
+        writer.WriteNumber("version", 1);
+        writer.WritePropertyName("hooks");
+        writer.WriteStartObject();
+
+        WriteHookCommand(writer, "agentStop", session, "agent-stop");
+        WriteHookCommand(writer, "sessionEnd", session, "session-end");
+        WriteHookCommand(writer, "errorOccurred", session, "error-occurred");
+
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+    }
+
+    private void WriteHookCommand(Utf8JsonWriter writer, string hookName, DispatchSession session, string eventName)
+    {
+        writer.WritePropertyName(hookName);
+        writer.WriteStartArray();
+        writer.WriteStartObject();
+        writer.WriteString("type", "command");
+        writer.WriteString("bash", BuildSessionEventHookCommand(session, eventName, HookShell.Bash));
+        writer.WriteString("powershell", BuildSessionEventHookCommand(session, eventName, HookShell.PowerShell));
+        writer.WriteString("cwd", ".");
+        writer.WriteNumber("timeoutSec", 30);
+        writer.WriteEndObject();
+        writer.WriteEndArray();
+    }
+
+    private string BuildSessionEventHookCommand(DispatchSession session, string eventName, HookShell shell)
+    {
+        var parts = new List<string>();
+        if (shell == HookShell.PowerShell)
+            parts.Add("&");
+
+        if (_runtimeContext.IsDotnetHosted && !string.IsNullOrWhiteSpace(_runtimeContext.SourceProjectPath))
+        {
+            parts.Add(ShellQuote(_runtimeContext.ProcessPath ?? "dotnet", shell));
+            parts.Add("run");
+            parts.Add("--project");
+            parts.Add(ShellQuote(_runtimeContext.SourceProjectPath, shell));
+            parts.Add("--no-build");
+            parts.Add("--");
+        }
+        else
+        {
+            parts.Add(ShellQuote(_runtimeContext.ProcessPath ?? "copilotd", shell));
+        }
+
+        parts.Add("session");
+        parts.Add("event");
+        parts.Add(eventName);
+        parts.Add(ShellQuote(session.SubjectKey, shell));
+        parts.Add("--session-id");
+        parts.Add(ShellQuote(session.CopilotSessionId, shell));
+
+        return string.Join(' ', parts);
+    }
+
+    private static string ShellQuote(string value, HookShell shell)
+        => shell == HookShell.PowerShell
+            ? $"'{value.Replace("'", "''", StringComparison.Ordinal)}'"
+            : $"'{value.Replace("'", "'\\''", StringComparison.Ordinal)}'";
+
+    private void AddWorktreeExclude(string worktreePath, string relativePath)
+    {
+        var excludePath = GetGitPath(worktreePath, "info/exclude");
+        if (excludePath is null)
+        {
+            _logger.LogWarning("Could not resolve git exclude path for worktree {Path}", worktreePath);
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(excludePath)!);
+        var normalizedRelativePath = relativePath.Replace(Path.DirectorySeparatorChar, '/');
+        var existingLines = File.Exists(excludePath)
+            ? File.ReadAllLines(excludePath)
+            : [];
+
+        if (existingLines.Any(line => string.Equals(line.Trim(), normalizedRelativePath, StringComparison.Ordinal)))
+            return;
+
+        File.AppendAllText(excludePath, $"{Environment.NewLine}{normalizedRelativePath}{Environment.NewLine}");
+    }
+
+    private string? GetGitPath(string workingDir, string gitPath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = $"rev-parse --git-path \"{gitPath}\"",
+                WorkingDirectory = workingDir,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+                return null;
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(TimeSpan.FromSeconds(10)))
+            {
+                try { process.Kill(); } catch { }
+                return null;
+            }
+
+            var output = stdoutTask.GetAwaiter().GetResult().Trim();
+            var stderr = stderrTask.GetAwaiter().GetResult();
+
+            if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+            {
+                if (!string.IsNullOrWhiteSpace(stderr))
+                    _logger.LogDebug("git rev-parse --git-path {GitPath} failed: {StdErr}", gitPath, stderr.Trim());
+                return null;
+            }
+
+            return Path.IsPathRooted(output)
+                ? output
+                : Path.GetFullPath(Path.Combine(workingDir, output));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to resolve git path {GitPath} in {WorkingDir}", gitPath, workingDir);
+            return null;
+        }
+    }
+
+    private enum HookShell
+    {
+        Bash,
+        PowerShell,
     }
 
     private WorktreeResult PreparePullRequestWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
