@@ -176,6 +176,20 @@ public static class ConfigCommand
                         if (TryParseBoolean(value, out var enableControlSession))
                         {
                             cfg.EnableControlSession = enableControlSession;
+                            if (cfg.EnableControlSession)
+                            {
+                                CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                                    copilotTrust,
+                                    repoResolver,
+                                    copilotCli,
+                                    cfg,
+                                    stateStore.LoadState(),
+                                    cfg.IssueRules.Values.Cast<DispatchRuleOptions>()
+                                        .Concat(cfg.PullRequestRules.Values)
+                                        .SelectMany(dispatchRule => dispatchRule.Repos)
+                                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                                        .ToList());
+                            }
                             ConsoleOutput.Success($"enable_control_session set to: {cfg.EnableControlSession.ToString().ToLowerInvariant()}");
                         }
                         else

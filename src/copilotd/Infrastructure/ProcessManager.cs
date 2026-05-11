@@ -508,10 +508,7 @@ public sealed partial class ProcessManager
     /// </summary>
     public ControlSessionInfo? LaunchControlSession(CopilotdConfig config, string machineIdentifier)
     {
-        // Clone the copilotd repo to <RepoHome>/DamianEdwards/copilotd if needed, then
-        // launch from a dedicated subdirectory so repo-root wrapper scripts don't shadow
-        // the installed copilotd command inside the remote session harness.
-        var workingDir = EnsureControlSessionWorkingDirectory(config);
+        var workingDir = EnsureControlSessionWorkingDirectory();
         if (workingDir is null)
         {
             _logger.LogError("Cannot launch control session: failed to set up control session working directory");
@@ -646,28 +643,9 @@ public sealed partial class ProcessManager
     private static string BuildControlSessionName(string machineIdentifier)
         => $"(copilotd control) {machineIdentifier}";
 
-    /// <summary>
-    /// The copilotd repo to clone for the control session's working directory.
-    /// </summary>
-    private const string ControlSessionRepo = GitHubRemoteSessionUrlResolver.ControlSessionRepo;
-
-    /// <summary>
-    /// Dedicated subdirectory under the control-session repo clone used as the cwd for the
-    /// remote session, avoiding repo-root wrapper scripts like copilotd.ps1.
-    /// </summary>
-    private const string ControlSessionWorkingDirectoryName = ".control-session";
-
-    /// <summary>
-    /// Ensures the control session repo exists locally and returns a dedicated working
-    /// directory within that repo for launching the remote session.
-    /// </summary>
-    private string? EnsureControlSessionWorkingDirectory(CopilotdConfig config)
+    private string? EnsureControlSessionWorkingDirectory()
     {
-        var repoPath = EnsureControlSessionRepo(config);
-        if (repoPath is null)
-            return null;
-
-        var workingDir = Path.Combine(repoPath, ControlSessionWorkingDirectoryName);
+        var workingDir = CopilotdPaths.GetControlSessionDirectory();
 
         try
         {
@@ -677,75 +655,6 @@ public sealed partial class ProcessManager
         catch (Exception ex)
         {
             _logger.LogError(ex, "Exception creating control session working directory at {Path}", workingDir);
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Ensures the copilotd repo is cloned to <c>&lt;RepoHome&gt;/DamianEdwards/copilotd</c>.
-    /// Clones it if not already present.
-    /// </summary>
-    private string? EnsureControlSessionRepo(CopilotdConfig config)
-    {
-        if (string.IsNullOrEmpty(config.RepoHome))
-        {
-            _logger.LogError("RepoHome is not configured; cannot set up control session repo");
-            return null;
-        }
-
-        var repoPath = Path.Combine(config.RepoHome, "DamianEdwards", "copilotd");
-
-        if (Directory.Exists(Path.Combine(repoPath, ".git")))
-        {
-            _logger.LogDebug("Control session repo already exists at {Path}", repoPath);
-            return repoPath;
-        }
-
-        _logger.LogInformation("Cloning {Repo} for control session...", ControlSessionRepo);
-
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(repoPath)!);
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = "gh",
-                Arguments = $"repo clone {ControlSessionRepo} \"{repoPath}\"",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-
-            using var process = Process.Start(psi);
-            if (process is null)
-            {
-                _logger.LogError("Failed to start gh repo clone for control session");
-                return null;
-            }
-
-            process.WaitForExit(TimeSpan.FromSeconds(60));
-
-            if (!process.HasExited)
-            {
-                _logger.LogWarning("gh repo clone timed out for control session");
-                process.Kill(entireProcessTree: true);
-                return null;
-            }
-
-            if (process.ExitCode != 0)
-            {
-                var stderr = process.StandardError.ReadToEnd();
-                _logger.LogError("gh repo clone failed (exit {Code}): {Stderr}", process.ExitCode, stderr);
-                return null;
-            }
-
-            _logger.LogInformation("Cloned {Repo} to {Path}", ControlSessionRepo, repoPath);
-            return repoPath;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Exception cloning {Repo} for control session", ControlSessionRepo);
             return null;
         }
     }

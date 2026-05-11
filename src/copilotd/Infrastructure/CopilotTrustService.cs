@@ -46,6 +46,9 @@ public sealed class CopilotTrustService
 
     public string ConfigPath => _configPath;
 
+    public IReadOnlyList<string> GetRequiredTrustedFoldersForControlSession()
+        => [NormalizePath(CopilotdPaths.GetControlSessionDirectory())];
+
     public IReadOnlyList<string> GetRequiredTrustedFolders(string repoPath)
     {
         var normalizedRepoPath = NormalizePath(repoPath);

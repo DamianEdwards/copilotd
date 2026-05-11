@@ -58,4 +58,7 @@ public static class CopilotdPaths
 
     public static string GetLogsDirectory()
         => Path.Combine(GetCopilotdHomeDirectory(), "logs");
+
+    public static string GetControlSessionDirectory()
+        => Path.Combine(GetCopilotdHomeDirectory(), "control-session");
 }

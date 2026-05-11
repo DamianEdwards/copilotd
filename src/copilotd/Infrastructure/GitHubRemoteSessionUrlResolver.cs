@@ -20,8 +20,6 @@ public sealed class GitHubRemoteSessionUrlResolver
     private readonly string _sessionStateDir;
     private readonly ILogger<GitHubRemoteSessionUrlResolver> _logger;
 
-    public const string ControlSessionRepo = "DamianEdwards/copilotd";
-
     public GitHubRemoteSessionUrlResolver(ILogger<GitHubRemoteSessionUrlResolver> logger)
     {
         _logger = logger;

@@ -42,9 +42,11 @@ public static class RunCommand
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
                 var logFileManager = services.GetRequiredService<LogFileManager>();
                 var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
+                var copilotTrust = services.GetRequiredService<CopilotTrustService>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var disableSelfUpdates = runtimeContext.IsAutomaticSelfUpdateDisabled(parseResult.GetValue(disableSelfUpdatesOption));
+                var controlSessionTrustWarningShown = false;
 
                 // Pre-flight checks
                 var preflightResult = PreflightChecks.Run(ghCli, copilotCli, stateStore);
@@ -145,6 +147,20 @@ public static class RunCommand
 
                             if (state.ControlSession?.ProcessId is not null)
                                 processManager.TerminateControlSession(state.ControlSession);
+
+                            var trustDecision = CheckControlSessionTrust(copilotTrust, logger, controlSessionTrustWarningShown);
+                            controlSessionTrustWarningShown = trustDecision.WarningShown;
+                            if (!trustDecision.CanLaunch)
+                            {
+                                state.ControlSession = new ControlSessionInfo
+                                {
+                                    Status = ControlSessionStatus.Failed,
+                                    UpdatedAt = DateTimeOffset.UtcNow,
+                                };
+                                launchFailed = true;
+                                stateStore.SaveState(state);
+                                return;
+                            }
 
                             var controlSession = processManager.LaunchControlSession(config, machineIdentifier);
                             if (controlSession is not null)
@@ -255,6 +271,23 @@ public static class RunCommand
                                                 }
 
                                                 processManager.TerminateControlSession(state.ControlSession);
+                                            }
+
+                                            var trustDecision = CheckControlSessionTrust(copilotTrust, logger, controlSessionTrustWarningShown);
+                                            controlSessionTrustWarningShown = trustDecision.WarningShown;
+                                            if (!trustDecision.CanLaunch)
+                                            {
+                                                if (state.ControlSession?.Status != ControlSessionStatus.Failed)
+                                                {
+                                                    state.ControlSession = new ControlSessionInfo
+                                                    {
+                                                        Status = ControlSessionStatus.Failed,
+                                                        UpdatedAt = DateTimeOffset.UtcNow,
+                                                    };
+                                                    stateStore.SaveState(state);
+                                                }
+
+                                                return;
                                             }
 
                                             logger.LogInformation("Relaunching control session...");
@@ -385,6 +418,39 @@ public static class RunCommand
 
         ConsoleOutput.Info("Remote:");
         ConsoleOutput.Info($"  {url ?? "unavailable"}");
+    }
+
+    private static (bool CanLaunch, bool WarningShown) CheckControlSessionTrust(
+        CopilotTrustService copilotTrust,
+        ILogger logger,
+        bool warningShown)
+    {
+        var trustCheck = copilotTrust.CheckTrustedFolders(copilotTrust.GetRequiredTrustedFoldersForControlSession());
+        switch (trustCheck.Status)
+        {
+            case CopilotTrustStatus.Trusted:
+                return (true, warningShown);
+
+            case CopilotTrustStatus.Unknown:
+                logger.LogWarning("Could not verify Copilot folder trust for control session: {Message}",
+                    trustCheck.Message ?? "unknown trust verification error");
+                return (true, warningShown);
+
+            case CopilotTrustStatus.Untrusted:
+                var missingFolders = string.Join(", ", trustCheck.MissingFolders);
+                if (!warningShown)
+                {
+                    ConsoleOutput.Warning("Control session folder is not trusted by Copilot. Run 'copilotd init' or trust the folder manually before the control session can launch.");
+                    logger.LogWarning("Copilot folder trust missing for control session: {Folders}", missingFolders);
+                    return (false, true);
+                }
+
+                logger.LogDebug("Copilot folder trust still missing for control session: {Folders}", missingFolders);
+                return (false, warningShown);
+
+            default:
+                return (true, warningShown);
+        }
     }
 
     private static bool IsControlSessionHealthy(

@@ -14,11 +14,28 @@ internal static class CopilotTrustCommandHelper
         Copilotd.Models.DaemonState state,
         IEnumerable<string> repoSlugs)
     {
-        var requiredFolders = repoSlugs
+        var requiredFolders = new List<string>();
+        if (config.EnableControlSession)
+        {
+            var controlSessionDirectory = CopilotdPaths.GetControlSessionDirectory();
+            try
+            {
+                Directory.CreateDirectory(controlSessionDirectory);
+                requiredFolders.AddRange(trustService.GetRequiredTrustedFoldersForControlSession());
+            }
+            catch (Exception ex)
+            {
+                ConsoleOutput.Warning($"Could not create control session folder '{controlSessionDirectory}': {ex.Message}");
+            }
+        }
+
+        requiredFolders.AddRange(repoSlugs
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(repoSlug => repoResolver.ResolveRepoPath(repoSlug, config, state))
             .Where(path => !string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
-            .SelectMany(path => trustService.GetRequiredTrustedFolders(path!))
+            .SelectMany(path => trustService.GetRequiredTrustedFolders(path!)));
+
+        requiredFolders = requiredFolders
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -47,12 +64,12 @@ internal static class CopilotTrustCommandHelper
         CopilotCliService copilotCli,
         CopilotTrustCheckResult trustCheck)
     {
-        ConsoleOutput.Warning("Copilot needs these folders trusted before copilotd can dispatch sessions reliably:");
+        ConsoleOutput.Warning("Copilot needs these folders trusted before copilotd can launch sessions reliably:");
         RenderFolderList(trustCheck.MissingFolders);
 
         if (!AnsiConsole.Confirm("Add the missing folders to Copilot trustedFolders now?", true))
         {
-            ConsoleOutput.Warning("copilotd will keep monitoring these repositories, but dispatched sessions may fail until these folders are trusted.");
+            ConsoleOutput.Warning("copilotd will keep monitoring configured repositories, but sessions may fail until these folders are trusted.");
             RenderManualTrustInstructions(trustCheck.MissingFolders, copilotCli, includeIssueReportGuidance: false);
             return;
         }
