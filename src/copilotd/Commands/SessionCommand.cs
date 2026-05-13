@@ -926,6 +926,9 @@ public static class SessionCommand
                     session.RetryCount = 0;
                     session.RedispatchCount = 0;
                     session.LastRedispatchWasIssueComment = false;
+                    session.SeenUnresolvedReviewThreadIds = [];
+                    session.HasEstablishedUnresolvedReviewThreadBaseline = false;
+                    session.LastTriggeredFailingChecksHeadSha = null;
                     session.LastFailureAt = null;
                     session.WaitingSince = null;
                     session.SetReactionAnchor(ReactionAnchor.IssueBody);
@@ -1288,6 +1291,9 @@ public static class SessionCommand
             PullRequestHeadRepo = session.PullRequestHeadRepo,
             PullRequestHeadSha = session.PullRequestHeadSha,
             PullRequestBranchStrategy = session.PullRequestBranchStrategy,
+            SeenUnresolvedReviewThreadIds = [.. session.SeenUnresolvedReviewThreadIds],
+            HasEstablishedUnresolvedReviewThreadBaseline = session.HasEstablishedUnresolvedReviewThreadBaseline,
+            LastTriggeredFailingChecksHeadSha = session.LastTriggeredFailingChecksHeadSha,
             RedispatchCount = session.RedispatchCount,
             LastRedispatchWasIssueComment = session.LastRedispatchWasIssueComment,
             WorktreePath = session.WorktreePath,

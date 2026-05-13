@@ -20,7 +20,7 @@ Available for Windows, macOS, and Linux.
 - **Terminal-safe automation** — dispatched work sessions suppress browser launch environment variables so unattended agents stay in terminal/API workflows instead of popping open web pages
 - **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, extra prompts, repo assignments)
 - **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, PR review monitoring, and explicit completion signaling
-- **PR review feedback** — sessions that create PRs can wait for review comments and automatically re-dispatch to address feedback
+- **PR review feedback** — sessions that create PRs can wait for review comments and automatically re-dispatch to address feedback, newly unresolved review threads, or failing CI on the current head SHA
 - **Self-healing state** — reconciles persisted state, live process status, and GitHub issue matches on every poll cycle and at startup
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
 - **Interactive connection** — connect to any running remote-enabled session with `copilotd session connect` without stopping the orchestrated session (requires Copilot CLI 1.0.32+)
@@ -311,7 +311,7 @@ The default prompt instructs copilot sessions to use `session pr` after creating
 
 ### PR dispatch rules
 
-Pull request dispatch rules live in the separate `pull_request_rules` config collection and are opt-in. They can be created from `copilotd init` when you choose PR dispatch, or later with `copilotd rules add <name> --kind pr`. They use the same `org/repo#number` session key format as issue sessions, with a stored subject kind to distinguish PR-root sessions from issue-root sessions.
+Pull request dispatch rules live in the separate `pull_request_rules` config collection and are opt-in. They can be created from `copilotd init` when you choose PR dispatch, or later with `copilotd rules add <name> --kind pr`. They use the same `org/repo#number` session key format as issue sessions, with a stored subject kind to distinguish PR-root sessions from issue-root sessions. When a PR-root session returns itself to `copilotd session pr`, copilotd keeps watching that PR for new review feedback, newly unresolved review threads, and failing CI on the current head SHA.
 
 PR rules support three worktree strategies:
 
@@ -449,6 +449,9 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 | `custom_prompt` | *(none)* | Per-rule custom prompt text (appended to or overrides global custom prompt) |
 | `custom_prompt_mode` | `append` | How rule custom prompt interacts with global: `append` or `override` |
 | `trust_level` | `collaborators` | Which comment authors can trigger session re-dispatch: `collaborators` (write access required), `all`, `issueAuthor`, `assignees`, `issueAuthorAndCollaborators`, or `matchDispatchRule` |
+| `active_start_hour` | *(none)* | Optional local-hour start for the rule's dispatch window (0-23) |
+| `active_end_hour` | *(none)* | Optional local-hour end for the rule's dispatch window (0-23, midnight-wrapping supported) |
+| `active_time_zone` | *(none)* | Time zone used with `active_start_hour`/`active_end_hour` (for example `America/Chicago`) |
 
 Pull request rules support the shared settings above except issue-only `milestone` and `type`, and add these PR-specific settings:
 

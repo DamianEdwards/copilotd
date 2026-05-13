@@ -492,49 +492,14 @@ public sealed class ReconciliationEngine
                                 var reviewInfo = _ghCli.GetNewPrReviewCommentSince(existing.Repo, existing.PullRequestNumber.Value, existing.WaitingSince.Value);
                                 if (reviewInfo is not null)
                                 {
-                                    // Check re-dispatch rate limit
-                                    if (existing.RedispatchCount >= config.MaxRedispatches)
-                                    {
-                                        _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
-                                            "Use 'copilotd session reset' to re-enable. Ignoring PR review from {Author}",
-                                            issueKey, config.MaxRedispatches, reviewInfo.Author);
+                                    if (!TryQueueFeedbackRedispatch(existing, issueKey, reviewInfo, config, isIssueComment: false))
                                         continue;
-                                    }
-
-                                    // Check author trust level
-                                    var trusted = IsCommentTrusted(existing, reviewInfo.Author, config, out var trustLevel);
-
-                                    if (trusted is null)
-                                    {
-                                        _logger.LogWarning("Could not evaluate trust for {Author} on {Key} (trust_level={TrustLevel}), will retry next cycle",
-                                            reviewInfo.Author, issueKey, trustLevel);
-                                        continue;
-                                    }
-
-                                    if (trusted == false)
-                                    {
-                                        _logger.LogInformation("Ignoring PR review from untrusted author {Author} on {Key} (trust_level={TrustLevel})",
-                                            reviewInfo.Author, issueKey, trustLevel);
-                                        // Advance WaitingSince past this review so the next poll can find later trusted reviews
-                                        existing.WaitingSince = reviewInfo.CreatedAt;
-                                        existing.UpdatedAt = DateTimeOffset.UtcNow;
-                                        continue;
-                                    }
-
-                                    _logger.LogInformation("New PR review from {Author} detected on PR #{Pr} for {Key}, re-dispatching session (redispatch {N}/{Max})",
-                                        reviewInfo.Author, existing.PullRequestNumber, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
-                                    // Keep the same resume target so --resume preserves context
-                                    existing.Status = SessionStatus.Pending;
-                                    existing.FailureDetail = null;
-                                    existing.RedispatchCount++;
-                                    existing.LastRedispatchWasIssueComment = false;
-                                    existing.WaitingSince = null;
-                                    existing.ProcessId = null;
-                                    existing.ProcessStartTime = null;
-                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
                                     continue;
                                 }
                             }
+
+                            if (TryQueuePullRequestMonitoringRedispatch(existing, issueKey, existing.PullRequestNumber.Value, config))
+                                continue;
                         }
 
                         // Also check for new issue comments (maintainer may respond on the issue)
@@ -543,49 +508,9 @@ public sealed class ReconciliationEngine
                             var issueCommentInfo = _ghCli.GetNewCommentSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value);
                             if (issueCommentInfo is not null)
                             {
-                                // Check re-dispatch rate limit
-                                if (existing.RedispatchCount >= config.MaxRedispatches)
-                                {
-                                    _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
-                                        "Use 'copilotd session reset' to re-enable. Ignoring issue comment from {Author}",
-                                        issueKey, config.MaxRedispatches, issueCommentInfo.Author);
+                                if (!TryQueueFeedbackRedispatch(existing, issueKey, issueCommentInfo, config, isIssueComment: true))
                                     continue;
-                                }
-
-                                // Check author trust level
-                                var trusted = IsCommentTrusted(existing, issueCommentInfo.Author, config, out var trustLevel);
-
-                                if (trusted is null)
-                                {
-                                    _logger.LogWarning("Could not evaluate trust for {Author} on {Key} (trust_level={TrustLevel}), will retry next cycle",
-                                        issueCommentInfo.Author, issueKey, trustLevel);
-                                    continue;
-                                }
-
-                                if (trusted == false)
-                                {
-                                    _logger.LogInformation("Ignoring issue comment from untrusted author {Author} on {Key} while waiting for PR review (trust_level={TrustLevel})",
-                                        issueCommentInfo.Author, issueKey, trustLevel);
-                                    // Advance WaitingSince past this comment so the next poll can find later trusted comments
-                                    existing.WaitingSince = issueCommentInfo.CreatedAt;
-                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
-                                    continue;
-                                }
-
-                                _logger.LogInformation("New issue comment from {Author} detected on {Key} while waiting for PR review, re-dispatching session (redispatch {N}/{Max})",
-                                    issueCommentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
-                                existing.Status = SessionStatus.Pending;
-                                existing.FailureDetail = null;
-                                existing.RedispatchCount++;
-                                existing.LastRedispatchWasIssueComment = true;
-                                existing.WaitingSince = null;
-                                existing.ProcessId = null;
-                                existing.ProcessStartTime = null;
-                                existing.UpdatedAt = DateTimeOffset.UtcNow;
-                                if (issueCommentInfo.IssueCommentId.HasValue)
-                                    TransitionReactionToIssueComment(existing, config, issueCommentInfo.IssueCommentId.Value, GhCliService.ReactionEyes);
-                                else
-                                    TransitionReactionToIssue(existing, config, GhCliService.ReactionEyes);
+                                continue;
                             }
                             else
                             {
@@ -604,6 +529,9 @@ public sealed class ReconciliationEngine
                         existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
                         existing.LastRedispatchWasIssueComment = false;
+                        existing.SeenUnresolvedReviewThreadIds = [];
+                        existing.HasEstablishedUnresolvedReviewThreadBaseline = false;
+                        existing.LastTriggeredFailingChecksHeadSha = null;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.CopilotSessionName = null;
                         existing.HasStarted = false;
@@ -644,6 +572,9 @@ public sealed class ReconciliationEngine
                         existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
                         existing.LastRedispatchWasIssueComment = false;
+                        existing.SeenUnresolvedReviewThreadIds = [];
+                        existing.HasEstablishedUnresolvedReviewThreadBaseline = false;
+                        existing.LastTriggeredFailingChecksHeadSha = null;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.CopilotSessionName = null;
                         existing.HasStarted = false;
@@ -706,12 +637,15 @@ public sealed class ReconciliationEngine
                             {
                                 if (!TryQueueFeedbackRedispatch(existing, prKey, feedbackInfo, config, isIssueComment: false))
                                     continue;
-                            }
-                            else
-                            {
-                                _logger.LogDebug("PR-root session {Key} still waiting for feedback", prKey);
+
+                                continue;
                             }
                         }
+
+                        if (TryQueuePullRequestMonitoringRedispatch(existing, prKey, existing.SubjectNumber, config))
+                            continue;
+
+                        _logger.LogDebug("PR-root session {Key} still waiting for feedback", prKey);
                         continue;
 
                     case SessionStatus.Orphaned when existing.CanRetry:
@@ -741,6 +675,9 @@ public sealed class ReconciliationEngine
                         if (existing.CompletedBySession
                             && string.Equals(existing.PullRequestHeadSha, pullRequest.HeadSha, StringComparison.OrdinalIgnoreCase))
                         {
+                            if (TryQueuePullRequestMonitoringRedispatch(existing, prKey, existing.SubjectNumber, config))
+                                continue;
+
                             _logger.LogDebug("PR-root session {Key} was explicitly completed and head SHA did not change, skipping re-dispatch", prKey);
                             continue;
                         }
@@ -810,6 +747,135 @@ public sealed class ReconciliationEngine
         session.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
+    private bool TryQueuePullRequestMonitoringRedispatch(
+        DispatchSession session,
+        string sessionKey,
+        int prNumber,
+        CopilotdConfig config)
+    {
+        if (TryQueueNewUnresolvedReviewThreadRedispatch(session, sessionKey, prNumber, config))
+            return true;
+
+        return TryQueueFailingChecksRedispatch(session, sessionKey, prNumber, config);
+    }
+
+    private bool TryQueueNewUnresolvedReviewThreadRedispatch(
+        DispatchSession session,
+        string sessionKey,
+        int prNumber,
+        CopilotdConfig config)
+    {
+        var reviewThreads = _ghCli.GetPullRequestReviewThreads(session.Repo, prNumber);
+        if (reviewThreads is null)
+            return false;
+
+        var unresolvedThreads = reviewThreads
+            .Where(thread => !thread.IsResolved)
+            .ToList();
+
+        if (!session.HasEstablishedUnresolvedReviewThreadBaseline)
+        {
+            session.HasEstablishedUnresolvedReviewThreadBaseline = true;
+            if (session.Status is SessionStatus.WaitingForReview or SessionStatus.WaitingForFeedback)
+            {
+                session.SeenUnresolvedReviewThreadIds = unresolvedThreads
+                    .Select(thread => thread.ThreadId)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+
+                if (unresolvedThreads.Count > 0)
+                {
+                    _logger.LogDebug("Initialized unresolved review thread baseline for {Key} on PR #{Pr} with {Count} thread(s)",
+                        sessionKey, prNumber, unresolvedThreads.Count);
+                }
+
+                return false;
+            }
+        }
+
+        var seenThreadIds = new HashSet<string>(session.SeenUnresolvedReviewThreadIds, StringComparer.OrdinalIgnoreCase);
+        var unseenThreads = unresolvedThreads
+            .Where(thread => !seenThreadIds.Contains(thread.ThreadId))
+            .OrderByDescending(thread => thread.LatestCommentCreatedAt ?? DateTimeOffset.MinValue)
+            .ToList();
+
+        if (unseenThreads.Count == 0)
+            return false;
+
+        if (session.RedispatchCount >= config.MaxRedispatches)
+        {
+            session.SeenUnresolvedReviewThreadIds = session.SeenUnresolvedReviewThreadIds
+                .Concat(unseenThreads.Select(thread => thread.ThreadId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+
+            _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                "Ignoring {Count} new unresolved review thread(s) on PR #{Pr}",
+                sessionKey, config.MaxRedispatches, unseenThreads.Count, prNumber);
+            return false;
+        }
+
+        var newestThread = unseenThreads[0];
+        var trusted = IsCommentTrusted(session, newestThread.LatestCommentAuthor, config, out var trustLevel);
+        if (trusted is null)
+        {
+            _logger.LogWarning("Could not evaluate trust for unresolved review thread author {Author} on {Key} (trust_level={TrustLevel}), will retry next cycle",
+                newestThread.LatestCommentAuthor, sessionKey, trustLevel);
+            return false;
+        }
+
+        session.SeenUnresolvedReviewThreadIds = session.SeenUnresolvedReviewThreadIds
+            .Concat(unseenThreads.Select(thread => thread.ThreadId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+
+        if (trusted == false)
+        {
+            _logger.LogInformation("Ignoring {Count} new unresolved review thread(s) from untrusted author {Author} on {Key} (trust_level={TrustLevel})",
+                unseenThreads.Count, newestThread.LatestCommentAuthor, sessionKey, trustLevel);
+            return false;
+        }
+
+        _logger.LogInformation("Detected {Count} new unresolved review thread(s) on PR #{Pr} for {Key}, re-dispatching session (redispatch {N}/{Max})",
+            unseenThreads.Count, prNumber, sessionKey, session.RedispatchCount + 1, config.MaxRedispatches);
+        QueueSessionRedispatch(session, config, isIssueComment: false);
+        return true;
+    }
+
+    private bool TryQueueFailingChecksRedispatch(
+        DispatchSession session,
+        string sessionKey,
+        int prNumber,
+        CopilotdConfig config)
+    {
+        var failingChecks = _ghCli.GetPullRequestFailingChecks(session.Repo, prNumber);
+        if (failingChecks is null
+            || string.Equals(session.LastTriggeredFailingChecksHeadSha, failingChecks.HeadSha, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        session.LastTriggeredFailingChecksHeadSha = failingChecks.HeadSha;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+
+        if (session.RedispatchCount >= config.MaxRedispatches)
+        {
+            _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                "Ignoring failing CI on PR #{Pr} for head {HeadSha}",
+                sessionKey, config.MaxRedispatches, prNumber, failingChecks.HeadSha);
+            return false;
+        }
+
+        _logger.LogInformation("Detected failing CI on PR #{Pr} for {Key} at head {HeadSha}, re-dispatching session (redispatch {N}/{Max}). Failing checks: {Checks}",
+            prNumber, sessionKey, failingChecks.HeadSha, session.RedispatchCount + 1, config.MaxRedispatches,
+            string.Join(", ", failingChecks.FailingChecks));
+        QueueSessionRedispatch(session, config, isIssueComment: false);
+        return true;
+    }
+
     private bool TryQueueFeedbackRedispatch(
         DispatchSession session,
         string sessionKey,
@@ -844,6 +910,17 @@ public sealed class ReconciliationEngine
 
         _logger.LogInformation("New feedback from {Author} detected on {Key}, re-dispatching session (redispatch {N}/{Max})",
             commentInfo.Author, sessionKey, session.RedispatchCount + 1, config.MaxRedispatches);
+        QueueSessionRedispatch(session, config, isIssueComment, commentInfo.IssueCommentId);
+
+        return true;
+    }
+
+    private void QueueSessionRedispatch(
+        DispatchSession session,
+        CopilotdConfig config,
+        bool isIssueComment,
+        long? issueCommentId = null)
+    {
         session.Status = SessionStatus.Pending;
         session.FailureDetail = null;
         session.RedispatchCount++;
@@ -853,12 +930,12 @@ public sealed class ReconciliationEngine
         session.ProcessStartTime = null;
         session.UpdatedAt = DateTimeOffset.UtcNow;
 
-        if (isIssueComment && commentInfo.IssueCommentId.HasValue)
-            TransitionReactionToIssueComment(session, config, commentInfo.IssueCommentId.Value, GhCliService.ReactionEyes);
+        if (isIssueComment && issueCommentId.HasValue)
+            TransitionReactionToIssueComment(session, config, issueCommentId.Value, GhCliService.ReactionEyes);
+        else if (isIssueComment)
+            TransitionReactionToIssue(session, config, GhCliService.ReactionEyes);
         else
             TransitionReactionOnCurrentAnchor(session, config, GhCliService.ReactionEyes);
-
-        return true;
     }
 
     private static void ResetForFreshDispatch(DispatchSession session, bool preserveReviewPullRequest)
@@ -870,6 +947,9 @@ public sealed class ReconciliationEngine
             session.PullRequestNumber = null;
         session.RedispatchCount = 0;
         session.LastRedispatchWasIssueComment = false;
+        session.SeenUnresolvedReviewThreadIds = [];
+        session.HasEstablishedUnresolvedReviewThreadBaseline = false;
+        session.LastTriggeredFailingChecksHeadSha = null;
         session.CopilotSessionId = Guid.NewGuid().ToString();
         session.CopilotSessionName = null;
         session.HasStarted = false;
@@ -887,22 +967,28 @@ public sealed class ReconciliationEngine
     {
         var runningCount = state.Sessions.Values.Count(s => s.Status == SessionStatus.Running);
         var availableSlots = Math.Max(0, config.MaxInstances - runningCount);
+        var nowUtc = DateTimeOffset.UtcNow;
 
         var pending = state.Sessions.Values
             .Where(s => s.Status == SessionStatus.Pending)
             .Where(s => !IsInBackoffWindow(s))
+            .ToList();
+
+        var dispatchablePending = pending
+            .Where(s => IsWithinDispatchWindow(s, config, nowUtc))
             .OrderBy(s => s.CreatedAt)
             .ToList();
 
-        if (pending.Count > 0 && availableSlots == 0)
+        if (dispatchablePending.Count > 0 && availableSlots == 0)
         {
             _logger.LogInformation("{Count} session(s) queued but max instances ({Max}) reached",
-                pending.Count, config.MaxInstances);
+                dispatchablePending.Count, config.MaxInstances);
             return;
         }
 
-        var toDispatch = pending.Take(availableSlots).ToList();
-        var skippedByLimit = pending.Count - toDispatch.Count;
+        var toDispatch = dispatchablePending.Take(availableSlots).ToList();
+        var skippedByLimit = dispatchablePending.Count - toDispatch.Count;
+        var skippedBySchedule = pending.Count - dispatchablePending.Count;
 
         foreach (var session in toDispatch)
         {
@@ -994,6 +1080,11 @@ public sealed class ReconciliationEngine
         {
             _logger.LogInformation("{Count} session(s) still queued, waiting for instance slots", skippedByLimit);
         }
+
+        if (skippedBySchedule > 0)
+        {
+            _logger.LogInformation("{Count} session(s) remain queued until their dispatch window opens", skippedBySchedule);
+        }
     }
 
     /// <summary>
@@ -1069,6 +1160,82 @@ public sealed class ReconciliationEngine
         }
     }
 
+    private bool IsWithinDispatchWindow(DispatchSession session, CopilotdConfig config, DateTimeOffset nowUtc)
+    {
+        var ruleOptions = GetDispatchRuleOptions(config, session);
+        if (ruleOptions is null
+            || (!ruleOptions.ActiveStartHour.HasValue && !ruleOptions.ActiveEndHour.HasValue))
+        {
+            return true;
+        }
+
+        if (!ruleOptions.ActiveStartHour.HasValue
+            || !ruleOptions.ActiveEndHour.HasValue
+            || string.IsNullOrWhiteSpace(ruleOptions.ActiveTimeZone))
+        {
+            _logger.LogWarning("Ignoring incomplete active dispatch window on rule '{Rule}' for {Key}", session.RuleName, session.SubjectKey);
+            return true;
+        }
+
+        if (ruleOptions.ActiveStartHour is < 0 or > 23
+            || ruleOptions.ActiveEndHour is < 0 or > 23)
+        {
+            _logger.LogWarning("Ignoring invalid active dispatch window hours on rule '{Rule}' for {Key}: start={Start}, end={End}",
+                session.RuleName, session.SubjectKey, ruleOptions.ActiveStartHour, ruleOptions.ActiveEndHour);
+            return true;
+        }
+
+        if (!TryResolveTimeZone(ruleOptions.ActiveTimeZone, out var timeZone))
+        {
+            _logger.LogWarning("Ignoring active dispatch window on rule '{Rule}' for {Key}: unknown time zone '{TimeZone}'",
+                session.RuleName, session.SubjectKey, ruleOptions.ActiveTimeZone);
+            return true;
+        }
+
+        var localNow = TimeZoneInfo.ConvertTime(nowUtc, timeZone);
+        var currentHour = localNow.Hour;
+        var startHour = ruleOptions.ActiveStartHour.Value;
+        var endHour = ruleOptions.ActiveEndHour.Value;
+
+        if (startHour == endHour)
+            return true;
+
+        return startHour < endHour
+            ? currentHour >= startHour && currentHour < endHour
+            : currentHour >= startHour || currentHour < endHour;
+    }
+
+    private static bool TryResolveTimeZone(string timeZoneId, out TimeZoneInfo timeZone)
+    {
+        try
+        {
+            timeZone = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
+            return true;
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            if (OperatingSystem.IsWindows()
+                && TimeZoneInfo.TryConvertIanaIdToWindowsId(timeZoneId, out var windowsId))
+            {
+                timeZone = TimeZoneInfo.FindSystemTimeZoneById(windowsId);
+                return true;
+            }
+
+            if (!OperatingSystem.IsWindows()
+                && TimeZoneInfo.TryConvertWindowsIdToIanaId(timeZoneId, out var ianaId))
+            {
+                timeZone = TimeZoneInfo.FindSystemTimeZoneById(ianaId);
+                return true;
+            }
+        }
+        catch (InvalidTimeZoneException)
+        {
+        }
+
+        timeZone = TimeZoneInfo.Utc;
+        return false;
+    }
+
     private static void MarkSessionFailed(DispatchSession session, string detail)
     {
         session.Status = SessionStatus.Failed;
@@ -1112,14 +1279,17 @@ public sealed class ReconciliationEngine
     /// </summary>
     private static bool AreReactionsEnabled(CopilotdConfig config, DispatchSession session)
     {
-        var ruleOptions = session.SubjectKind == DispatchSubjectKind.PullRequest
-            ? (DispatchRuleOptions?)config.PullRequestRules.GetValueOrDefault(session.RuleName)
-            : config.IssueRules.GetValueOrDefault(session.RuleName);
+        var ruleOptions = GetDispatchRuleOptions(config, session);
         if (ruleOptions?.EnableReactions is { } enableReactions)
             return enableReactions;
 
         return config.EnableReactions;
     }
+
+    private static DispatchRuleOptions? GetDispatchRuleOptions(CopilotdConfig config, DispatchSession session)
+        => session.SubjectKind == DispatchSubjectKind.PullRequest
+            ? config.PullRequestRules.GetValueOrDefault(session.RuleName)
+            : config.IssueRules.GetValueOrDefault(session.RuleName);
 
     /// <summary>
     /// Transitions the lifecycle reaction while keeping the current anchor.

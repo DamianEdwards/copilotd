@@ -726,9 +726,11 @@ public sealed partial class ProcessManager
 
             Important:
             - You are on the same branch that was used to create the PR. Your changes will be pushed to the existing PR.
+            - Start by checking the PR's unresolved review threads and the current CI/check status for the PR head SHA.
             - Address each review comment by making the requested changes.
             - If a review comment includes a suggested change (```suggestion block), apply it directly to the relevant file.
             - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api graphql`.
+            - If the PR branch has drifted from its base branch or needs conflict resolution, use this isolated worktree to fetch, rebase, and resolve conflicts before pushing.
             - After addressing all review feedback, push your changes to update the PR.
             - Then run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(issue.id)` to continue monitoring for further review feedback.
             - If the changes are complete and no more reviews are expected, run `$(copilotd.command) session complete $(issue.repo)#$(issue.id)` instead.
@@ -761,8 +763,11 @@ public sealed partial class ProcessManager
             - {{branchInstruction}}
             - Focus only on changes relevant to this pull request.
             - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api`.
+            - Start by checking unresolved review threads and the current CI/check status for the PR head SHA.
+            - If the branch needs rebasing or conflict resolution against the base branch, do that work in this isolated worktree before pushing.
             - If you need clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
-            - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
+            - When you have handled the current actionable work and want copilotd to keep monitoring this PR, run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(pr.id)`.
+            - Only run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)` if the PR is closed, merged, or should stop being monitored.
             """;
     }
 
@@ -776,15 +781,17 @@ public sealed partial class ProcessManager
         };
 
         return $$"""
-            You are resuming work on pull request #$(pr.id) in the $(issue.repo) repository because new PR feedback or commits were detected.
-            Read the new PR comments, review feedback, and current diff carefully.
+            You are resuming work on pull request #$(pr.id) in the $(issue.repo) repository because new PR feedback, unresolved review threads, failing CI, or new commits were detected.
+            Read the new PR comments, review feedback, current CI/check status, and current diff carefully.
 
             Important:
             - {{branchInstruction}}
-            - Focus on the new PR feedback or new commits since the previous dispatch.
+            - Focus on the new PR feedback, failing CI, unresolved review threads, or new commits since the previous dispatch.
             - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api`.
+            - If the branch needs rebasing or conflict resolution against the base branch, do that work in this isolated worktree before pushing.
             - If you need more clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
-            - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
+            - When you have handled the current actionable work and want copilotd to keep monitoring this PR, run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(pr.id)`.
+            - Only run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)` if the PR is closed, merged, or should stop being monitored.
             """;
     }
 

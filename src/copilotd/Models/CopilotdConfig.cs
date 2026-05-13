@@ -412,6 +412,24 @@ public abstract class DispatchRuleOptions
     /// to the global <see cref="CopilotdConfig.EnableReactions"/> setting.
     /// </summary>
     public bool? EnableReactions { get; set; }
+
+    /// <summary>
+    /// Optional local-hour start for this rule's dispatch window (0-23).
+    /// When both start and end are set, pending sessions only dispatch inside the window.
+    /// </summary>
+    public int? ActiveStartHour { get; set; }
+
+    /// <summary>
+    /// Optional local-hour end for this rule's dispatch window (0-23).
+    /// Windows that cross midnight are supported.
+    /// </summary>
+    public int? ActiveEndHour { get; set; }
+
+    /// <summary>
+    /// Time zone used with <see cref="ActiveStartHour"/> and <see cref="ActiveEndHour"/>,
+    /// for example <c>America/Chicago</c>.
+    /// </summary>
+    public string? ActiveTimeZone { get; set; }
 }
 
 /// <summary>

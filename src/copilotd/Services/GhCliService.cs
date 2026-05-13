@@ -603,6 +603,20 @@ public sealed class GhCliService
     public sealed record NewCommentInfo(string Author, DateTimeOffset CreatedAt, long? IssueCommentId = null);
 
     /// <summary>
+    /// Snapshot of a PR review thread used to detect newly unresolved threads.
+    /// </summary>
+    public sealed record PullRequestReviewThreadInfo(
+        string ThreadId,
+        bool IsResolved,
+        string LatestCommentAuthor,
+        DateTimeOffset? LatestCommentCreatedAt);
+
+    /// <summary>
+    /// Summary of failing CI checks for the current PR head SHA.
+    /// </summary>
+    public sealed record PullRequestFailingChecksInfo(string HeadSha, IReadOnlyList<string> FailingChecks);
+
+    /// <summary>
     /// Checks whether there are new comments on an issue since the given timestamp,
     /// excluding comments posted by copilotd itself (identified by the hidden copilotd marker).
     /// </summary>
@@ -929,6 +943,263 @@ public sealed class GhCliService
     }
 
     /// <summary>
+    /// Gets the current review thread snapshot for a pull request.
+    /// Returns null when the snapshot cannot be queried.
+    /// </summary>
+    public List<PullRequestReviewThreadInfo>? GetPullRequestReviewThreads(string repo, int prNumber)
+    {
+        var repoParts = repo.Split('/', 2);
+        if (repoParts.Length != 2)
+            return null;
+
+        var request = new JsonObject
+        {
+            ["query"] = """
+                query($owner: String!, $name: String!, $number: Int!) {
+                  repository(owner: $owner, name: $name) {
+                    pullRequest(number: $number) {
+                      reviewThreads(first: 100) {
+                        nodes {
+                          id
+                          isResolved
+                          comments(last: 1) {
+                            nodes {
+                              createdAt
+                              author {
+                                login
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """,
+            ["variables"] = new JsonObject
+            {
+                ["owner"] = repoParts[0],
+                ["name"] = repoParts[1],
+                ["number"] = prNumber,
+            },
+        };
+
+        var (exitCode, output) = RunGhWithStdin("api graphql --input -", request.ToJsonString());
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query PR review threads on {Repo}!{Pr}: {Output}", repo, prNumber, output);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.TryGetProperty("errors", out var errors))
+            {
+                _logger.LogWarning("GraphQL errors querying PR review threads on {Repo}!{Pr}: {Errors}", repo, prNumber, errors.ToString());
+                return null;
+            }
+
+            if (!doc.RootElement.TryGetProperty("data", out var data)
+                || !data.TryGetProperty("repository", out var repository)
+                || !repository.TryGetProperty("pullRequest", out var pullRequest)
+                || !pullRequest.TryGetProperty("reviewThreads", out var reviewThreads)
+                || !reviewThreads.TryGetProperty("nodes", out var threadNodes))
+            {
+                return [];
+            }
+
+            var result = new List<PullRequestReviewThreadInfo>();
+            foreach (var thread in threadNodes.EnumerateArray())
+            {
+                if (!thread.TryGetProperty("id", out var idEl))
+                    continue;
+
+                var threadId = idEl.GetString();
+                if (string.IsNullOrWhiteSpace(threadId))
+                    continue;
+
+                var isResolved = thread.TryGetProperty("isResolved", out var resolvedEl)
+                    && resolvedEl.ValueKind is JsonValueKind.True or JsonValueKind.False
+                    && resolvedEl.GetBoolean();
+
+                var latestAuthor = "unknown";
+                DateTimeOffset? latestCreatedAt = null;
+                if (thread.TryGetProperty("comments", out var comments)
+                    && comments.TryGetProperty("nodes", out var commentNodes))
+                {
+                    foreach (var comment in commentNodes.EnumerateArray())
+                    {
+                        if (comment.TryGetProperty("author", out var author)
+                            && author.TryGetProperty("login", out var login))
+                        {
+                            latestAuthor = login.GetString() ?? "unknown";
+                        }
+
+                        if (comment.TryGetProperty("createdAt", out var createdAtEl)
+                            && DateTimeOffset.TryParse(createdAtEl.GetString(), out var createdAt))
+                        {
+                            latestCreatedAt = createdAt;
+                        }
+                    }
+                }
+
+                result.Add(new PullRequestReviewThreadInfo(threadId, isResolved, latestAuthor, latestCreatedAt));
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse PR review threads JSON for {Repo}!{Pr}", repo, prNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gets the current failing CI checks for the pull request's head SHA.
+    /// Returns null if there are no failing checks or the status cannot be queried.
+    /// </summary>
+    public PullRequestFailingChecksInfo? GetPullRequestFailingChecks(string repo, int prNumber)
+    {
+        var repoParts = repo.Split('/', 2);
+        if (repoParts.Length != 2)
+            return null;
+
+        var request = new JsonObject
+        {
+            ["query"] = """
+                query($owner: String!, $name: String!, $number: Int!) {
+                  repository(owner: $owner, name: $name) {
+                    pullRequest(number: $number) {
+                      headRefOid
+                      commits(last: 1) {
+                        nodes {
+                          commit {
+                            statusCheckRollup {
+                              contexts(first: 100) {
+                                nodes {
+                                  __typename
+                                  ... on CheckRun {
+                                    name
+                                    conclusion
+                                    status
+                                  }
+                                  ... on StatusContext {
+                                    context
+                                    state
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """,
+            ["variables"] = new JsonObject
+            {
+                ["owner"] = repoParts[0],
+                ["name"] = repoParts[1],
+                ["number"] = prNumber,
+            },
+        };
+
+        var (exitCode, output) = RunGhWithStdin("api graphql --input -", request.ToJsonString());
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query PR checks on {Repo}!{Pr}: {Output}", repo, prNumber, output);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.TryGetProperty("errors", out var errors))
+            {
+                _logger.LogWarning("GraphQL errors querying PR checks on {Repo}!{Pr}: {Errors}", repo, prNumber, errors.ToString());
+                return null;
+            }
+
+            if (!doc.RootElement.TryGetProperty("data", out var data)
+                || !data.TryGetProperty("repository", out var repository)
+                || !repository.TryGetProperty("pullRequest", out var pullRequest))
+            {
+                return null;
+            }
+
+            var headSha = pullRequest.TryGetProperty("headRefOid", out var headRefOidEl)
+                ? headRefOidEl.GetString()
+                : null;
+
+            if (string.IsNullOrWhiteSpace(headSha)
+                || !pullRequest.TryGetProperty("commits", out var commits)
+                || !commits.TryGetProperty("nodes", out var commitNodes))
+            {
+                return null;
+            }
+
+            var failingChecks = new List<string>();
+            foreach (var commitNode in commitNodes.EnumerateArray())
+            {
+                if (!commitNode.TryGetProperty("commit", out var commit)
+                    || !commit.TryGetProperty("statusCheckRollup", out var rollup)
+                    || rollup.ValueKind == JsonValueKind.Null
+                    || !rollup.TryGetProperty("contexts", out var contexts)
+                    || !contexts.TryGetProperty("nodes", out var contextNodes))
+                {
+                    continue;
+                }
+
+                foreach (var contextNode in contextNodes.EnumerateArray())
+                {
+                    if (!contextNode.TryGetProperty("__typename", out var typeEl))
+                        continue;
+
+                    var typeName = typeEl.GetString();
+                    if (typeName == "CheckRun")
+                    {
+                        var conclusion = contextNode.TryGetProperty("conclusion", out var conclusionEl)
+                            ? conclusionEl.GetString()
+                            : null;
+                        if (conclusion is null || !IsFailingCheckRunConclusion(conclusion))
+                            continue;
+
+                        var name = contextNode.TryGetProperty("name", out var nameEl)
+                            ? nameEl.GetString()
+                            : "check run";
+                        failingChecks.Add(name ?? "check run");
+                    }
+                    else if (typeName == "StatusContext")
+                    {
+                        var state = contextNode.TryGetProperty("state", out var stateEl)
+                            ? stateEl.GetString()
+                            : null;
+                        if (state is null || !IsFailingStatusContextState(state))
+                            continue;
+
+                        var name = contextNode.TryGetProperty("context", out var contextEl)
+                            ? contextEl.GetString()
+                            : "status";
+                        failingChecks.Add(name ?? "status");
+                    }
+                }
+            }
+
+            return failingChecks.Count == 0
+                ? null
+                : new PullRequestFailingChecksInfo(headSha!, failingChecks);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse PR checks JSON for {Repo}!{Pr}", repo, prNumber);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Gets the current state of a pull request (e.g., OPEN, CLOSED, MERGED).
     /// Returns null if the PR state cannot be determined.
     /// </summary>
@@ -994,6 +1265,12 @@ public sealed class GhCliService
         => body is not null
            && (body.Contains(CommentMarkerPrefix, StringComparison.Ordinal)
                || body.Contains(LegacyCommentMarker, StringComparison.Ordinal));
+
+    private static bool IsFailingCheckRunConclusion(string conclusion)
+        => conclusion is "FAILURE" or "TIMED_OUT" or "ACTION_REQUIRED" or "CANCELLED" or "STARTUP_FAILURE";
+
+    private static bool IsFailingStatusContextState(string state)
+        => state is "ERROR" or "FAILURE";
 
     // Reaction content constants for GitHub issue reactions
     internal const string ReactionEyes = "eyes";
