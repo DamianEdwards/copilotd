@@ -66,6 +66,7 @@ internal static class NativeInterop
 
     public const uint CREATE_NEW_CONSOLE = 0x00000010;
     public const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
+    public const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     public const int STARTF_USESHOWWINDOW = 0x00000001;
     public const short SW_HIDE = 0;
     public const uint CTRL_C_EVENT = 0;

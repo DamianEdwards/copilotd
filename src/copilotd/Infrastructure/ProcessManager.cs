@@ -1,6 +1,8 @@
+using System.Collections;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text;
 using Copilotd.Commands;
 using Copilotd.Models;
 using Copilotd.Services;
@@ -22,6 +24,14 @@ public sealed partial class ProcessManager
     private static readonly TimeSpan WindowsCopilotChildDiscoveryPollInterval = TimeSpan.FromMilliseconds(100);
     private static readonly NuGetVersion MinimumNamedSessionVersion = new(1, 0, 35);
     private const string HookConfigRelativePath = ".github/hooks/copilotd.hooks.json";
+    private static readonly string BrowserLaunchSuppressionCommand =
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cmd.exe /d /c rem" : "true";
+    private static readonly KeyValuePair<string, string>[] BrowserLaunchSuppressionEnvironment =
+    [
+        new("BROWSER", BrowserLaunchSuppressionCommand),
+        new("GH_BROWSER", BrowserLaunchSuppressionCommand),
+        new("GIT_BROWSER", BrowserLaunchSuppressionCommand),
+    ];
 
     private readonly StateStore _stateStore;
     private readonly RepoPathResolver _repoResolver;
@@ -100,24 +110,32 @@ public sealed partial class ProcessManager
                 si.wShowWindow = SW_HIDE;
 
                 var cmdLine = $"copilot {args}";
-                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
+                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
+                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(BrowserLaunchSuppressionEnvironment);
 
-                if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
-                    flags, IntPtr.Zero, repoPath, ref si, out var pi))
+                try
                 {
-                    _logger.LogError("CreateProcessW failed for {IssueKey} (error: {Error})",
-                        session.IssueKey, Marshal.GetLastWin32Error());
-                    return null;
+                    if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
+                        flags, environmentBlock, repoPath, ref si, out var pi))
+                    {
+                        _logger.LogError("CreateProcessW failed for {IssueKey} (error: {Error})",
+                            session.IssueKey, Marshal.GetLastWin32Error());
+                        return null;
+                    }
+
+                    session.ProcessId = pi.dwProcessId;
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    AssignTrackedWindowsCopilotProcess(session.IssueKey, pi.dwProcessId, tracked =>
+                    {
+                        session.ProcessId = tracked.ProcessId;
+                        session.ProcessStartTime = tracked.ProcessStartTime;
+                    });
                 }
-
-                session.ProcessId = pi.dwProcessId;
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                AssignTrackedWindowsCopilotProcess(session.IssueKey, pi.dwProcessId, tracked =>
+                finally
                 {
-                    session.ProcessId = tracked.ProcessId;
-                    session.ProcessStartTime = tracked.ProcessStartTime;
-                });
+                    Marshal.FreeHGlobal(environmentBlock);
+                }
 
                 process = null; // Already tracked via PID
             }
@@ -134,6 +152,7 @@ public sealed partial class ProcessManager
                     RedirectStandardInput = false,
                     CreateNoWindow = true,
                 };
+                ApplyBrowserLaunchSuppressionEnvironment(psi);
 
                 process = Process.Start(psi);
                 if (process is null)
@@ -709,6 +728,7 @@ public sealed partial class ProcessManager
             - You are on the same branch that was used to create the PR. Your changes will be pushed to the existing PR.
             - Address each review comment by making the requested changes.
             - If a review comment includes a suggested change (```suggestion block), apply it directly to the relevant file.
+            - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api graphql`.
             - After addressing all review feedback, push your changes to update the PR.
             - Then run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(issue.id)` to continue monitoring for further review feedback.
             - If the changes are complete and no more reviews are expected, run `$(copilotd.command) session complete $(issue.repo)#$(issue.id)` instead.
@@ -740,6 +760,7 @@ public sealed partial class ProcessManager
             Important:
             - {{branchInstruction}}
             - Focus only on changes relevant to this pull request.
+            - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api`.
             - If you need clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
             - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
             """;
@@ -761,6 +782,7 @@ public sealed partial class ProcessManager
             Important:
             - {{branchInstruction}}
             - Focus on the new PR feedback or new commits since the previous dispatch.
+            - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api`.
             - If you need more clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
             - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
             """;
@@ -1010,6 +1032,36 @@ public sealed partial class ProcessManager
     private static string EscapeArg(string value)
     {
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+
+    private static void ApplyBrowserLaunchSuppressionEnvironment(ProcessStartInfo psi)
+    {
+        foreach (var (name, value) in BrowserLaunchSuppressionEnvironment)
+            psi.Environment[name] = value;
+    }
+
+    private static IntPtr BuildWindowsEnvironmentBlockWithOverrides(IEnumerable<KeyValuePair<string, string>> overrides)
+    {
+        var environment = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            var key = entry.Key?.ToString();
+            if (string.IsNullOrWhiteSpace(key))
+                continue;
+
+            environment[key] = entry.Value?.ToString() ?? string.Empty;
+        }
+
+        foreach (var (name, value) in overrides)
+            environment[name] = value;
+
+        var builder = new StringBuilder();
+        foreach (var (name, value) in environment)
+            builder.Append(name).Append('=').Append(value).Append('\0');
+
+        builder.Append('\0');
+        return Marshal.StringToHGlobalUni(builder.ToString());
     }
 
     private static DateTimeOffset? GetProcessStartTime(Process process)

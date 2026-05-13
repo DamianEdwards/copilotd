@@ -17,6 +17,7 @@ Available for Windows, macOS, and Linux.
 - **Issue watching** — polls GitHub repos for issues matching configurable rules (assigned user, labels, milestone, issue type)
 - **PR watching** — opt-in pull request rules can dispatch review, validation, or follow-up sessions using PR metadata (labels, assignee, base/head branch, draft state, review decision)
 - **Automatic dispatch** — launches `copilot --remote` sessions with templated prompts derived from issue or PR metadata
+- **Terminal-safe automation** — dispatched work sessions suppress browser launch environment variables so unattended agents stay in terminal/API workflows instead of popping open web pages
 - **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, extra prompts, repo assignments)
 - **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, PR review monitoring, and explicit completion signaling
 - **PR review feedback** — sessions that create PRs can wait for review comments and automatically re-dispatch to address feedback
