@@ -241,7 +241,7 @@ public static class RulesCommand
         var labelOption = new Option<string[]>("--label") { Description = "Label condition (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
         var milestoneOption = new Option<string?>("--milestone") { Description = "Milestone condition" };
         var typeOption = new Option<string?>("--type") { Description = "Issue type condition" };
-        var yoloOption = new Option<bool>("--yolo") { Description = "Pass --yolo to copilot (implies --allow-all-tools and --allow-all-urls)" };
+        var yoloOption = new Option<bool>("--yolo") { Description = "Pass --yolo to copilot (implies --allow-all-tools, --allow-all-paths, and --allow-all-urls)" };
         var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Pass --allow-all-tools to copilot (default: true)" };
         var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Pass --allow-all-urls to copilot (default: false)" };
         var promptOption = new Option<string?>("--prompt") { Description = "Extra prompt for this rule" };

@@ -370,7 +370,7 @@ public abstract class DispatchRuleOptions
     /// <summary>Repositories this rule applies to (org/repo format).</summary>
     public List<string> Repos { get; set; } = [];
 
-    /// <summary>Whether to pass --yolo to copilot, which implies --allow-all-tools and --allow-all-urls.</summary>
+    /// <summary>Whether to pass --yolo to copilot, which implies --allow-all-tools, --allow-all-paths, and --allow-all-urls.</summary>
     public bool Yolo { get; set; }
 
     /// <summary>Whether to pass --allow-all-tools to copilot. Defaults to true. Implied by Yolo.</summary>

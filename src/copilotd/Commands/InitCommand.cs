@@ -233,7 +233,7 @@ public static class InitCommand
                     AnsiConsole.WriteLine();
 
                     // Yolo / tool permissions
-                    AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools and --allow-all-urls).[/]");
+                    AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools, --allow-all-paths, and --allow-all-urls).[/]");
                     var existingYolo = existingIssueRule?.Yolo ?? false;
                     var yolo = AnsiConsole.Confirm("Enable yolo mode?", existingYolo);
                     AnsiConsole.MarkupLine($"  Yolo mode: [blue]{(yolo ? "yes" : "no")}[/]");
@@ -410,7 +410,7 @@ public static class InitCommand
                     AnsiConsole.MarkupLine($"  PR branch strategy: [blue]{Markup.Escape(branchStrategyChoice)}[/]");
                     AnsiConsole.WriteLine();
 
-                    AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools and --allow-all-urls).[/]");
+                    AnsiConsole.MarkupLine("[grey]Yolo mode skips all confirmation prompts (implies --allow-all-tools, --allow-all-paths, and --allow-all-urls).[/]");
                     var existingPrYolo = existingPullRequestRule?.Yolo ?? false;
                     var prYolo = AnsiConsole.Confirm("Enable yolo mode for PR sessions?", existingPrYolo);
                     AnsiConsole.MarkupLine($"  Yolo mode: [blue]{(prYolo ? "yes" : "no")}[/]");

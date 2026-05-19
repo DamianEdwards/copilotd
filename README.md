@@ -146,7 +146,7 @@ File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Ea
 
 ### Rules options
 
-Issue rules support conditions (`--assignee`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). Pull request rules are opt-in with `--kind pr` and support PR-specific conditions (`--base`, `--head`, `--head-repo`, `--draft`, `--review-decision`) plus `--branch-strategy`. All conditions are logical AND. `copilotd init` asks whether to create a default issue rule, a default PR rule, or both.
+Issue rules support conditions (`--assignee`, `--label`, `--milestone`, `--type`) and launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, `--prompt`, `--custom-prompt`, `--custom-prompt-mode`, `--repo`). `--yolo` is Copilot CLI's full auto-approval mode and implies all tool, path, and URL permissions. Pull request rules are opt-in with `--kind pr` and support PR-specific conditions (`--base`, `--head`, `--head-repo`, `--draft`, `--review-decision`) plus `--branch-strategy`. All conditions are logical AND. `copilotd init` asks whether to create a default issue rule, a default PR rule, or both.
 
 Aliases: `rule` for `rules`, `create`/`new` for `add`, and `edit` for `update`.
 
@@ -375,8 +375,8 @@ sessions, and more — all via natural language.
 **How it works:**
 
 - The control session is launched automatically on `copilotd run` startup (when `enable_control_session` is `true`)
-- It runs in the context of a clone of the copilotd repo at `<repo_home>/DamianEdwards/copilotd` (cloned automatically if not already present)
-- Tool access is restricted to `copilotd`, `gh`, and `git` commands only — no general shell access
+- It runs from copilotd's own control-session folder under the configured copilotd home directory
+- Shell access is restricted to `copilotd`, `gh`, and `git` commands only — no general shell access
 - If the control session process dies, the daemon automatically relaunches it on the next poll cycle
 - It does not count against the `max_instances` limit
 - It is tracked separately from dispatch sessions and shown in the `copilotd status` output, including its GitHub remote session URL
