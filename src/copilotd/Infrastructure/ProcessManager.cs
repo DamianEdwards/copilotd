@@ -1003,6 +1003,12 @@ public sealed partial class ProcessManager
                 args.Add("--allow-all-urls");
         }
 
+        if (rule?.Autopilot == true)
+            args.Add("--autopilot");
+
+        if (rule?.Plan == true)
+            args.Add("--plan");
+
         // Always add the repo directory as an allowed path
         args.Add("--add-dir");
         args.Add($"\"{EscapeArg(repoPath)}\"");
