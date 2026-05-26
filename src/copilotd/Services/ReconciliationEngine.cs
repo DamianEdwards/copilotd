@@ -161,7 +161,8 @@ public sealed class ReconciliationEngine
                     break;
 
                 case ProcessLivenessResult.Dead:
-                    _logger.LogInformation("Session {Key} PID {Pid} is dead, marking orphaned", key, session.ProcessId);
+                    var hookCtx = session.LastHookEvent is { } he ? $" (lastHook={he}/{session.LastHookDetail})" : "";
+                    _logger.LogInformation("Session {Key} PID {Pid} is dead, marking orphaned{Ctx}", key, session.ProcessId, hookCtx);
                     session.Status = SessionStatus.Orphaned;
                     session.FailureDetail = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -547,7 +548,9 @@ public sealed class ReconciliationEngine
                     case SessionStatus.Failed:
                         if (!existing.CanRetry)
                         {
-                            _logger.LogWarning("Session {Key} exceeded max retries, marking failed", issueKey);
+                            _logger.LogWarning(
+                                "Session {Key} exceeded max retries, marking failed (lastHook={Hook}, reason={Detail})",
+                                issueKey, existing.LastHookEvent, existing.LastHookDetail);
                             existing.Status = SessionStatus.Failed;
                             existing.FailureDetail ??= $"The session exceeded the maximum retry count ({DispatchSession.MaxRetries}). " +
                                 $"Resolve the underlying issue, then run 'copilotd session reset {issueKey}'.";

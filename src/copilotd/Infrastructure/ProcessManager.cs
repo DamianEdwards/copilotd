@@ -95,6 +95,13 @@ public sealed partial class ProcessManager
             session.CopilotSessionName ?? session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
 
+        if (config.EnvVars is not null && config.EnvVars.Count > 0)
+        {
+            var maskedKeys = string.Join(", ", config.EnvVars.Keys.Select(k => $"{k}=***"));
+            _logger.LogInformation("Injecting {Count} env var(s) into copilot process: {Vars}",
+                config.EnvVars.Count, maskedKeys);
+        }
+
         try
         {
             Process? process;
@@ -209,6 +216,18 @@ public sealed partial class ProcessManager
             }
 
             var alive = !process.HasExited;
+            if (!alive)
+            {
+                var exitCode = GetProcessExitCodeSafe(process);
+                var exitTime = process.ExitTime;
+                var uptime = session.ProcessStartTime is { } start
+                    ? (exitTime - start).TotalSeconds
+                    : -1;
+                _logger.LogInformation(
+                    "Session {Key} PID {Pid} exited (code={ExitCode}, exitTime={ExitTime:F}, uptime={Uptime:F0}s)",
+                    session.IssueKey, pid, exitCode, exitTime, uptime);
+            }
+
             process.Dispose();
             return alive ? ProcessLivenessResult.Alive : ProcessLivenessResult.Dead;
         }
@@ -222,6 +241,12 @@ public sealed partial class ProcessManager
             _logger.LogDebug(ex, "Error checking process {Pid}", pid);
             return ProcessLivenessResult.Dead;
         }
+    }
+
+    static int GetProcessExitCodeSafe(Process p)
+    {
+        try { return p.HasExited ? p.ExitCode : -1; }
+        catch { return -1; }
     }
 
     /// <summary>
@@ -548,6 +573,13 @@ public sealed partial class ProcessManager
         var args = BuildControlSessionArguments(session, prompt, config.DefaultModel, _runtimeContext);
         _logger.LogInformation("Launching control session {SessionName}", session.CopilotSessionName);
         _logger.LogDebug("copilot {Args}", args);
+
+        if (config.EnvVars is not null && config.EnvVars.Count > 0)
+        {
+            var maskedKeys = string.Join(", ", config.EnvVars.Keys.Select(k => $"{k}=***"));
+            _logger.LogInformation("Injecting {Count} env var(s) into control session: {Vars}",
+                config.EnvVars.Count, maskedKeys);
+        }
 
         try
         {
