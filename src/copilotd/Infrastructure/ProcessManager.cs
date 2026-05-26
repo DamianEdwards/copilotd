@@ -233,7 +233,13 @@ public sealed partial class ProcessManager
         }
         catch (ArgumentException)
         {
-            // Process not found
+            // Process not found (already gone from process table)
+            var uptime = session.ProcessStartTime is { } start
+                ? (DateTimeOffset.UtcNow - start).TotalSeconds
+                : -1;
+            _logger.LogInformation(
+                "Session {Key} PID {Pid} not found in process table (uptime={Uptime:F0}s)",
+                session.IssueKey, pid, uptime);
             return ProcessLivenessResult.Dead;
         }
         catch (Exception ex)
