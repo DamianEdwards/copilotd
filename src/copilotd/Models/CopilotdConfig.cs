@@ -98,6 +98,13 @@ public sealed class CopilotdConfig
     /// </summary>
     public Dictionary<string, PullRequestDispatchRule> PullRequestRules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Custom environment variables to pass to copilot CLI processes launched by copilotd.
+    /// The environment starts as a copy of the current process environment, then these values
+    /// are merged on top. Example: { "COPILIT_MODEL": "local", "COPILIT_API_URL": "http://localhost:8080" }.
+    /// </summary>
+    public Dictionary<string, string>? EnvVars { get; set; }
+
     public const string DefaultRuleName = "Default";
 
     /// <summary>

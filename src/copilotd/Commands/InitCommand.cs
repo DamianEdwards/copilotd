@@ -612,6 +612,7 @@ public static class InitCommand
                 AddNextStep(nextStepsTable, "copilotd rules add MyPrRule --kind pr --label review", "Create a new PR dispatch rule");
                 AddNextStep(nextStepsTable, "copilotd config --set max_instances=5", "Change concurrency limit");
                 AddNextStep(nextStepsTable, "copilotd config --set default_model=claude-sonnet-4", "Set the default model");
+                AddNextStep(nextStepsTable, "copilotd config --set env_vars=COPILIT_MODEL=local,COPILIT_API_URL=http://localhost:8080", "Set custom environment variables for copilot processes");
                 AddNextStep(nextStepsTable, "copilotd status", "Check daemon health and sessions");
                 AnsiConsole.Write(nextStepsTable);
                 AnsiConsole.WriteLine();

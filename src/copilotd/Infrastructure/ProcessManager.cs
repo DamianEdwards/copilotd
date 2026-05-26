@@ -111,7 +111,8 @@ public sealed partial class ProcessManager
 
                 var cmdLine = $"copilot {args}";
                 var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
-                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(BrowserLaunchSuppressionEnvironment);
+                var allOverrides = MergeEnvironmentOverrides(BrowserLaunchSuppressionEnvironment, config.EnvVars);
+                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(allOverrides);
 
                 try
                 {
@@ -152,7 +153,7 @@ public sealed partial class ProcessManager
                     RedirectStandardInput = false,
                     CreateNoWindow = true,
                 };
-                ApplyBrowserLaunchSuppressionEnvironment(psi);
+                ApplyEnvironmentOverrides(psi, config.EnvVars);
 
                 process = Process.Start(psi);
                 if (process is null)
@@ -557,24 +558,32 @@ public sealed partial class ProcessManager
                 si.wShowWindow = SW_HIDE;
 
                 var cmdLine = $"copilot {args}";
-                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
+                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
+                var controlEnvironmentBlock = BuildWindowsEnvironmentBlockWithOverrides(config.EnvVars?.Keys.Select(k => new KeyValuePair<string, string>(k, config.EnvVars[k])) ?? Enumerable.Empty<KeyValuePair<string, string>>());
 
-                if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
-                    flags, IntPtr.Zero, workingDir, ref si, out var pi))
+                try
                 {
-                    _logger.LogError("CreateProcessW failed for control session (error: {Error})",
-                        Marshal.GetLastWin32Error());
-                    return null;
+                    if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
+                        flags, controlEnvironmentBlock, workingDir, ref si, out var pi))
+                    {
+                        _logger.LogError("CreateProcessW failed for control session (error: {Error})",
+                            Marshal.GetLastWin32Error());
+                        return null;
+                    }
+
+                    session.ProcessId = pi.dwProcessId;
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    AssignTrackedWindowsCopilotProcess("control session", pi.dwProcessId, tracked =>
+                    {
+                        session.ProcessId = tracked.ProcessId;
+                        session.ProcessStartTime = tracked.ProcessStartTime;
+                    });
                 }
-
-                session.ProcessId = pi.dwProcessId;
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                AssignTrackedWindowsCopilotProcess("control session", pi.dwProcessId, tracked =>
+                finally
                 {
-                    session.ProcessId = tracked.ProcessId;
-                    session.ProcessStartTime = tracked.ProcessStartTime;
-                });
+                    Marshal.FreeHGlobal(controlEnvironmentBlock);
+                }
             }
             else
             {
@@ -589,6 +598,7 @@ public sealed partial class ProcessManager
                     RedirectStandardInput = false,
                     CreateNoWindow = true,
                 };
+                ApplyEnvVarsToProcessInfo(psi, config.EnvVars);
 
                 var process = Process.Start(psi);
                 if (process is null)
@@ -1045,6 +1055,71 @@ public sealed partial class ProcessManager
     {
         foreach (var (name, value) in BrowserLaunchSuppressionEnvironment)
             psi.Environment[name] = value;
+    }
+
+    /// <summary>
+    /// Applies browser-launch suppression env vars AND any custom env vars from config.
+    /// Copies the current process environment, then merges overrides on top.
+    /// </summary>
+    private static void ApplyEnvironmentOverrides(ProcessStartInfo psi, Dictionary<string, string>? envVars)
+    {
+        // Start with a copy of the current process environment
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            var key = entry.Key?.ToString();
+            if (!string.IsNullOrWhiteSpace(key))
+                psi.Environment[key!] = entry.Value?.ToString() ?? string.Empty;
+        }
+
+        // Apply browser launch suppression
+        foreach (var (name, value) in BrowserLaunchSuppressionEnvironment)
+            psi.Environment[name] = value;
+
+        // Apply custom env vars from config
+        if (envVars is not null)
+        {
+            foreach (var (name, value) in envVars)
+                psi.Environment[name] = value;
+        }
+    }
+
+    /// <summary>
+    /// Applies custom env vars from config to a ProcessStartInfo (for control sessions
+    /// that don't need browser launch suppression). Copies the current process environment first.
+    /// </summary>
+    private static void ApplyEnvVarsToProcessInfo(ProcessStartInfo psi, Dictionary<string, string>? envVars)
+    {
+        // Start with a copy of the current process environment
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            var key = entry.Key?.ToString();
+            if (!string.IsNullOrWhiteSpace(key))
+                psi.Environment[key!] = entry.Value?.ToString() ?? string.Empty;
+        }
+
+        // Apply custom env vars from config
+        if (envVars is not null)
+        {
+            foreach (var (name, value) in envVars)
+                psi.Environment[name] = value;
+        }
+    }
+
+    /// <summary>
+    /// Merges multiple env var collections into a single sequence (for Windows CreateProcessW).
+    /// </summary>
+    private static IEnumerable<KeyValuePair<string, string>> MergeEnvironmentOverrides(
+        IEnumerable<KeyValuePair<string, string>> baseOverrides,
+        Dictionary<string, string>? customEnvVars)
+    {
+        foreach (var kvp in baseOverrides)
+            yield return kvp;
+
+        if (customEnvVars is not null)
+        {
+            foreach (var kvp in customEnvVars)
+                yield return kvp;
+        }
     }
 
     private static IntPtr BuildWindowsEnvironmentBlockWithOverrides(IEnumerable<KeyValuePair<string, string>> overrides)
