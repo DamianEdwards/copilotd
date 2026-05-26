@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.Linq;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
 using Copilotd.Services;
@@ -48,6 +49,7 @@ public static class ConfigCommand
                     table.AddRow("session_shutdown_delay_seconds", Markup.Escape(config.SessionShutdownDelaySeconds.ToString()));
                     table.AddRow("issue_rules", Markup.Escape($"{config.IssueRules.Count} rule(s)"));
                     table.AddRow("pull_request_rules", Markup.Escape($"{config.PullRequestRules.Count} rule(s)"));
+                    table.AddRow("env_vars", Markup.Escape(config.EnvVars is null || config.EnvVars.Count == 0 ? "(not set)" : string.Join(", ", config.EnvVars.Select(kv => $"{kv.Key}={kv.Value}"))));
 
                     if (config.IssueRules.Count > 0)
                     {
@@ -226,9 +228,37 @@ public static class ConfigCommand
                         }
                         break;
 
+                    case "env_vars":
+                        // Format: env_vars=KEY1=val1,KEY2=val2  or  env_vars=  to clear
+                        if (string.IsNullOrWhiteSpace(value))
+                        {
+                            cfg.EnvVars = null;
+                            ConsoleOutput.Success("env_vars cleared.");
+                        }
+                        else
+                        {
+                            cfg.EnvVars ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                            cfg.EnvVars.Clear();
+                            var pairs = value.Split(',');
+                            foreach (var pair in pairs)
+                            {
+                                var eq = pair.IndexOf('=');
+                                if (eq <= 0)
+                                {
+                                    ConsoleOutput.Error($"Invalid env var pair: '{pair.Trim()}'. Expected KEY=VALUE");
+                                    return 1;
+                                }
+                                var k = pair[..eq].Trim();
+                                var v = pair[(eq + 1)..].Trim();
+                                cfg.EnvVars[k] = v;
+                            }
+                            ConsoleOutput.Success($"env_vars set: {string.Join(", ", cfg.EnvVars.Select(kv => $"{kv.Key}={kv.Value}"))}");
+                        }
+                        break;
+
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, session_name_format, current_user, enable_control_session, max_instances, session_shutdown_delay_seconds");
+                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, session_name_format, current_user, enable_control_session, max_instances, session_shutdown_delay_seconds, env_vars");
                         return 1;
                 }
 

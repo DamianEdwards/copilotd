@@ -95,6 +95,13 @@ public sealed partial class ProcessManager
             session.CopilotSessionName ?? session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
 
+        if (config.EnvVars is not null && config.EnvVars.Count > 0)
+        {
+            var maskedKeys = string.Join(", ", config.EnvVars.Keys.Select(k => $"{k}=***"));
+            _logger.LogInformation("Injecting {Count} env var(s) into copilot process: {Vars}",
+                config.EnvVars.Count, maskedKeys);
+        }
+
         try
         {
             Process? process;
@@ -111,7 +118,8 @@ public sealed partial class ProcessManager
 
                 var cmdLine = $"copilot {args}";
                 var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
-                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(BrowserLaunchSuppressionEnvironment);
+                var allOverrides = MergeEnvironmentOverrides(BrowserLaunchSuppressionEnvironment, config.EnvVars);
+                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(allOverrides);
 
                 try
                 {
@@ -152,7 +160,7 @@ public sealed partial class ProcessManager
                     RedirectStandardInput = false,
                     CreateNoWindow = true,
                 };
-                ApplyBrowserLaunchSuppressionEnvironment(psi);
+                ApplyEnvironmentOverrides(psi, config.EnvVars);
 
                 process = Process.Start(psi);
                 if (process is null)
@@ -208,12 +216,30 @@ public sealed partial class ProcessManager
             }
 
             var alive = !process.HasExited;
+            if (!alive)
+            {
+                var exitCode = GetProcessExitCodeSafe(process);
+                var exitTime = process.ExitTime;
+                var uptime = session.ProcessStartTime is { } start
+                    ? (exitTime - start).TotalSeconds
+                    : -1;
+                _logger.LogInformation(
+                    "Session {Key} PID {Pid} exited (code={ExitCode}, exitTime={ExitTime:F}, uptime={Uptime:F0}s)",
+                    session.IssueKey, pid, exitCode, exitTime, uptime);
+            }
+
             process.Dispose();
             return alive ? ProcessLivenessResult.Alive : ProcessLivenessResult.Dead;
         }
         catch (ArgumentException)
         {
-            // Process not found
+            // Process not found (already gone from process table)
+            var uptime = session.ProcessStartTime is { } start
+                ? (DateTimeOffset.UtcNow - start).TotalSeconds
+                : -1;
+            _logger.LogInformation(
+                "Session {Key} PID {Pid} not found in process table (uptime={Uptime:F0}s)",
+                session.IssueKey, pid, uptime);
             return ProcessLivenessResult.Dead;
         }
         catch (Exception ex)
@@ -221,6 +247,12 @@ public sealed partial class ProcessManager
             _logger.LogDebug(ex, "Error checking process {Pid}", pid);
             return ProcessLivenessResult.Dead;
         }
+    }
+
+    static int GetProcessExitCodeSafe(Process p)
+    {
+        try { return p.HasExited ? p.ExitCode : -1; }
+        catch { return -1; }
     }
 
     /// <summary>
@@ -548,6 +580,13 @@ public sealed partial class ProcessManager
         _logger.LogInformation("Launching control session {SessionName}", session.CopilotSessionName);
         _logger.LogDebug("copilot {Args}", args);
 
+        if (config.EnvVars is not null && config.EnvVars.Count > 0)
+        {
+            var maskedKeys = string.Join(", ", config.EnvVars.Keys.Select(k => $"{k}=***"));
+            _logger.LogInformation("Injecting {Count} env var(s) into control session: {Vars}",
+                config.EnvVars.Count, maskedKeys);
+        }
+
         try
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -557,24 +596,32 @@ public sealed partial class ProcessManager
                 si.wShowWindow = SW_HIDE;
 
                 var cmdLine = $"copilot {args}";
-                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
+                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
+                var controlEnvironmentBlock = BuildWindowsEnvironmentBlockWithOverrides(config.EnvVars?.Keys.Select(k => new KeyValuePair<string, string>(k, config.EnvVars[k])) ?? Enumerable.Empty<KeyValuePair<string, string>>());
 
-                if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
-                    flags, IntPtr.Zero, workingDir, ref si, out var pi))
+                try
                 {
-                    _logger.LogError("CreateProcessW failed for control session (error: {Error})",
-                        Marshal.GetLastWin32Error());
-                    return null;
+                    if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
+                        flags, controlEnvironmentBlock, workingDir, ref si, out var pi))
+                    {
+                        _logger.LogError("CreateProcessW failed for control session (error: {Error})",
+                            Marshal.GetLastWin32Error());
+                        return null;
+                    }
+
+                    session.ProcessId = pi.dwProcessId;
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    AssignTrackedWindowsCopilotProcess("control session", pi.dwProcessId, tracked =>
+                    {
+                        session.ProcessId = tracked.ProcessId;
+                        session.ProcessStartTime = tracked.ProcessStartTime;
+                    });
                 }
-
-                session.ProcessId = pi.dwProcessId;
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                AssignTrackedWindowsCopilotProcess("control session", pi.dwProcessId, tracked =>
+                finally
                 {
-                    session.ProcessId = tracked.ProcessId;
-                    session.ProcessStartTime = tracked.ProcessStartTime;
-                });
+                    Marshal.FreeHGlobal(controlEnvironmentBlock);
+                }
             }
             else
             {
@@ -589,6 +636,7 @@ public sealed partial class ProcessManager
                     RedirectStandardInput = false,
                     CreateNoWindow = true,
                 };
+                ApplyEnvVarsToProcessInfo(psi, config.EnvVars);
 
                 var process = Process.Start(psi);
                 if (process is null)
@@ -726,9 +774,11 @@ public sealed partial class ProcessManager
 
             Important:
             - You are on the same branch that was used to create the PR. Your changes will be pushed to the existing PR.
+            - Start by checking the PR's unresolved review threads and the current CI/check status for the PR head SHA.
             - Address each review comment by making the requested changes.
             - If a review comment includes a suggested change (```suggestion block), apply it directly to the relevant file.
             - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api graphql`.
+            - If the PR branch has drifted from its base branch or needs conflict resolution, use this isolated worktree to fetch, rebase, and resolve conflicts before pushing.
             - After addressing all review feedback, push your changes to update the PR.
             - Then run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(issue.id)` to continue monitoring for further review feedback.
             - If the changes are complete and no more reviews are expected, run `$(copilotd.command) session complete $(issue.repo)#$(issue.id)` instead.
@@ -761,8 +811,11 @@ public sealed partial class ProcessManager
             - {{branchInstruction}}
             - Focus only on changes relevant to this pull request.
             - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api`.
+            - Start by checking unresolved review threads and the current CI/check status for the PR head SHA.
+            - If the branch needs rebasing or conflict resolution against the base branch, do that work in this isolated worktree before pushing.
             - If you need clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
-            - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
+            - When you have handled the current actionable work and want copilotd to keep monitoring this PR, run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(pr.id)`.
+            - Only run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)` if the PR is closed, merged, or should stop being monitored.
             """;
     }
 
@@ -776,15 +829,17 @@ public sealed partial class ProcessManager
         };
 
         return $$"""
-            You are resuming work on pull request #$(pr.id) in the $(issue.repo) repository because new PR feedback or commits were detected.
-            Read the new PR comments, review feedback, and current diff carefully.
+            You are resuming work on pull request #$(pr.id) in the $(issue.repo) repository because new PR feedback, unresolved review threads, failing CI, or new commits were detected.
+            Read the new PR comments, review feedback, current CI/check status, and current diff carefully.
 
             Important:
             - {{branchInstruction}}
-            - Focus on the new PR feedback or new commits since the previous dispatch.
+            - Focus on the new PR feedback, failing CI, unresolved review threads, or new commits since the previous dispatch.
             - Stay in terminal/CLI workflows. Do not open browsers or run browser-launching commands such as `open`, `xdg-open`, `start`, `gh ... --web`, `gh browse`, or similar; inspect PR metadata with terminal/API commands such as `gh pr view --json` and `gh api`.
+            - If the branch needs rebasing or conflict resolution against the base branch, do that work in this isolated worktree before pushing.
             - If you need more clarification, run `$(copilotd.command) session comment $(issue.repo)#$(pr.id) --message "Your question or findings here"`.
-            - When the work is complete, run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)`.
+            - When you have handled the current actionable work and want copilotd to keep monitoring this PR, run `$(copilotd.command) session pr $(pr.id) $(issue.repo)#$(pr.id)`.
+            - Only run `$(copilotd.command) session complete $(issue.repo)#$(pr.id)` if the PR is closed, merged, or should stop being monitored.
             """;
     }
 
@@ -1038,6 +1093,71 @@ public sealed partial class ProcessManager
     {
         foreach (var (name, value) in BrowserLaunchSuppressionEnvironment)
             psi.Environment[name] = value;
+    }
+
+    /// <summary>
+    /// Applies browser-launch suppression env vars AND any custom env vars from config.
+    /// Copies the current process environment, then merges overrides on top.
+    /// </summary>
+    private static void ApplyEnvironmentOverrides(ProcessStartInfo psi, Dictionary<string, string>? envVars)
+    {
+        // Start with a copy of the current process environment
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            var key = entry.Key?.ToString();
+            if (!string.IsNullOrWhiteSpace(key))
+                psi.Environment[key!] = entry.Value?.ToString() ?? string.Empty;
+        }
+
+        // Apply browser launch suppression
+        foreach (var (name, value) in BrowserLaunchSuppressionEnvironment)
+            psi.Environment[name] = value;
+
+        // Apply custom env vars from config
+        if (envVars is not null)
+        {
+            foreach (var (name, value) in envVars)
+                psi.Environment[name] = value;
+        }
+    }
+
+    /// <summary>
+    /// Applies custom env vars from config to a ProcessStartInfo (for control sessions
+    /// that don't need browser launch suppression). Copies the current process environment first.
+    /// </summary>
+    private static void ApplyEnvVarsToProcessInfo(ProcessStartInfo psi, Dictionary<string, string>? envVars)
+    {
+        // Start with a copy of the current process environment
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            var key = entry.Key?.ToString();
+            if (!string.IsNullOrWhiteSpace(key))
+                psi.Environment[key!] = entry.Value?.ToString() ?? string.Empty;
+        }
+
+        // Apply custom env vars from config
+        if (envVars is not null)
+        {
+            foreach (var (name, value) in envVars)
+                psi.Environment[name] = value;
+        }
+    }
+
+    /// <summary>
+    /// Merges multiple env var collections into a single sequence (for Windows CreateProcessW).
+    /// </summary>
+    private static IEnumerable<KeyValuePair<string, string>> MergeEnvironmentOverrides(
+        IEnumerable<KeyValuePair<string, string>> baseOverrides,
+        Dictionary<string, string>? customEnvVars)
+    {
+        foreach (var kvp in baseOverrides)
+            yield return kvp;
+
+        if (customEnvVars is not null)
+        {
+            foreach (var kvp in customEnvVars)
+                yield return kvp;
+        }
     }
 
     private static IntPtr BuildWindowsEnvironmentBlockWithOverrides(IEnumerable<KeyValuePair<string, string>> overrides)

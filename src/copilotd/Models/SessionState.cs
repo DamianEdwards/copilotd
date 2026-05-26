@@ -267,6 +267,24 @@ public sealed class DispatchSession
     public PullRequestBranchStrategy? PullRequestBranchStrategy { get; set; }
 
     /// <summary>
+    /// Review thread IDs that have already been observed in an unresolved state for this session.
+    /// Used to wake the session only when new unresolved review threads appear.
+    /// </summary>
+    public List<string> SeenUnresolvedReviewThreadIds { get; set; } = [];
+
+    /// <summary>
+    /// True once copilotd has captured the initial unresolved-review-thread baseline for this session.
+    /// This distinguishes "no unresolved threads yet" from "baseline not captured yet".
+    /// </summary>
+    public bool HasEstablishedUnresolvedReviewThreadBaseline { get; set; }
+
+    /// <summary>
+    /// The PR head SHA for which copilotd most recently queued a redispatch because CI was failing.
+    /// Used to avoid repeatedly waking on the same failing head revision.
+    /// </summary>
+    public string? LastTriggeredFailingChecksHeadSha { get; set; }
+
+    /// <summary>
     /// Number of times this session has been re-dispatched via comment/review feedback loops.
     /// Used to enforce <see cref="CopilotdConfig.MaxRedispatches"/> and prevent unbounded loops.
     /// </summary>

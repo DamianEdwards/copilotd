@@ -104,7 +104,7 @@ public static class SessionCommand
                     ? await Console.In.ReadToEndAsync(ct)
                     : "";
 
-                return HandleSessionEvent(stateStore, runtimeContext.GetCopilotdCallbackCommand(), eventName, issueKey, expectedSessionId, payload, ct);
+                return HandleSessionEvent(stateStore, runtimeContext.GetCopilotdCallbackCommand(), eventName, issueKey, expectedSessionId, payload, logger, ct);
             }
             catch (Exception ex)
             {
@@ -125,6 +125,7 @@ public static class SessionCommand
         string issueKey,
         string? expectedSessionId,
         string payload,
+        ILogger<Program> logger,
         CancellationToken ct)
     {
         var normalizedEvent = NormalizeHookEventName(eventName);
@@ -156,11 +157,19 @@ public static class SessionCommand
             else if (normalizedEvent == "session-end"
                      && session.Status is SessionStatus.Running or SessionStatus.Dispatching)
             {
-                var reason = ExtractString(payload, "reason") ?? "unknown";
+                var detail = ExtractSessionEndDetail(payload) ?? ExtractString(payload, "reason") ?? "unknown";
                 session.Status = SessionStatus.Orphaned;
-                session.FailureDetail = $"Copilot hook reported sessionEnd reason '{reason}' before the session reached a completed or waiting state.";
+                session.FailureDetail = $"Copilot hook reported sessionEnd ({detail}) before the session reached a completed or waiting state.";
                 session.LastFailureAt = DateTimeOffset.UtcNow;
                 ClearTrackedProcess(session);
+
+                var hookModel = ExtractString(payload, "model");
+                var hookError = ExtractString(payload, "error");
+                if (!string.IsNullOrEmpty(hookError))
+                    logger.LogWarning("  [HOOK ERROR] {IssueKey} session-end error: {Error}", issueKey, hookError);
+                if (!string.IsNullOrEmpty(hookModel))
+                    logger.LogInformation("  [HOOK MODEL] {IssueKey} session-end model: {Model}", issueKey, hookModel);
+                logger.LogWarning("  [HOOK PAYLOAD] {IssueKey} session-end detail: {Detail} | raw_payload: {Payload}", issueKey, detail, payload);
             }
 
             stateStore.SaveState(state);
@@ -189,7 +198,7 @@ public static class SessionCommand
     private static string? ExtractHookDetail(string normalizedEvent, string payload)
         => normalizedEvent switch
         {
-            "session-end" => ExtractString(payload, "reason") is { } reason ? $"reason={reason}" : null,
+            "session-end" => ExtractSessionEndDetail(payload),
             "error-occurred" => ExtractErrorDetail(payload),
             "agent-stop" => ExtractString(payload, "stopReason") is { } reason
                 ? $"stopReason={reason}"
@@ -198,6 +207,27 @@ public static class SessionCommand
                     : null,
             _ => null,
         };
+
+    private static string? ExtractSessionEndDetail(string payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+            return null;
+
+        var reason = ExtractString(payload, "reason") ?? "unknown";
+        var error = ExtractString(payload, "error");
+        var message = ExtractString(payload, "message");
+        var model = ExtractString(payload, "model");
+
+        var parts = new List<string> { $"reason={reason}" };
+        if (!string.IsNullOrEmpty(model))
+            parts.Add($"model={model}");
+        if (!string.IsNullOrEmpty(error))
+            parts.Add($"error={error}");
+        if (!string.IsNullOrEmpty(message))
+            parts.Add($"message={message}");
+
+        return string.Join(", ", parts);
+    }
 
     private static string? ExtractErrorDetail(string payload)
     {
@@ -926,6 +956,9 @@ public static class SessionCommand
                     session.RetryCount = 0;
                     session.RedispatchCount = 0;
                     session.LastRedispatchWasIssueComment = false;
+                    session.SeenUnresolvedReviewThreadIds = [];
+                    session.HasEstablishedUnresolvedReviewThreadBaseline = false;
+                    session.LastTriggeredFailingChecksHeadSha = null;
                     session.LastFailureAt = null;
                     session.WaitingSince = null;
                     session.SetReactionAnchor(ReactionAnchor.IssueBody);
@@ -1288,6 +1321,9 @@ public static class SessionCommand
             PullRequestHeadRepo = session.PullRequestHeadRepo,
             PullRequestHeadSha = session.PullRequestHeadSha,
             PullRequestBranchStrategy = session.PullRequestBranchStrategy,
+            SeenUnresolvedReviewThreadIds = [.. session.SeenUnresolvedReviewThreadIds],
+            HasEstablishedUnresolvedReviewThreadBaseline = session.HasEstablishedUnresolvedReviewThreadBaseline,
+            LastTriggeredFailingChecksHeadSha = session.LastTriggeredFailingChecksHeadSha,
             RedispatchCount = session.RedispatchCount,
             LastRedispatchWasIssueComment = session.LastRedispatchWasIssueComment,
             WorktreePath = session.WorktreePath,

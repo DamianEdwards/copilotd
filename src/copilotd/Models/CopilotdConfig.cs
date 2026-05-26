@@ -98,6 +98,13 @@ public sealed class CopilotdConfig
     /// </summary>
     public Dictionary<string, PullRequestDispatchRule> PullRequestRules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Custom environment variables to pass to copilot CLI processes launched by copilotd.
+    /// The environment starts as a copy of the current process environment, then these values
+    /// are merged on top. Example: { "COPILIT_MODEL": "local", "COPILIT_API_URL": "http://localhost:8080" }.
+    /// </summary>
+    public Dictionary<string, string>? EnvVars { get; set; }
+
     public const string DefaultRuleName = "Default";
 
     /// <summary>
@@ -412,6 +419,24 @@ public abstract class DispatchRuleOptions
     /// to the global <see cref="CopilotdConfig.EnableReactions"/> setting.
     /// </summary>
     public bool? EnableReactions { get; set; }
+
+    /// <summary>
+    /// Optional local-hour start for this rule's dispatch window (0-23).
+    /// When both start and end are set, pending sessions only dispatch inside the window.
+    /// </summary>
+    public int? ActiveStartHour { get; set; }
+
+    /// <summary>
+    /// Optional local-hour end for this rule's dispatch window (0-23).
+    /// Windows that cross midnight are supported.
+    /// </summary>
+    public int? ActiveEndHour { get; set; }
+
+    /// <summary>
+    /// Time zone used with <see cref="ActiveStartHour"/> and <see cref="ActiveEndHour"/>,
+    /// for example <c>America/Chicago</c>.
+    /// </summary>
+    public string? ActiveTimeZone { get; set; }
 }
 
 /// <summary>
