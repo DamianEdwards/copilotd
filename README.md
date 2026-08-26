@@ -224,7 +224,12 @@ Each dispatched copilot session follows the same state machine whether the root 
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending : Issue/PR matches rule
+    [*] --> Pending : Subject matches and issue approval is current
+    [*] --> WaitingForApproval : Issue edited after trigger
+
+    WaitingForApproval --> Pending : Trigger reapplied
+    WaitingForApproval --> Completed : Issue unmatched
+    Pending --> WaitingForApproval : Issue edited before launch
 
     Pending --> Dispatching : Launch
     Dispatching --> Running : Process alive
@@ -254,7 +259,11 @@ stateDiagram-v2
 
 | From | To | Trigger |
 |------|----|---------|
-| *(new)* | **Pending** | Issue or pull request matches a dispatch rule |
+| *(new)* | **Pending** | Pull request matches, or issue matches with a current dispatch approval |
+| *(new)* | **WaitingForApproval** | Issue title/body changed after its required label or assignment trigger |
+| **WaitingForApproval** | **Pending** | A reviewer reapplies the trigger after reviewing the current issue content |
+| **WaitingForApproval** | **Completed** | Issue no longer matches the dispatch rule |
+| **Pending** | **WaitingForApproval** | A queued issue is edited before its first dispatch |
 | **Pending** | **Dispatching** | Daemon launches copilot process (respects `max_instances` limit and retry backoff) |
 | **Dispatching** | **Running** | Process successfully started, PID tracked |
 | **Dispatching** | **Failed** | Process launch failed (increments retry count) |
@@ -353,6 +362,28 @@ enforces trust boundaries on comment-triggered re-dispatches:
   untrusted input.
 
 Collaborator permission checks are cached for 15 minutes per user/repo pair to minimize API calls.
+
+### Issue approval snapshots
+
+For issue rules that require labels, an assignee, a milestone, or an issue type, copilotd treats
+the latest event that makes all of those trigger conditions current as approval of the issue title
+and body:
+
+- Before acknowledging or queueing the issue, copilotd verifies that neither the title nor body was
+  edited at or after the trigger event.
+- If the content changed, the session enters `WaitingForApproval`, the normal lifecycle reaction is
+  removed, and copilotd posts one deduplicated comment asking a reviewer to remove and reapply the
+  relevant label, assignment, milestone, or issue type. No Copilot process or worktree is created.
+- Queued sessions are checked again on each reconciliation cycle until their first launch.
+- Approved title/body content is persisted with a SHA-256 hash and materialized in a
+  session-specific directory under the copilotd home directory at launch. The agent is granted
+  access only to that directory and instructed to use the immutable snapshot rather than later
+  edits to the live issue.
+- Applying the trigger and editing at the same timestamp is treated as ambiguous and fails closed.
+
+Rules without a required label, assignee, milestone, or issue type have no explicit reviewer
+approval event. They snapshot the content observed when matched but cannot detect an edit relative
+to a human approval action.
 
 ### Interactive connection
 

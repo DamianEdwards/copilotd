@@ -78,7 +78,12 @@ public sealed class TolerantSessionStatusConverter : JsonConverter<SessionStatus
 
     public override void Write(Utf8JsonWriter writer, SessionStatus value, JsonSerializerOptions options)
     {
-        writer.WriteStringValue(value.ToString());
+        // WaitingForApproval is also guarded by DispatchSession.ApprovalBlocked. Persisting
+        // it as Failed keeps older binaries from mapping the unknown value to Pending and
+        // dispatching content that this version rejected.
+        writer.WriteStringValue(value == SessionStatus.WaitingForApproval
+            ? SessionStatus.Failed.ToString()
+            : value.ToString());
     }
 }
 

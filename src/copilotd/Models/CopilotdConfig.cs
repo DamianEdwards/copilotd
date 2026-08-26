@@ -123,7 +123,7 @@ public sealed class CopilotdConfig
     public const string DefaultPrompt =
         """
         You are working on issue #$(issue.id) in the $(issue.repo) repository.
-        Read the issue details carefully and decide on the best course of action.
+        Read the approved issue snapshot provided in the session instructions and decide on the best course of action.
         Follow the project's coding conventions and ensure all tests pass.
 
         If you have enough information to implement the requested changes:
@@ -177,7 +177,7 @@ public sealed class CopilotdConfig
 
         SESSION LIFECYCLE:
         Issues matching rules are dispatched as copilot sessions that progress through:
-        Pending → Dispatching → Running → Completed/Failed
+        WaitingForApproval → Pending → Dispatching → Running → Completed/Failed
         Sessions can also be: Orphaned (process died), WaitingForFeedback (paused for issue comments),
         or WaitingForReview (monitoring PR reviews). Joined may still appear as a legacy state from
         older copilotd versions that used local interactive takeover.
@@ -247,7 +247,7 @@ public sealed class IssueDispatchRule : DispatchRuleOptions
     /// </summary>
     public bool Matches(GitHubIssue issue, Func<string, string, bool>? hasWriteAccess)
     {
-        if (Assignee is not null && !string.Equals(Assignee, issue.Assignee, StringComparison.OrdinalIgnoreCase))
+        if (Assignee is not null && !issue.Assignees.Contains(Assignee, StringComparer.OrdinalIgnoreCase))
             return false;
 
         if (Labels.Count > 0 && !Labels.All(l => issue.Labels.Contains(l, StringComparer.OrdinalIgnoreCase)))

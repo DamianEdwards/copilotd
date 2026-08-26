@@ -17,7 +17,7 @@ public static class SessionCommand
 {
     private const string MinimumCopilotConnectVersion = "1.0.32";
     internal const string StatusFilterDescription =
-        "Filter sessions by status (pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined (legacy))";
+        "Filter sessions by status (waitingforapproval, pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined (legacy))";
 
     public static Command Create(IServiceProvider services)
     {
@@ -720,6 +720,9 @@ public static class SessionCommand
 
                     trackedProcess = CaptureTrackedProcess(session);
                     session.Status = SessionStatus.Completed;
+                    session.ApprovalBlocked = false;
+                    session.ApprovalBlockedAt = null;
+                    session.ApprovalDispatchedAt = null;
                     session.FailureDetail = null;
                     session.CompletedBySession = true;
                     ClearTrackedProcess(session);
@@ -896,6 +899,12 @@ public static class SessionCommand
                     if (!state.Sessions.TryGetValue(issueKey, out var session))
                     {
                         errorMessage = $"No session found for '{issueKey}'.";
+                        return;
+                    }
+
+                    if (session.ApprovalBlocked || session.Status == SessionStatus.WaitingForApproval)
+                    {
+                        errorMessage = $"Session '{issueKey}' is waiting for issue reapproval. Review the current title/body and reapply the dispatch trigger instead of resetting the session.";
                         return;
                     }
 
@@ -1080,6 +1089,7 @@ public static class SessionCommand
                 SessionStatus.Joined => $"[blue]{s.Status}[/]",
                 SessionStatus.WaitingForFeedback => $"[cyan]{s.Status}[/]",
                 SessionStatus.WaitingForReview => $"[magenta]{s.Status}[/]",
+                SessionStatus.WaitingForApproval => $"[yellow]{s.Status}[/]",
                 SessionStatus.Pending or SessionStatus.Dispatching => $"[yellow]{s.Status}[/]",
                 SessionStatus.Failed or SessionStatus.Orphaned => $"[red]{s.Status}[/]",
                 SessionStatus.Completed => $"[grey]{s.Status}[/]",
@@ -1167,6 +1177,11 @@ public static class SessionCommand
         table.AddRow("Rule", Markup.Escape(session.RuleName));
         table.AddRow("Status", Markup.Escape(session.Status.ToString()));
         table.AddRow("Subject author", Markup.Escape(session.SubjectAuthor ?? "(unknown)"));
+        table.AddRow("Dispatch trigger", Markup.Escape(session.DispatchTriggerDescription ?? "-"));
+        table.AddRow("Triggered by", Markup.Escape(session.DispatchTriggeredBy ?? "-"));
+        table.AddRow("Triggered at", Markup.Escape(FormatOptionalTime(session.DispatchTriggeredAt)));
+        table.AddRow("Approved content hash", Markup.Escape(session.ApprovedIssueContentHash ?? "-"));
+        table.AddRow("Approval dispatched", Markup.Escape(FormatOptionalTime(session.ApprovalDispatchedAt)));
         table.AddRow("Created", Markup.Escape(session.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
         table.AddRow("Updated", Markup.Escape(session.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
         table.AddRow("Last verified", Markup.Escape(FormatOptionalTime(session.LastVerifiedAt)));
@@ -1268,6 +1283,17 @@ public static class SessionCommand
             IssueNumber = session.IssueNumber,
             RuleName = session.RuleName,
             IssueAuthor = session.IssueAuthor,
+            DispatchTriggerId = session.DispatchTriggerId,
+            DispatchTriggerDescription = session.DispatchTriggerDescription,
+            DispatchTriggeredBy = session.DispatchTriggeredBy,
+            DispatchTriggeredAt = session.DispatchTriggeredAt,
+            ApprovedIssueTitle = session.ApprovedIssueTitle,
+            ApprovedIssueBody = session.ApprovedIssueBody,
+            ApprovedIssueContentHash = session.ApprovedIssueContentHash,
+            ApprovalDispatchedAt = session.ApprovalDispatchedAt,
+            RejectedTriggerCommentedId = session.RejectedTriggerCommentedId,
+            ApprovalBlocked = session.ApprovalBlocked,
+            ApprovalBlockedAt = session.ApprovalBlockedAt,
             CopilotSessionId = session.CopilotSessionId,
             CopilotSessionName = session.CopilotSessionName,
             HasStarted = session.HasStarted,
