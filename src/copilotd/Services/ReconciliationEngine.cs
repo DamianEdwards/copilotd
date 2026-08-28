@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Copilotd.Infrastructure;
 using Copilotd.Models;
 using Microsoft.Extensions.Logging;
@@ -62,18 +64,19 @@ public sealed class ReconciliationEngine
         var (desiredPullRequestDispatches, queriedPullRequestRepos) = ComputeDesiredPullRequestDispatches(config);
 
         // Step 3: Reconcile desired vs observed
-        ReconcileDesiredVsObserved(config, state, desiredIssueDispatches, queriedIssueRepos, desiredPullRequestDispatches, queriedPullRequestRepos);
+        ReconcileDesiredVsObserved(config, state, desiredIssueDispatches, queriedIssueRepos, desiredPullRequestDispatches, queriedPullRequestRepos, machineIdentifier);
 
         // Step 4: Dispatch pending sessions (respects MaxInstances)
-        DispatchPendingSessions(config, state);
+        DispatchPendingSessions(config, state, machineIdentifier);
 
         // Step 5: Persist corrected state
         state.LastPollTime = DateTimeOffset.UtcNow;
         _stateStore.SaveState(state);
 
-        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {Waiting} waiting, {WaitingForReview} waiting for review, {Terminal} terminal sessions",
+        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {WaitingForApproval} waiting for approval, {Waiting} waiting, {WaitingForReview} waiting for review, {Terminal} terminal sessions",
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Running),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Pending),
+            state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForApproval),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForFeedback),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForReview),
             state.Sessions.Values.Count(s => s.IsTerminal));
@@ -100,6 +103,7 @@ public sealed class ReconciliationEngine
                 _processManager.CleanupWorktree(session, config, state);
             }
             state.Sessions.Remove(key);
+            _stateStore.DeleteApprovedIssueSnapshot(session.SubjectKey);
             _logger.LogDebug("Pruned terminal session {Key}", key);
         }
 
@@ -120,8 +124,10 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.Pending)
                 continue;
 
-            // WaitingForFeedback and WaitingForReview sessions have no running process — skip liveness check
-            if (session.Status is SessionStatus.WaitingForFeedback or SessionStatus.WaitingForReview)
+            // Waiting states have no running process — skip liveness check
+            if (session.Status is SessionStatus.WaitingForFeedback
+                or SessionStatus.WaitingForReview
+                or SessionStatus.WaitingForApproval)
                 continue;
 
             // Legacy Joined sessions come from older copilotd versions that launched
@@ -146,6 +152,8 @@ public sealed class ReconciliationEngine
                     session.FailureDetail = null;
                     session.ProcessId = null;
                     session.ProcessStartTime = null;
+                    session.RootProcessId = null;
+                    session.RootProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                 }
                 continue;
@@ -173,6 +181,8 @@ public sealed class ReconciliationEngine
                     session.FailureDetail = null;
                     session.ProcessId = null;
                     session.ProcessStartTime = null;
+                    session.RootProcessId = null;
+                    session.RootProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     break;
             }
@@ -283,7 +293,8 @@ public sealed class ReconciliationEngine
         Dictionary<string, (GitHubIssue Issue, string RuleName)> desiredIssues,
         HashSet<string> queriedIssueRepos,
         Dictionary<string, (GitHubPullRequest PullRequest, string RuleName)> desiredPullRequests,
-        HashSet<string> queriedPullRequestRepos)
+        HashSet<string> queriedPullRequestRepos,
+        string machineIdentifier)
     {
         // Handle sessions for subjects that no longer match — only for successfully queried repos
         var toTerminate = new List<DispatchSession>();
@@ -346,6 +357,18 @@ public sealed class ReconciliationEngine
                     continue;
                 }
 
+                if (session.Status is SessionStatus.WaitingForApproval)
+                {
+                    _logger.LogInformation("{Subject} {Key} no longer matches issue/PR rules, completing approval wait", subjectLabel, key);
+                    session.Status = SessionStatus.Completed;
+                    session.ApprovalBlocked = false;
+                    session.ApprovalBlockedAt = null;
+                    session.FailureDetail = null;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    TransitionReactionOnCurrentAnchor(session, config, null);
+                    continue;
+                }
+
                 // WaitingForReview sessions have no process to terminate
                 if (session.Status is SessionStatus.WaitingForReview)
                 {
@@ -395,6 +418,22 @@ public sealed class ReconciliationEngine
                 {
                     existing.IssueAuthor = issue.Author;
                     existing.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+
+                if (!string.Equals(existing.RuleName, issueRuleName, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation("Issue {Key} now matches issue rule '{Rule}' instead of '{PreviousRule}'",
+                        issueKey, issueRuleName, existing.RuleName);
+                    existing.RuleName = issueRuleName;
+                    existing.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+
+                var issueRule = config.IssueRules.GetValueOrDefault(issueRuleName);
+                if (issueRule is not null
+                    && ShouldValidateIssueApproval(existing)
+                    && !ValidateIssueApproval(existing, issue, issueRule, config, state, machineIdentifier))
+                {
+                    continue;
                 }
 
                 switch (existing.Status)
@@ -452,6 +491,8 @@ public sealed class ReconciliationEngine
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
+                                existing.RootProcessId = null;
+                                existing.RootProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
                                 if (commentInfo.IssueCommentId.HasValue)
                                     TransitionReactionToIssueComment(existing, config, commentInfo.IssueCommentId.Value, GhCliService.ReactionEyes);
@@ -480,6 +521,8 @@ public sealed class ReconciliationEngine
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
+                                existing.RootProcessId = null;
+                                existing.RootProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
                                 TransitionReactionOnCurrentAnchor(existing, config, GhCliService.ReactionThumbsUp);
                                 _processManager.CleanupWorktree(existing, config, state);
@@ -531,6 +574,8 @@ public sealed class ReconciliationEngine
                                     existing.WaitingSince = null;
                                     existing.ProcessId = null;
                                     existing.ProcessStartTime = null;
+                                    existing.RootProcessId = null;
+                                    existing.RootProcessStartTime = null;
                                     existing.UpdatedAt = DateTimeOffset.UtcNow;
                                     continue;
                                 }
@@ -581,6 +626,8 @@ public sealed class ReconciliationEngine
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
+                                existing.RootProcessId = null;
+                                existing.RootProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
                                 if (issueCommentInfo.IssueCommentId.HasValue)
                                     TransitionReactionToIssueComment(existing, config, issueCommentInfo.IssueCommentId.Value, GhCliService.ReactionEyes);
@@ -609,6 +656,8 @@ public sealed class ReconciliationEngine
                         existing.HasStarted = false;
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.RootProcessId = null;
+                        existing.RootProcessStartTime = null;
                         existing.LastVerifiedAt = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         existing.LastFailureAt = DateTimeOffset.UtcNow;
@@ -649,9 +698,15 @@ public sealed class ReconciliationEngine
                         existing.HasStarted = false;
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.RootProcessId = null;
+                        existing.RootProcessStartTime = null;
                         existing.LastVerifiedAt = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         TransitionReactionToIssue(existing, config, GhCliService.ReactionEyes);
+                        continue;
+
+                    case SessionStatus.WaitingForApproval:
+                        // Validation above either moved this session back to Pending or kept it waiting.
                         continue;
                 }
             }
@@ -674,6 +729,13 @@ public sealed class ReconciliationEngine
                     UpdatedAt = DateTimeOffset.UtcNow,
                 };
                 state.Sessions[issueKey] = newSession;
+
+                var issueRule = config.IssueRules.GetValueOrDefault(issueRuleName);
+                if (issueRule is null
+                    || !ValidateIssueApproval(newSession, issue, issueRule, config, state, machineIdentifier))
+                {
+                    continue;
+                }
 
                 _logger.LogInformation("New issue {Key} matched by issue rule '{Rule}', creating pending dispatch", issueKey, issueRuleName);
                 TransitionReactionToIssue(newSession, config, GhCliService.ReactionEyes);
@@ -851,6 +913,8 @@ public sealed class ReconciliationEngine
         session.WaitingSince = null;
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
         session.UpdatedAt = DateTimeOffset.UtcNow;
 
         if (isIssueComment && commentInfo.IssueCommentId.HasValue)
@@ -859,6 +923,165 @@ public sealed class ReconciliationEngine
             TransitionReactionOnCurrentAnchor(session, config, GhCliService.ReactionEyes);
 
         return true;
+    }
+
+    private static bool ShouldValidateIssueApproval(DispatchSession session)
+        => session.Status == SessionStatus.WaitingForApproval
+           || session.Status == SessionStatus.Pending && session.ApprovalDispatchedAt is null
+           || session.Status == SessionStatus.Completed && !session.CompletedBySession;
+
+    private bool ValidateIssueApproval(
+        DispatchSession session,
+        GitHubIssue issue,
+        IssueDispatchRule issueRule,
+        CopilotdConfig config,
+        DaemonState state,
+        string machineIdentifier)
+    {
+        var approval = _ghCli.GetIssueDispatchApproval(issue.Repo, issue.Number, issueRule);
+        if (approval.Status == IssueDispatchApprovalStatus.Unavailable)
+        {
+            _logger.LogWarning("Could not validate dispatch approval for {Key}: {Error}",
+                issue.Key, approval.Error ?? "unknown approval validation error");
+            CleanupApprovalWorktree(session, config, state);
+            session.Status = SessionStatus.WaitingForApproval;
+            session.ApprovalBlocked = true;
+            session.ApprovalBlockedAt = DateTimeOffset.UtcNow;
+            session.FailureDetail = $"Dispatch approval could not be verified: {approval.Error ?? "unknown GitHub API error"}";
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            TransitionReactionOnCurrentAnchor(session, config, null);
+            return false;
+        }
+
+        if (approval.Status == IssueDispatchApprovalStatus.Stale)
+        {
+            CleanupApprovalWorktree(session, config, state);
+            session.DispatchTriggerId = approval.TriggerId;
+            session.DispatchTriggerDescription = approval.TriggerDescription;
+            session.DispatchTriggeredBy = approval.TriggerActor;
+            session.DispatchTriggeredAt = approval.TriggeredAt;
+            session.ApprovedIssueTitle = null;
+            session.ApprovedIssueBody = null;
+            session.ApprovedIssueContentHash = null;
+            session.ApprovalDispatchedAt = null;
+            session.Status = SessionStatus.WaitingForApproval;
+            session.ApprovalBlocked = true;
+            session.ApprovalBlockedAt = DateTimeOffset.UtcNow;
+            session.FailureDetail = BuildStaleApprovalFailureDetail(approval);
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            TransitionReactionOnCurrentAnchor(session, config, null);
+
+            if (approval.TriggerId is not null
+                && !string.Equals(session.RejectedTriggerCommentedId, approval.TriggerId, StringComparison.Ordinal))
+            {
+                var alreadyCommented = _ghCli.HasIssueCommentWithDedupeKey(
+                    session.Repo,
+                    session.IssueNumber,
+                    approval.TriggerId);
+                if (alreadyCommented == true
+                    || alreadyCommented == false
+                    && _ghCli.PostIssueComment(
+                        session.Repo,
+                        session.IssueNumber,
+                        BuildStaleApprovalComment(approval),
+                        machineIdentifier,
+                        approval.TriggerId))
+                {
+                    session.RejectedTriggerCommentedId = approval.TriggerId;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+            }
+
+            return false;
+        }
+
+        var wasWaitingForApproval = session.Status == SessionStatus.WaitingForApproval;
+        var previousTriggerId = session.DispatchTriggerId;
+        if (wasWaitingForApproval)
+        {
+            CleanupApprovalWorktree(session, config, state);
+            ResetForFreshDispatch(session, preserveReviewPullRequest: false);
+        }
+
+        if (wasWaitingForApproval
+            || session.Status == SessionStatus.Completed
+            || !string.Equals(previousTriggerId, approval.TriggerId, StringComparison.Ordinal))
+        {
+            session.ApprovalDispatchedAt = null;
+        }
+
+        session.DispatchTriggerId = approval.TriggerId;
+        session.DispatchTriggerDescription = approval.TriggerDescription;
+        session.DispatchTriggeredBy = approval.TriggerActor;
+        session.DispatchTriggeredAt = approval.TriggeredAt;
+        session.SubjectTitle = approval.Title;
+        session.ApprovedIssueTitle = approval.Title;
+        session.ApprovedIssueBody = approval.Body;
+        session.ApprovedIssueContentHash = ComputeIssueContentHash(approval.Title, approval.Body);
+        session.RejectedTriggerCommentedId = null;
+        session.ApprovalBlocked = false;
+        session.ApprovalBlockedAt = null;
+        session.FailureDetail = null;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+
+        if (wasWaitingForApproval)
+        {
+            _logger.LogInformation("Issue {Key} was re-approved by a new trigger, queueing dispatch", issue.Key);
+            TransitionReactionToIssue(session, config, GhCliService.ReactionEyes);
+        }
+
+        return true;
+    }
+
+    private void CleanupApprovalWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
+    {
+        if (!string.IsNullOrEmpty(session.WorktreePath) || !string.IsNullOrEmpty(session.BranchName))
+            _processManager.CleanupWorktree(session, config, state);
+    }
+
+    private static string BuildStaleApprovalFailureDetail(IssueDispatchApproval approval)
+    {
+        var changed = GetChangedIssueFields(approval);
+        var trigger = approval.TriggerDescription ?? "the dispatch trigger was applied";
+        return $"The issue {changed} changed at or after {trigger}. Review the current content and reapply the trigger.";
+    }
+
+    private static string BuildStaleApprovalComment(IssueDispatchApproval approval)
+    {
+        var changed = GetChangedIssueFields(approval);
+        var trigger = approval.TriggerDescription ?? "the dispatch trigger was applied";
+        var actor = string.IsNullOrWhiteSpace(approval.TriggerActor) ? "" : $" by @{approval.TriggerActor}";
+        var timestamp = approval.TriggeredAt?.ToUniversalTime().ToString("u") ?? "an unknown time";
+        var retrigger = approval.RetriggerInstruction ?? "remove and reapply the dispatch trigger";
+
+        return $"""
+            copilotd did not dispatch this issue because its {changed} changed after {trigger}{actor} at {timestamp}.
+
+            Review the current title and body, then {retrigger} to approve the current content. No work has started.
+            """;
+    }
+
+    private static string GetChangedIssueFields(IssueDispatchApproval approval)
+    {
+        var bodyChanged = approval.LastBodyEditAt is not null
+                          && approval.TriggeredAt is not null
+                          && approval.LastBodyEditAt >= approval.TriggeredAt;
+        var titleChanged = approval.LastTitleEditAt is not null
+                           && approval.TriggeredAt is not null
+                           && approval.LastTitleEditAt >= approval.TriggeredAt;
+
+        return (titleChanged, bodyChanged) switch
+        {
+            (true, true) => "title and body",
+            (true, false) => "title",
+            _ => "body",
+        };
+    }
+
+    private static string ComputeIssueContentHash(string title, string body)
+    {
+        var content = Encoding.UTF8.GetBytes(title + "\0" + body);
+        return Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
     }
 
     private static void ResetForFreshDispatch(DispatchSession session, bool preserveReviewPullRequest)
@@ -875,6 +1098,8 @@ public sealed class ReconciliationEngine
         session.HasStarted = false;
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
         session.LastVerifiedAt = null;
         session.WaitingSince = null;
         session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -883,7 +1108,7 @@ public sealed class ReconciliationEngine
     /// <summary>
     /// Step 4: Launch copilot for pending sessions, respecting MaxInstances limit and retry backoff.
     /// </summary>
-    private void DispatchPendingSessions(CopilotdConfig config, DaemonState state)
+    private void DispatchPendingSessions(CopilotdConfig config, DaemonState state, string machineIdentifier)
     {
         var runningCount = state.Sessions.Values.Count(s => s.Status == SessionStatus.Running);
         var availableSlots = Math.Max(0, config.MaxInstances - runningCount);
@@ -906,6 +1131,38 @@ public sealed class ReconciliationEngine
 
         foreach (var session in toDispatch)
         {
+            if (session.SubjectKind == DispatchSubjectKind.Issue
+                && session.ApprovalDispatchedAt is null)
+            {
+                var issueRule = config.IssueRules.GetValueOrDefault(session.RuleName);
+                var issueForApproval = new GitHubIssue
+                {
+                    Number = session.IssueNumber,
+                    Repo = session.Repo,
+                    Title = session.SubjectTitle ?? "",
+                    Author = session.SubjectAuthor,
+                };
+
+                if (issueRule is null)
+                {
+                    CleanupApprovalWorktree(session, config, state);
+                    session.Status = SessionStatus.WaitingForApproval;
+                    session.ApprovalBlocked = true;
+                    session.ApprovalBlockedAt = DateTimeOffset.UtcNow;
+                    session.FailureDetail = $"Dispatch approval could not be verified because issue rule '{session.RuleName}' is no longer configured.";
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    TransitionReactionOnCurrentAnchor(session, config, null);
+                    _stateStore.SaveState(state);
+                    continue;
+                }
+
+                if (!ValidateIssueApproval(session, issueForApproval, issueRule, config, state, machineIdentifier))
+                {
+                    _stateStore.SaveState(state);
+                    continue;
+                }
+            }
+
             var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
             if (!string.IsNullOrEmpty(mainRepoPath) && Directory.Exists(mainRepoPath))
             {
@@ -968,6 +1225,8 @@ public sealed class ReconciliationEngine
             {
                 Number = session.IssueNumber,
                 Repo = session.Repo,
+                Title = session.ApprovedIssueTitle ?? session.SubjectTitle ?? "",
+                Body = session.ApprovedIssueBody ?? "",
             };
 
             var result = _processManager.LaunchCopilot(session, config, issue, state);
@@ -983,6 +1242,8 @@ public sealed class ReconciliationEngine
             else
             {
                 // Session launched successfully — indicate active work
+                if (session.SubjectKind == DispatchSubjectKind.Issue)
+                    session.ApprovalDispatchedAt ??= DateTimeOffset.UtcNow;
                 TransitionReactionOnCurrentAnchor(session, config, GhCliService.ReactionRocket);
             }
 
@@ -1078,6 +1339,8 @@ public sealed class ReconciliationEngine
         session.UpdatedAt = DateTimeOffset.UtcNow;
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
     }
 
     private string BuildTrustFailureDetail(DispatchSession session, CopilotTrustCheckResult trustCheck)

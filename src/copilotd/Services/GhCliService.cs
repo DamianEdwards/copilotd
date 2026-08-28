@@ -24,7 +24,7 @@ public sealed class AccessibleGitHubRepo
 public sealed class GhCliService
 {
     private readonly ILogger<GhCliService> _logger;
-    private bool _supportsTypeField = true;
+    private bool _supportsIssueTypeField = true;
 
     // Cache collaborator permission checks to avoid excessive API calls (TTL: 15 minutes)
     private readonly Dictionary<string, (bool HasAccess, DateTimeOffset CheckedAt)> _collaboratorCache = new(StringComparer.OrdinalIgnoreCase);
@@ -302,8 +302,8 @@ public sealed class GhCliService
     /// </summary>
     public List<GitHubIssue> QueryIssues(string repo, IssueDispatchRule issueRule)
     {
-        var jsonFields = _supportsTypeField
-            ? "number,title,author,assignees,labels,milestone,type"
+        var jsonFields = _supportsIssueTypeField
+            ? "number,title,author,assignees,labels,milestone,issueType"
             : "number,title,author,assignees,labels,milestone";
 
         var args = $"issue list --repo {repo} --state open --json {jsonFields} --limit 100";
@@ -320,10 +320,10 @@ public sealed class GhCliService
         var (exitCode, output) = RunGh(args);
 
         // Fall back to querying without 'type' if gh doesn't support it
-        if (exitCode != 0 && _supportsTypeField && output.Contains("Unknown JSON field", StringComparison.OrdinalIgnoreCase))
+        if (exitCode != 0 && _supportsIssueTypeField && output.Contains("Unknown JSON field", StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogDebug("gh CLI does not support 'type' JSON field, retrying without it");
-            _supportsTypeField = false;
+            _logger.LogDebug("gh CLI does not support 'issueType' JSON field, retrying without it");
+            _supportsIssueTypeField = false;
             args = $"issue list --repo {repo} --state open --json number,title,author,assignees,labels,milestone --limit 100";
 
             if (issueRule.Assignee is not null)
@@ -355,6 +355,451 @@ public sealed class GhCliService
         }
     }
 
+    /// <summary>
+    /// Binds the current issue content to the latest label/assignment events that make the
+    /// dispatch rule match. If the title or body changed after that approval point, the
+    /// result is stale and must not be dispatched.
+    /// </summary>
+    public IssueDispatchApproval GetIssueDispatchApproval(string repo, int issueNumber, IssueDispatchRule issueRule)
+    {
+        var repoParts = repo.Split('/', 2);
+        if (repoParts.Length != 2)
+            return ApprovalUnavailable($"Invalid repository slug '{repo}'.");
+
+        var requiredLabels = issueRule.Labels.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var requiredAssignee = issueRule.Assignee;
+        var requiredMilestone = issueRule.Milestone;
+        var requiredType = issueRule.Type;
+        var hasExplicitTrigger = requiredLabels.Count > 0
+                                 || requiredAssignee is not null
+                                 || requiredMilestone is not null
+                                 || requiredType is not null;
+        var latestTriggerEvents = new Dictionary<string, ApprovalTriggerEvent>(StringComparer.OrdinalIgnoreCase);
+        DateTimeOffset? lastTitleEditAt = null;
+        DateTimeOffset? lastBodyEditAt = null;
+        string title = "";
+        string body = "";
+        string? before = null;
+        var currentLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var currentAssignees = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? currentMilestone = null;
+        string? currentType = null;
+
+        for (var page = 0; page < 100; page++)
+        {
+            var request = new JsonObject
+            {
+                ["query"] = """
+                    query($owner: String!, $name: String!, $number: Int!, $before: String) {
+                      repository(owner: $owner, name: $name) {
+                        issue(number: $number) {
+                          title
+                          body
+                          createdAt
+                          lastEditedAt
+                          milestone { title }
+                          issueType { name }
+                          labels(first: 100) {
+                            nodes { name }
+                          }
+                          assignees(first: 100) {
+                            nodes { login }
+                          }
+                          timelineItems(
+                            last: 100
+                            before: $before
+                            itemTypes: [
+                              LABELED_EVENT
+                              UNLABELED_EVENT
+                              ASSIGNED_EVENT
+                              UNASSIGNED_EVENT
+                              MILESTONED_EVENT
+                              DEMILESTONED_EVENT
+                              ISSUE_TYPE_ADDED_EVENT
+                              ISSUE_TYPE_REMOVED_EVENT
+                              ISSUE_TYPE_CHANGED_EVENT
+                              RENAMED_TITLE_EVENT
+                            ]
+                          ) {
+                            pageInfo {
+                              hasPreviousPage
+                              startCursor
+                            }
+                            nodes {
+                              __typename
+                              ... on LabeledEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                label { name }
+                              }
+                              ... on UnlabeledEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                label { name }
+                              }
+                              ... on AssignedEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                assignee {
+                                  __typename
+                                  ... on User { login }
+                                  ... on Bot { login }
+                                  ... on Mannequin { login }
+                                }
+                              }
+                              ... on UnassignedEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                assignee {
+                                  __typename
+                                  ... on User { login }
+                                  ... on Bot { login }
+                                  ... on Mannequin { login }
+                                }
+                              }
+                              ... on MilestonedEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                milestoneTitle
+                              }
+                              ... on DemilestonedEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                milestoneTitle
+                              }
+                              ... on IssueTypeAddedEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                issueType { name }
+                              }
+                              ... on IssueTypeRemovedEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                issueType { name }
+                              }
+                              ... on IssueTypeChangedEvent {
+                                id
+                                createdAt
+                                actor { login }
+                                issueType { name }
+                                prevIssueType { name }
+                              }
+                              ... on RenamedTitleEvent {
+                                id
+                                createdAt
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                    """,
+                ["variables"] = new JsonObject
+                {
+                    ["owner"] = repoParts[0],
+                    ["name"] = repoParts[1],
+                    ["number"] = issueNumber,
+                    ["before"] = before,
+                },
+            };
+
+            var (exitCode, output) = RunGhWithStdin("api graphql --input -", request.ToJsonString());
+            if (exitCode != 0)
+            {
+                _logger.LogWarning("Failed to query dispatch approval for {Repo}#{Issue}: {Output}", repo, issueNumber, output);
+                return ApprovalUnavailable("GitHub did not return the issue approval history.");
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(output);
+                if (doc.RootElement.TryGetProperty("errors", out var errors))
+                {
+                    _logger.LogWarning("GraphQL errors querying dispatch approval for {Repo}#{Issue}: {Errors}",
+                        repo, issueNumber, errors.ToString());
+                    return ApprovalUnavailable("GitHub returned errors while reading the issue approval history.");
+                }
+
+                if (!doc.RootElement.TryGetProperty("data", out var data)
+                    || !data.TryGetProperty("repository", out var repository)
+                    || repository.ValueKind == JsonValueKind.Null
+                    || !repository.TryGetProperty("issue", out var issue)
+                    || issue.ValueKind == JsonValueKind.Null)
+                {
+                    return ApprovalUnavailable("The issue could not be found while validating its dispatch approval.");
+                }
+
+                if (page == 0)
+                {
+                    title = issue.TryGetProperty("title", out var titleEl) ? titleEl.GetString() ?? "" : "";
+                    body = issue.TryGetProperty("body", out var bodyEl) ? bodyEl.GetString() ?? "" : "";
+                    lastBodyEditAt = ReadDateTimeOffset(issue, "lastEditedAt");
+                    currentMilestone = issue.TryGetProperty("milestone", out var milestoneEl)
+                                       && milestoneEl.ValueKind == JsonValueKind.Object
+                                       && milestoneEl.TryGetProperty("title", out var milestoneTitleEl)
+                        ? milestoneTitleEl.GetString()
+                        : null;
+                    currentType = issue.TryGetProperty("issueType", out var issueTypeEl)
+                                  && issueTypeEl.ValueKind == JsonValueKind.Object
+                                  && issueTypeEl.TryGetProperty("name", out var issueTypeNameEl)
+                        ? issueTypeNameEl.GetString()
+                        : null;
+
+                    if (issue.TryGetProperty("labels", out var labels)
+                        && labels.TryGetProperty("nodes", out var labelNodes))
+                    {
+                        foreach (var label in labelNodes.EnumerateArray())
+                        {
+                            if (label.TryGetProperty("name", out var nameEl) && nameEl.GetString() is { } name)
+                                currentLabels.Add(name);
+                        }
+                    }
+
+                    if (issue.TryGetProperty("assignees", out var assignees)
+                        && assignees.TryGetProperty("nodes", out var assigneeNodes))
+                    {
+                        foreach (var assignee in assigneeNodes.EnumerateArray())
+                        {
+                            if (assignee.TryGetProperty("login", out var loginEl) && loginEl.GetString() is { } login)
+                                currentAssignees.Add(login);
+                        }
+                    }
+                }
+
+                if (!issue.TryGetProperty("timelineItems", out var timeline)
+                    || !timeline.TryGetProperty("nodes", out var nodes)
+                    || !timeline.TryGetProperty("pageInfo", out var pageInfo))
+                {
+                    return ApprovalUnavailable("GitHub did not return the issue timeline needed to validate approval.");
+                }
+
+                var timelineNodes = nodes.EnumerateArray().ToArray();
+                for (var i = timelineNodes.Length - 1; i >= 0; i--)
+                {
+                    var node = timelineNodes[i];
+                    if (!node.TryGetProperty("__typename", out var typeEl)
+                        || typeEl.GetString() is not { } eventType
+                        || !node.TryGetProperty("id", out var idEl)
+                        || idEl.GetString() is not { } eventId
+                        || ReadDateTimeOffset(node, "createdAt") is not { } createdAt)
+                    {
+                        continue;
+                    }
+
+                    if (eventType == "RenamedTitleEvent")
+                    {
+                        if (lastTitleEditAt is null || createdAt > lastTitleEditAt)
+                            lastTitleEditAt = createdAt;
+                        continue;
+                    }
+
+                    var actor = node.TryGetProperty("actor", out var actorEl)
+                                && actorEl.ValueKind == JsonValueKind.Object
+                                && actorEl.TryGetProperty("login", out var actorLoginEl)
+                        ? actorLoginEl.GetString()
+                        : null;
+
+                    if ((eventType is "LabeledEvent" or "UnlabeledEvent")
+                        && node.TryGetProperty("label", out var label)
+                        && label.TryGetProperty("name", out var labelNameEl)
+                        && labelNameEl.GetString() is { } labelName
+                        && requiredLabels.Contains(labelName))
+                    {
+                        var key = $"label:{labelName}";
+                        latestTriggerEvents.TryAdd(key, new ApprovalTriggerEvent(
+                            eventId,
+                            createdAt,
+                            actor,
+                            eventType == "LabeledEvent",
+                            $"label `{labelName}` was applied",
+                            $"remove and reapply the `{labelName}` label"));
+                        continue;
+                    }
+
+                    if (requiredAssignee is not null
+                        && (eventType is "AssignedEvent" or "UnassignedEvent")
+                        && node.TryGetProperty("assignee", out var assignee)
+                        && assignee.ValueKind == JsonValueKind.Object
+                        && assignee.TryGetProperty("login", out var assigneeLoginEl)
+                        && assigneeLoginEl.GetString() is { } assigneeLogin
+                        && string.Equals(assigneeLogin, requiredAssignee, StringComparison.OrdinalIgnoreCase))
+                    {
+                        latestTriggerEvents.TryAdd("assignee", new ApprovalTriggerEvent(
+                            eventId,
+                            createdAt,
+                            actor,
+                            eventType == "AssignedEvent",
+                            $"the issue was assigned to @{requiredAssignee}",
+                            $"unassign and reassign @{requiredAssignee}"));
+                        continue;
+                    }
+
+                    if (requiredMilestone is not null
+                        && (eventType is "MilestonedEvent" or "DemilestonedEvent")
+                        && node.TryGetProperty("milestoneTitle", out var milestoneTitle)
+                        && milestoneTitle.GetString() is { } eventMilestone)
+                    {
+                        latestTriggerEvents.TryAdd("milestone", new ApprovalTriggerEvent(
+                            eventId,
+                            createdAt,
+                            actor,
+                            eventType == "MilestonedEvent"
+                            && string.Equals(eventMilestone, requiredMilestone, StringComparison.OrdinalIgnoreCase),
+                            $"milestone `{requiredMilestone}` was set",
+                            $"remove and reapply the `{requiredMilestone}` milestone"));
+                        continue;
+                    }
+
+                    if (requiredType is not null
+                        && (eventType is "IssueTypeAddedEvent" or "IssueTypeRemovedEvent" or "IssueTypeChangedEvent"))
+                    {
+                        var eventIssueType = node.TryGetProperty("issueType", out var eventIssueTypeEl)
+                                             && eventIssueTypeEl.ValueKind == JsonValueKind.Object
+                                             && eventIssueTypeEl.TryGetProperty("name", out var eventIssueTypeNameEl)
+                            ? eventIssueTypeNameEl.GetString()
+                            : null;
+                        latestTriggerEvents.TryAdd("type", new ApprovalTriggerEvent(
+                            eventId,
+                            createdAt,
+                            actor,
+                            (eventType is "IssueTypeAddedEvent" or "IssueTypeChangedEvent")
+                            && string.Equals(eventIssueType, requiredType, StringComparison.OrdinalIgnoreCase),
+                            $"issue type `{requiredType}` was set",
+                            $"clear and reapply the `{requiredType}` issue type"));
+                    }
+                }
+
+                if (!hasExplicitTrigger)
+                {
+                    return new IssueDispatchApproval
+                    {
+                        Status = IssueDispatchApprovalStatus.Approved,
+                        Title = title,
+                        Body = body,
+                        LastBodyEditAt = lastBodyEditAt,
+                        LastTitleEditAt = lastTitleEditAt,
+                    };
+                }
+
+                var foundAllTriggers = requiredLabels.All(label => latestTriggerEvents.ContainsKey($"label:{label}"))
+                                       && (requiredAssignee is null || latestTriggerEvents.ContainsKey("assignee"))
+                                       && (requiredMilestone is null || latestTriggerEvents.ContainsKey("milestone"))
+                                       && (requiredType is null || latestTriggerEvents.ContainsKey("type"));
+                if (foundAllTriggers)
+                    break;
+
+                var hasPreviousPage = pageInfo.TryGetProperty("hasPreviousPage", out var hasPreviousEl)
+                                      && hasPreviousEl.GetBoolean();
+                before = pageInfo.TryGetProperty("startCursor", out var cursorEl)
+                    ? cursorEl.GetString()
+                    : null;
+
+                if (!hasPreviousPage || before is null)
+                    break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse dispatch approval for {Repo}#{Issue}", repo, issueNumber);
+                return ApprovalUnavailable("The issue approval history could not be parsed.");
+            }
+        }
+
+        foreach (var requiredLabel in requiredLabels)
+        {
+            if (!currentLabels.Contains(requiredLabel))
+                return ApprovalUnavailable($"The required label '{requiredLabel}' is no longer present.");
+
+            if (!latestTriggerEvents.TryGetValue($"label:{requiredLabel}", out var labelEvent) || !labelEvent.IsApplied)
+                return ApprovalUnavailable($"The current application of label '{requiredLabel}' could not be verified.");
+        }
+
+        if (requiredAssignee is not null)
+        {
+            if (!currentAssignees.Contains(requiredAssignee))
+                return ApprovalUnavailable($"The required assignee '@{requiredAssignee}' is no longer assigned.");
+
+            if (!latestTriggerEvents.TryGetValue("assignee", out var assigneeEvent) || !assigneeEvent.IsApplied)
+                return ApprovalUnavailable($"The current assignment to '@{requiredAssignee}' could not be verified.");
+        }
+
+        if (requiredMilestone is not null)
+        {
+            if (!string.Equals(currentMilestone, requiredMilestone, StringComparison.OrdinalIgnoreCase))
+                return ApprovalUnavailable($"The required milestone '{requiredMilestone}' is no longer set.");
+
+            if (!latestTriggerEvents.TryGetValue("milestone", out var milestoneEvent) || !milestoneEvent.IsApplied)
+                return ApprovalUnavailable($"The current '{requiredMilestone}' milestone assignment could not be verified.");
+        }
+
+        if (requiredType is not null)
+        {
+            if (!string.Equals(currentType, requiredType, StringComparison.OrdinalIgnoreCase))
+                return ApprovalUnavailable($"The required issue type '{requiredType}' is no longer set.");
+
+            if (!latestTriggerEvents.TryGetValue("type", out var typeEvent) || !typeEvent.IsApplied)
+                return ApprovalUnavailable($"The current '{requiredType}' issue type assignment could not be verified.");
+        }
+
+        var trigger = latestTriggerEvents.Values
+            .OrderByDescending(e => e.CreatedAt)
+            .ThenByDescending(e => e.Id, StringComparer.Ordinal)
+            .First();
+        var bodyChangedAfterTrigger = lastBodyEditAt is not null && lastBodyEditAt >= trigger.CreatedAt;
+        var titleChangedAfterTrigger = lastTitleEditAt is not null && lastTitleEditAt >= trigger.CreatedAt;
+
+        return new IssueDispatchApproval
+        {
+            Status = bodyChangedAfterTrigger || titleChangedAfterTrigger
+                ? IssueDispatchApprovalStatus.Stale
+                : IssueDispatchApprovalStatus.Approved,
+            TriggerId = trigger.Id,
+            TriggerDescription = trigger.Description,
+            TriggerActor = trigger.Actor,
+            TriggeredAt = trigger.CreatedAt,
+            RetriggerInstruction = trigger.RetriggerInstruction,
+            Title = title,
+            Body = body,
+            LastBodyEditAt = lastBodyEditAt,
+            LastTitleEditAt = lastTitleEditAt,
+        };
+    }
+
+    private static IssueDispatchApproval ApprovalUnavailable(string error)
+        => new()
+        {
+            Status = IssueDispatchApprovalStatus.Unavailable,
+            Error = error,
+        };
+
+    private static DateTimeOffset? ReadDateTimeOffset(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value)
+            || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+            || value.GetString() is not { } text
+            || !DateTimeOffset.TryParse(text, out var parsed))
+        {
+            return null;
+        }
+
+        return parsed;
+    }
+
+    private sealed record ApprovalTriggerEvent(
+        string Id,
+        DateTimeOffset CreatedAt,
+        string? Actor,
+        bool IsApplied,
+        string Description,
+        string RetriggerInstruction);
+
     private static List<GitHubIssue> ParseIssuesJson(string json, string repo)
     {
         using var doc = JsonDocument.Parse(json);
@@ -372,8 +817,11 @@ public sealed class GhCliService
 
             if (element.TryGetProperty("assignees", out var assignees) && assignees.GetArrayLength() > 0)
             {
-                var first = assignees[0];
-                issue.Assignee = first.TryGetProperty("login", out var login) ? login.GetString() : null;
+                foreach (var assignee in assignees.EnumerateArray())
+                {
+                    if (assignee.TryGetProperty("login", out var login) && login.GetString() is { } loginName)
+                        issue.Assignees.Add(loginName);
+                }
             }
 
             if (element.TryGetProperty("author", out var authorEl) && authorEl.ValueKind == JsonValueKind.Object)
@@ -396,7 +844,8 @@ public sealed class GhCliService
                 issue.Milestone = ms.TryGetProperty("title", out var mt) ? mt.GetString() : null;
             }
 
-            if (element.TryGetProperty("type", out var typeEl))
+            if (element.TryGetProperty("issueType", out var typeEl)
+                || element.TryGetProperty("type", out typeEl))
             {
                 if (typeEl.ValueKind == JsonValueKind.Object)
                     issue.Type = typeEl.TryGetProperty("name", out var tn) ? tn.GetString() : null;
@@ -551,9 +1000,14 @@ public sealed class GhCliService
     /// Posts a comment on a GitHub issue. Appends a hidden marker so copilotd
     /// can distinguish its own comments from human replies.
     /// </summary>
-    public bool PostIssueComment(string repo, int issueNumber, string message, string machineIdentifier)
+    public bool PostIssueComment(
+        string repo,
+        int issueNumber,
+        string message,
+        string machineIdentifier,
+        string? deduplicationKey = null)
     {
-        var body = message + "\n\n" + BuildCommentMarker(machineIdentifier);
+        var body = message + "\n\n" + BuildCommentMarker(machineIdentifier, deduplicationKey);
 
         // Use --body-file - to pipe via stdin, avoiding all shell escaping issues
         var args = $"issue comment {issueNumber} --repo {repo} --body-file -";
@@ -595,6 +1049,57 @@ public sealed class GhCliService
 
         _logger.LogInformation("Posted comment on {Repo}#{Issue}", repo, issueNumber);
         return true;
+    }
+
+    /// <summary>
+    /// Returns whether a prior copilotd comment contains the durable deduplication marker.
+    /// Null means the comment history could not be queried and posting should be deferred.
+    /// </summary>
+    public bool? HasIssueCommentWithDedupeKey(
+        string repo,
+        int issueNumber,
+        string deduplicationKey)
+    {
+        var args = $"api --paginate --slurp \"repos/{repo}/issues/{issueNumber}/comments?per_page=100\"";
+        var (exitCode, output) = RunGh(args);
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to query comments for deduplication on {Repo}#{Issue}: {Output}",
+                repo, issueNumber, output);
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return false;
+
+            var marker = $"dedupe-key: {deduplicationKey} -->";
+            foreach (var page in doc.RootElement.EnumerateArray())
+            {
+                var comments = page.ValueKind == JsonValueKind.Array
+                    ? page.EnumerateArray()
+                    : default;
+
+                foreach (var comment in comments)
+                {
+                    if (comment.TryGetProperty("body", out var body)
+                        && body.GetString() is { } text
+                        && text.Contains(marker, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse comments for deduplication on {Repo}#{Issue}", repo, issueNumber);
+            return null;
+        }
     }
 
     /// <summary>
@@ -987,8 +1492,10 @@ public sealed class GhCliService
         return new NewCommentInfo(author, createdAt);
     }
 
-    private static string BuildCommentMarker(string machineIdentifier)
-        => $"<!-- posted by copilotd; machine-id: {machineIdentifier} -->";
+    private static string BuildCommentMarker(string machineIdentifier, string? deduplicationKey = null)
+        => deduplicationKey is null
+            ? $"<!-- posted by copilotd; machine-id: {machineIdentifier} -->"
+            : $"<!-- posted by copilotd; machine-id: {machineIdentifier}; dedupe-key: {deduplicationKey} -->";
 
     private static bool IsCopilotdComment(string? body)
         => body is not null

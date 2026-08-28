@@ -17,7 +17,7 @@ public static class SessionCommand
 {
     private const string MinimumCopilotConnectVersion = "1.0.32";
     internal const string StatusFilterDescription =
-        "Filter sessions by status (pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined (legacy))";
+        "Filter sessions by status (waitingforapproval, pending, dispatching, running, waitingforfeedback, waitingforreview, completed, failed, orphaned, joined (legacy))";
 
     public static Command Create(IServiceProvider services)
     {
@@ -440,6 +440,8 @@ public static class SessionCommand
                         HasStarted = session.HasStarted,
                         ProcessId = session.ProcessId,
                         ProcessStartTime = session.ProcessStartTime,
+                        RootProcessId = session.RootProcessId,
+                        RootProcessStartTime = session.RootProcessStartTime,
                         Status = session.Status,
                         WorktreePath = session.WorktreePath,
                     };
@@ -720,6 +722,9 @@ public static class SessionCommand
 
                     trackedProcess = CaptureTrackedProcess(session);
                     session.Status = SessionStatus.Completed;
+                    session.ApprovalBlocked = false;
+                    session.ApprovalBlockedAt = null;
+                    session.ApprovalDispatchedAt = null;
                     session.FailureDetail = null;
                     session.CompletedBySession = true;
                     ClearTrackedProcess(session);
@@ -899,6 +904,12 @@ public static class SessionCommand
                         return;
                     }
 
+                    if (session.ApprovalBlocked || session.Status == SessionStatus.WaitingForApproval)
+                    {
+                        errorMessage = $"Session '{issueKey}' is waiting for issue reapproval. Review the current title/body and reapply the dispatch trigger instead of resetting the session.";
+                        return;
+                    }
+
                     if (session.Status == SessionStatus.Pending)
                     {
                         pending = true;
@@ -911,7 +922,11 @@ public static class SessionCommand
                     oldReactionAnchor = session.GetReactionAnchor();
                     reactionRuleName = session.RuleName;
 
-                    processManager.TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+                    if (!processManager.TerminateProcess(session))
+                    {
+                        errorMessage = $"Failed to terminate the active process tree for '{issueKey}'. The session was not reset.";
+                        return;
+                    }
                     processManager.CleanupWorktree(session, config, state);
 
                     session.Status = SessionStatus.Pending;
@@ -1080,6 +1095,7 @@ public static class SessionCommand
                 SessionStatus.Joined => $"[blue]{s.Status}[/]",
                 SessionStatus.WaitingForFeedback => $"[cyan]{s.Status}[/]",
                 SessionStatus.WaitingForReview => $"[magenta]{s.Status}[/]",
+                SessionStatus.WaitingForApproval => $"[yellow]{s.Status}[/]",
                 SessionStatus.Pending or SessionStatus.Dispatching => $"[yellow]{s.Status}[/]",
                 SessionStatus.Failed or SessionStatus.Orphaned => $"[red]{s.Status}[/]",
                 SessionStatus.Completed => $"[grey]{s.Status}[/]",
@@ -1167,6 +1183,11 @@ public static class SessionCommand
         table.AddRow("Rule", Markup.Escape(session.RuleName));
         table.AddRow("Status", Markup.Escape(session.Status.ToString()));
         table.AddRow("Subject author", Markup.Escape(session.SubjectAuthor ?? "(unknown)"));
+        table.AddRow("Dispatch trigger", Markup.Escape(session.DispatchTriggerDescription ?? "-"));
+        table.AddRow("Triggered by", Markup.Escape(session.DispatchTriggeredBy ?? "-"));
+        table.AddRow("Triggered at", Markup.Escape(FormatOptionalTime(session.DispatchTriggeredAt)));
+        table.AddRow("Approved content hash", Markup.Escape(session.ApprovedIssueContentHash ?? "-"));
+        table.AddRow("Approval dispatched", Markup.Escape(FormatOptionalTime(session.ApprovalDispatchedAt)));
         table.AddRow("Created", Markup.Escape(session.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
         table.AddRow("Updated", Markup.Escape(session.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz")));
         table.AddRow("Last verified", Markup.Escape(FormatOptionalTime(session.LastVerifiedAt)));
@@ -1186,6 +1207,8 @@ public static class SessionCommand
         }
         table.AddRow("Process ID", Markup.Escape(session.ProcessId?.ToString() ?? "-"));
         table.AddRow("Process start", Markup.Escape(FormatOptionalTime(session.ProcessStartTime)));
+        table.AddRow("Root process ID", Markup.Escape(session.RootProcessId?.ToString() ?? "-"));
+        table.AddRow("Root process start", Markup.Escape(FormatOptionalTime(session.RootProcessStartTime)));
         table.AddRow("Process liveness", Markup.Escape(FormatOptionalLiveness(liveness)));
         table.AddRow("Resume target", Markup.Escape(GetResumeTargetDisplay(session)));
         table.AddRow("Session name", Markup.Escape(session.CopilotSessionName ?? "-"));
@@ -1243,7 +1266,13 @@ public static class SessionCommand
             return;
 
         var shutdownDelay = TimeSpan.FromSeconds(Math.Max(0, config.SessionShutdownDelaySeconds));
-        processManager.ScheduleTerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime, shutdownDelay);
+        processManager.ScheduleTerminateCopilotProcess(
+            trackedProcess.Label,
+            trackedProcess.ProcessId,
+            trackedProcess.ProcessStartTime,
+            trackedProcess.RootProcessId,
+            trackedProcess.RootProcessStartTime,
+            shutdownDelay);
 
         if (shutdownDelay > TimeSpan.Zero)
             ConsoleOutput.Info($"The current copilot session will shut down in {FormatDuration(shutdownDelay)}.");
@@ -1256,7 +1285,12 @@ public static class SessionCommand
     }
 
     private static TrackedProcessRef CaptureTrackedProcess(DispatchSession session)
-        => new(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+        => new(
+            session.IssueKey,
+            session.ProcessId,
+            session.ProcessStartTime,
+            session.RootProcessId,
+            session.RootProcessStartTime);
 
     private static DispatchSession CreateSessionSnapshot(DispatchSession session)
         => new()
@@ -1268,11 +1302,24 @@ public static class SessionCommand
             IssueNumber = session.IssueNumber,
             RuleName = session.RuleName,
             IssueAuthor = session.IssueAuthor,
+            DispatchTriggerId = session.DispatchTriggerId,
+            DispatchTriggerDescription = session.DispatchTriggerDescription,
+            DispatchTriggeredBy = session.DispatchTriggeredBy,
+            DispatchTriggeredAt = session.DispatchTriggeredAt,
+            ApprovedIssueTitle = session.ApprovedIssueTitle,
+            ApprovedIssueBody = session.ApprovedIssueBody,
+            ApprovedIssueContentHash = session.ApprovedIssueContentHash,
+            ApprovalDispatchedAt = session.ApprovalDispatchedAt,
+            RejectedTriggerCommentedId = session.RejectedTriggerCommentedId,
+            ApprovalBlocked = session.ApprovalBlocked,
+            ApprovalBlockedAt = session.ApprovalBlockedAt,
             CopilotSessionId = session.CopilotSessionId,
             CopilotSessionName = session.CopilotSessionName,
             HasStarted = session.HasStarted,
             ProcessId = session.ProcessId,
             ProcessStartTime = session.ProcessStartTime,
+            RootProcessId = session.RootProcessId,
+            RootProcessStartTime = session.RootProcessStartTime,
             Status = session.Status,
             CreatedAt = session.CreatedAt,
             UpdatedAt = session.UpdatedAt,
@@ -1311,9 +1358,16 @@ public static class SessionCommand
     {
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
     }
 
-    private readonly record struct TrackedProcessRef(string Label, int? ProcessId, DateTimeOffset? ProcessStartTime)
+    private readonly record struct TrackedProcessRef(
+        string Label,
+        int? ProcessId,
+        DateTimeOffset? ProcessStartTime,
+        int? RootProcessId,
+        DateTimeOffset? RootProcessStartTime)
     {
         public bool HasProcess => ProcessId is not null;
     }

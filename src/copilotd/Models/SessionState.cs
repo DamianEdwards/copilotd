@@ -69,7 +69,13 @@ public enum SessionStatus
     /// Session created a pull request and is waiting for review feedback.
     /// No process is running; the reconciler monitors for new PR review comments.
     /// </summary>
-    WaitingForReview
+    WaitingForReview,
+
+    /// <summary>
+    /// The issue changed after its dispatch trigger was applied, or approval could not be verified.
+    /// No process is running; the trigger must be applied again after the current content is reviewed.
+    /// </summary>
+    WaitingForApproval
 }
 
 /// <summary>
@@ -172,6 +178,45 @@ public sealed class DispatchSession
     /// <summary>Title of the root subject at dispatch time, when available.</summary>
     public string? SubjectTitle { get; set; }
 
+    /// <summary>GitHub event ID that approved the current issue snapshot.</summary>
+    public string? DispatchTriggerId { get; set; }
+
+    /// <summary>Description of the label or assignment event that approved the issue snapshot.</summary>
+    public string? DispatchTriggerDescription { get; set; }
+
+    /// <summary>GitHub login that applied the dispatch trigger.</summary>
+    public string? DispatchTriggeredBy { get; set; }
+
+    /// <summary>When the dispatch trigger was applied.</summary>
+    public DateTimeOffset? DispatchTriggeredAt { get; set; }
+
+    /// <summary>Issue title approved for the first dispatch.</summary>
+    public string? ApprovedIssueTitle { get; set; }
+
+    /// <summary>Issue body approved for the first dispatch.</summary>
+    public string? ApprovedIssueBody { get; set; }
+
+    /// <summary>SHA-256 hash of the approved issue title and body.</summary>
+    public string? ApprovedIssueContentHash { get; set; }
+
+    /// <summary>When the approved issue snapshot was first dispatched.</summary>
+    public DateTimeOffset? ApprovalDispatchedAt { get; set; }
+
+    /// <summary>
+    /// Trigger event for which copilotd already posted a stale-approval comment.
+    /// Prevents duplicate comments on every reconciliation cycle.
+    /// </summary>
+    public string? RejectedTriggerCommentedId { get; set; }
+
+    /// <summary>
+    /// Persisted safety discriminator for <see cref="SessionStatus.WaitingForApproval"/>.
+    /// The status is serialized as Failed so older binaries cannot dispatch it as Pending.
+    /// </summary>
+    public bool ApprovalBlocked { get; set; }
+
+    /// <summary>Actual update time hidden behind the downgrade-safe persisted timestamp sentinel.</summary>
+    public DateTimeOffset? ApprovalBlockedAt { get; set; }
+
     /// <summary>
     /// Stable local identifier for this tracked session. Existing persisted sessions also use this
     /// as their copilot <c>--resume</c> value. New named sessions keep this identifier for
@@ -197,6 +242,15 @@ public sealed class DispatchSession
     /// <summary>Process start time, used alongside PID to detect PID reuse.</summary>
     public DateTimeOffset? ProcessStartTime { get; set; }
 
+    /// <summary>
+    /// Windows bootstrap process created directly by copilotd. Liveness prefers this stable
+    /// root while it is running and only promotes a surviving child after the root exits.
+    /// </summary>
+    public int? RootProcessId { get; set; }
+
+    /// <summary>Start time for <see cref="RootProcessId"/>, used to detect PID reuse.</summary>
+    public DateTimeOffset? RootProcessStartTime { get; set; }
+
     /// <summary>Current lifecycle status.</summary>
     public SessionStatus Status { get; set; } = SessionStatus.Pending;
 
@@ -204,7 +258,19 @@ public sealed class DispatchSession
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     /// <summary>When the status was last updated.</summary>
+    [JsonIgnore]
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Persisted form of <see cref="UpdatedAt"/>. Approval-blocked sessions use a future
+    /// sentinel so older binaries cannot prune the downgrade-safe Failed representation.
+    /// </summary>
+    [JsonPropertyName("updatedAt")]
+    public DateTimeOffset PersistedUpdatedAt
+    {
+        get => ApprovalBlocked ? DateTimeOffset.MaxValue : UpdatedAt;
+        set => UpdatedAt = value;
+    }
 
     /// <summary>When the process was last confirmed alive.</summary>
     public DateTimeOffset? LastVerifiedAt { get; set; }
@@ -388,6 +454,12 @@ public sealed class ControlSessionInfo
 
     /// <summary>Process start time, used alongside PID to detect PID reuse.</summary>
     public DateTimeOffset? ProcessStartTime { get; set; }
+
+    /// <summary>Windows bootstrap process created directly by copilotd.</summary>
+    public int? RootProcessId { get; set; }
+
+    /// <summary>Start time for <see cref="RootProcessId"/>, used to detect PID reuse.</summary>
+    public DateTimeOffset? RootProcessStartTime { get; set; }
 
     /// <summary>Current lifecycle status.</summary>
     public ControlSessionStatus Status { get; set; } = ControlSessionStatus.Stopped;

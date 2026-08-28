@@ -131,9 +131,12 @@ public static class RunCommand
                             var state = stateStore.LoadState();
                             var machineIdentifier = stateStore.EnsureMachineIdentifier(daemonCancellationToken);
 
-                            var existingAlive = state.ControlSession is not null
+                            var controlSessionBeforeCheck = state.ControlSession;
+                            var previousProcessId = controlSessionBeforeCheck?.ProcessId;
+                            var previousProcessStartTime = controlSessionBeforeCheck?.ProcessStartTime;
+                            var existingAlive = controlSessionBeforeCheck is not null
                                 && IsControlSessionHealthy(
-                                    state.ControlSession,
+                                    controlSessionBeforeCheck,
                                     processManager,
                                     remoteSessionUrls,
                                     config.CurrentUser,
@@ -142,6 +145,11 @@ public static class RunCommand
                             if (existingAlive)
                             {
                                 existingControlSession = state.ControlSession;
+                                if (state.ControlSession!.ProcessId != previousProcessId
+                                    || state.ControlSession.ProcessStartTime != previousProcessStartTime)
+                                {
+                                    stateStore.SaveState(state);
+                                }
                                 return;
                             }
 
@@ -252,13 +260,22 @@ public static class RunCommand
 
                                     if (config.EnableControlSession)
                                     {
-                                        var controlAlive = state.ControlSession is not null
+                                        var controlSessionBeforeCheck = state.ControlSession;
+                                        var previousProcessId = controlSessionBeforeCheck?.ProcessId;
+                                        var previousProcessStartTime = controlSessionBeforeCheck?.ProcessStartTime;
+                                        var controlAlive = controlSessionBeforeCheck is not null
                                             && IsControlSessionHealthy(
-                                                state.ControlSession,
+                                                controlSessionBeforeCheck,
                                                 processManager,
                                                 remoteSessionUrls,
                                                 config.CurrentUser,
                                                 DateTimeOffset.UtcNow);
+                                        if (controlAlive
+                                            && (state.ControlSession!.ProcessId != previousProcessId
+                                                || state.ControlSession.ProcessStartTime != previousProcessStartTime))
+                                        {
+                                            stateStore.SaveState(state);
+                                        }
 
                                         if (!controlAlive)
                                         {
@@ -318,6 +335,8 @@ public static class RunCommand
                                         state.ControlSession.Status = ControlSessionStatus.Stopped;
                                         state.ControlSession.ProcessId = null;
                                         state.ControlSession.ProcessStartTime = null;
+                                        state.ControlSession.RootProcessId = null;
+                                        state.ControlSession.RootProcessStartTime = null;
                                         state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                                         stateStore.SaveState(state);
                                     }
@@ -496,6 +515,8 @@ public static class RunCommand
                     state.ControlSession.Status = ControlSessionStatus.Stopped;
                     state.ControlSession.ProcessId = null;
                     state.ControlSession.ProcessStartTime = null;
+                    state.ControlSession.RootProcessId = null;
+                    state.ControlSession.RootProcessStartTime = null;
                     state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                 }
                 else
@@ -517,6 +538,8 @@ public static class RunCommand
                         session.Status = SessionStatus.Completed;
                         session.ProcessId = null;
                         session.ProcessStartTime = null;
+                        session.RootProcessId = null;
+                        session.RootProcessStartTime = null;
                         session.UpdatedAt = DateTimeOffset.UtcNow;
                     }
                     else
@@ -544,15 +567,19 @@ public static class RunCommand
                 && state.ControlSession.Status == ControlSessionStatus.Running)
             {
                 logger.LogWarning("Process exit detected before normal shutdown cleanup completed; scheduling control session termination");
-                if (processManager.ScheduleTerminateProcess(
+                if (processManager.ScheduleTerminateCopilotProcess(
                     "control session",
                     state.ControlSession.ProcessId,
                     state.ControlSession.ProcessStartTime,
+                    state.ControlSession.RootProcessId,
+                    state.ControlSession.RootProcessStartTime,
                     TimeSpan.Zero))
                 {
                     state.ControlSession.Status = ControlSessionStatus.Stopped;
                     state.ControlSession.ProcessId = null;
                     state.ControlSession.ProcessStartTime = null;
+                    state.ControlSession.RootProcessId = null;
+                    state.ControlSession.RootProcessStartTime = null;
                     state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                     stateChanged = true;
                 }
@@ -565,15 +592,19 @@ public static class RunCommand
             foreach (var session in state.Sessions.Values.Where(s => s.Status == SessionStatus.Running))
             {
                 logger.LogWarning("Process exit detected before normal shutdown cleanup completed; scheduling termination for session {IssueKey}", session.IssueKey);
-                if (processManager.ScheduleTerminateProcess(
+                if (processManager.ScheduleTerminateCopilotProcess(
                     session.IssueKey,
                     session.ProcessId,
                     session.ProcessStartTime,
+                    session.RootProcessId,
+                    session.RootProcessStartTime,
                     TimeSpan.Zero))
                 {
                     session.Status = SessionStatus.Completed;
                     session.ProcessId = null;
                     session.ProcessStartTime = null;
+                    session.RootProcessId = null;
+                    session.RootProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     stateChanged = true;
                 }

@@ -47,15 +47,24 @@ public static class StatusCommand
 
                     if (currentState.ControlSession?.Status == ControlSessionStatus.Running)
                     {
+                        var previousProcessId = currentState.ControlSession.ProcessId;
+                        var previousProcessStartTime = currentState.ControlSession.ProcessStartTime;
                         controlLiveness = processManager.CheckControlSession(currentState.ControlSession);
                         if (controlLiveness is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused)
                         {
                             currentState.ControlSession.Status = ControlSessionStatus.Stopped;
                             currentState.ControlSession.ProcessId = null;
                             currentState.ControlSession.ProcessStartTime = null;
+                            currentState.ControlSession.RootProcessId = null;
+                            currentState.ControlSession.RootProcessStartTime = null;
                             currentState.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                             stateStore.SaveState(currentState);
                             recoveredStaleControlSession = true;
+                        }
+                        else if (currentState.ControlSession.ProcessId != previousProcessId
+                                 || currentState.ControlSession.ProcessStartTime != previousProcessStartTime)
+                        {
+                            stateStore.SaveState(currentState);
                         }
                     }
 

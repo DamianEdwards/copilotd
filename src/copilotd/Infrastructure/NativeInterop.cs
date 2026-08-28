@@ -27,6 +27,17 @@ internal static class NativeInterop
     public static extern bool CloseHandle(IntPtr hObject);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetProcessTimes(
+        IntPtr hProcess,
+        out FILETIME lpCreationTime,
+        out FILETIME lpExitTime,
+        out FILETIME lpKernelTime,
+        out FILETIME lpUserTime);
+
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "TerminateProcess")]
+    public static extern bool TerminateProcessHandle(IntPtr hProcess, uint uExitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool SetConsoleCtrlHandler(IntPtr handlerRoutine, bool add);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -62,6 +73,13 @@ internal static class NativeInterop
         public IntPtr hThread;
         public int dwProcessId;
         public int dwThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FILETIME
+    {
+        public uint dwLowDateTime;
+        public uint dwHighDateTime;
     }
 
     public const uint CREATE_NEW_CONSOLE = 0x00000010;
@@ -186,6 +204,42 @@ internal static class NativeInterop
 
         Walk(rootPid, 0);
         return bestPid;
+    }
+
+    public static IReadOnlyList<WindowsProcessEntry> FindWindowsDescendantProcesses(
+        int rootPid,
+        string executableName)
+    {
+        if (!OperatingSystem.IsWindows())
+            return [];
+
+        var processes = EnumerateWindowsProcesses();
+        if (processes.Count == 0)
+            return [];
+
+        var childrenByParent = processes
+            .GroupBy(process => process.ParentProcessId)
+            .ToDictionary(group => group.Key, group => group.ToList());
+        var matches = new List<WindowsProcessEntry>();
+        var pending = new Stack<int>();
+        pending.Push(rootPid);
+
+        while (pending.Count > 0)
+        {
+            var parentPid = pending.Pop();
+            if (!childrenByParent.TryGetValue(parentPid, out var children))
+                continue;
+
+            foreach (var child in children)
+            {
+                if (string.Equals(child.ExecutableName, executableName, StringComparison.OrdinalIgnoreCase))
+                    matches.Add(child);
+
+                pending.Push(child.ProcessId);
+            }
+        }
+
+        return matches;
     }
 
     // --- Unix signal APIs ---

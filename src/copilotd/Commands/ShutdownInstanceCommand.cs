@@ -32,6 +32,8 @@ public static class ShutdownInstanceCommand
 
         var pidOption = new Option<int>("--pid") { Description = "Process ID to shut down" };
         var expectedStartOption = new Option<string?>("--expected-start") { Description = "Expected UTC process start time in round-trip format" };
+        var fallbackPidOption = new Option<int>("--fallback-pid") { Description = "Fallback process ID if the primary exits before delayed shutdown" };
+        var fallbackExpectedStartOption = new Option<string?>("--fallback-expected-start") { Description = "Expected UTC start time for the fallback process" };
         var delaySecondsOption = new Option<int>("--delay-seconds") { Description = "Seconds to wait before beginning shutdown" };
         var signalProfileOption = new Option<string>("--signal-profile")
         {
@@ -40,6 +42,8 @@ public static class ShutdownInstanceCommand
         };
         command.Options.Add(pidOption);
         command.Options.Add(expectedStartOption);
+        command.Options.Add(fallbackPidOption);
+        command.Options.Add(fallbackExpectedStartOption);
         command.Options.Add(delaySecondsOption);
         command.Options.Add(signalProfileOption);
 
@@ -48,6 +52,8 @@ public static class ShutdownInstanceCommand
             var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(ShutdownInstanceCommand).FullName!);
             var pid = parseResult.GetValue(pidOption);
             var expectedStartText = parseResult.GetValue(expectedStartOption);
+            var fallbackPid = parseResult.GetValue(fallbackPidOption);
+            var fallbackExpectedStartText = parseResult.GetValue(fallbackExpectedStartOption);
             var delaySeconds = parseResult.GetValue(delaySecondsOption);
             var signalProfileText = parseResult.GetValue(signalProfileOption);
             if (delaySeconds < 0)
@@ -62,6 +68,21 @@ public static class ShutdownInstanceCommand
                 return (int)ShutdownInstanceExitCode.InvalidArguments;
             }
 
+            if (!TryParseExpectedStart(fallbackExpectedStartText, out var fallbackExpectedStart))
+            {
+                logger.LogWarning(
+                    "shutdown-instance received invalid fallback expected start '{ExpectedStart}' for PID {Pid}",
+                    fallbackExpectedStartText,
+                    fallbackPid);
+                return (int)ShutdownInstanceExitCode.InvalidArguments;
+            }
+
+            if (fallbackPid < 0)
+            {
+                logger.LogWarning("shutdown-instance received invalid fallback PID {Pid}", fallbackPid);
+                return (int)ShutdownInstanceExitCode.InvalidArguments;
+            }
+
             if (!TryParseSignalProfile(signalProfileText, out var signalProfile))
             {
                 logger.LogWarning("shutdown-instance received invalid signal profile '{SignalProfile}' for PID {Pid}", signalProfileText, pid);
@@ -70,7 +91,14 @@ public static class ShutdownInstanceCommand
 
             try
             {
-                return (int)ShutdownProcess(pid, expectedStart, TimeSpan.FromSeconds(delaySeconds), signalProfile, logger);
+                return (int)ShutdownProcess(
+                    pid,
+                    expectedStart,
+                    fallbackPid > 0 ? fallbackPid : null,
+                    fallbackExpectedStart,
+                    TimeSpan.FromSeconds(delaySeconds),
+                    signalProfile,
+                    logger);
             }
             catch (Exception ex)
             {
@@ -110,6 +138,8 @@ public static class ShutdownInstanceCommand
     private static ShutdownInstanceExitCode ShutdownProcess(
         int pid,
         DateTimeOffset? expectedStart,
+        int? fallbackPid,
+        DateTimeOffset? fallbackExpectedStart,
         TimeSpan shutdownDelay,
         ShutdownSignalProfile signalProfile,
         ILogger logger)
@@ -124,36 +154,33 @@ public static class ShutdownInstanceCommand
             Thread.Sleep(effectiveDelay);
         }
 
-        Process process;
-        try
+        if (!TryOpenValidatedProcess(pid, expectedStart, logger, out var process, out var primaryFailure))
         {
-            process = Process.GetProcessById(pid);
-        }
-        catch (ArgumentException)
-        {
-            logger.LogInformation("shutdown-instance found PID {Pid} already exited before signaling", pid);
-            return ShutdownInstanceExitCode.AlreadyExited;
-        }
-
-        try
-        {
-            if (expectedStart is { } expectedStartTime)
+            var fallbackFailure = ShutdownInstanceExitCode.AlreadyExited;
+            if (fallbackPid is not { } fallback
+                || fallback == pid
+                || !TryOpenValidatedProcess(
+                    fallback,
+                    fallbackExpectedStart,
+                    logger,
+                    out process,
+                    out fallbackFailure))
             {
-                var actualStart = GetProcessStartTime(process);
-                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStartTime).TotalSeconds) > 5)
-                {
-                    logger.LogWarning("shutdown-instance skipped PID {Pid} due to start time mismatch. Expected {ExpectedStart}, actual {ActualStart}",
-                        pid, expectedStartTime, actualStart);
-                    return ShutdownInstanceExitCode.StartTimeMismatch;
-                }
+                return primaryFailure == ShutdownInstanceExitCode.StartTimeMismatch
+                       || (fallbackPid.HasValue && fallbackFailure == ShutdownInstanceExitCode.StartTimeMismatch)
+                    ? ShutdownInstanceExitCode.StartTimeMismatch
+                    : ShutdownInstanceExitCode.AlreadyExited;
             }
 
-            if (process.HasExited)
-            {
-                logger.LogInformation("shutdown-instance found PID {Pid} already exited after validation", pid);
-                return ShutdownInstanceExitCode.AlreadyExited;
-            }
+            logger.LogInformation(
+                "shutdown-instance primary PID {PrimaryPid} exited before signaling; using fallback PID {FallbackPid}",
+                pid,
+                fallback);
+            pid = fallback;
+        }
 
+        try
+        {
             ShutdownInstanceExitCode outcome;
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 outcome = ShutdownWindows(process, pid, signalProfile, logger);
@@ -167,6 +194,55 @@ public static class ShutdownInstanceCommand
         {
             process.Dispose();
         }
+    }
+
+    private static bool TryOpenValidatedProcess(
+        int pid,
+        DateTimeOffset? expectedStart,
+        ILogger logger,
+        out Process process,
+        out ShutdownInstanceExitCode failure)
+    {
+        try
+        {
+            process = Process.GetProcessById(pid);
+        }
+        catch (ArgumentException)
+        {
+            logger.LogInformation("shutdown-instance found PID {Pid} already exited before signaling", pid);
+            process = null!;
+            failure = ShutdownInstanceExitCode.AlreadyExited;
+            return false;
+        }
+
+        if (expectedStart is { } expectedStartTime)
+        {
+            var actualStart = GetProcessStartTime(process);
+            if (!ProcessStartTimesMatch(actualStart, expectedStartTime))
+            {
+                logger.LogWarning(
+                    "shutdown-instance skipped PID {Pid} due to start time mismatch. Expected {ExpectedStart}, actual {ActualStart}",
+                    pid,
+                    expectedStartTime,
+                    actualStart);
+                process.Dispose();
+                process = null!;
+                failure = ShutdownInstanceExitCode.StartTimeMismatch;
+                return false;
+            }
+        }
+
+        if (process.HasExited)
+        {
+            logger.LogInformation("shutdown-instance found PID {Pid} already exited after validation", pid);
+            process.Dispose();
+            process = null!;
+            failure = ShutdownInstanceExitCode.AlreadyExited;
+            return false;
+        }
+
+        failure = default;
+        return true;
     }
 
     /// <summary>
@@ -539,6 +615,22 @@ public static class ShutdownInstanceCommand
     {
         try
         {
+            if (OperatingSystem.IsWindows())
+            {
+                if (!NativeInterop.GetProcessTimes(
+                        process.SafeHandle.DangerousGetHandle(),
+                        out var creationTime,
+                        out _,
+                        out _,
+                        out _))
+                {
+                    return null;
+                }
+
+                var fileTime = ((long)creationTime.dwHighDateTime << 32) | creationTime.dwLowDateTime;
+                return DateTimeOffset.FromFileTime(fileTime).ToUniversalTime();
+            }
+
             return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
         }
         catch
@@ -546,6 +638,12 @@ public static class ShutdownInstanceCommand
             return null;
         }
     }
+
+    private static bool ProcessStartTimesMatch(DateTimeOffset? actual, DateTimeOffset expected)
+        => actual is { } actualStart
+           && (OperatingSystem.IsWindows()
+               ? actualStart == expected
+               : Math.Abs((actualStart - expected).TotalSeconds) <= 5);
 
     #region Platform Interop
 

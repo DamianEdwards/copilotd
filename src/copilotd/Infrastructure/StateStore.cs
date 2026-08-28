@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Copilotd.Models;
 using Microsoft.Extensions.Logging;
@@ -29,6 +31,7 @@ public sealed class StateStore
     public string ConfigDir => _configDir;
 
     private string PromptPath => Path.Combine(_configDir, "prompt.md");
+    private string ApprovedIssueSnapshotsDirectory => Path.Combine(_configDir, "approved-issues");
 
     public StateStore(LogFileManager logFileManager, ILogger<StateStore> logger)
     {
@@ -93,8 +96,22 @@ public sealed class StateStore
         try
         {
             var json = File.ReadAllText(_statePath);
-            return JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.DaemonState)
-                   ?? new DaemonState();
+            var state = JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.DaemonState)
+                        ?? new DaemonState();
+            foreach (var session in state.Sessions.Values)
+            {
+                var hasApprovalSentinel = session.UpdatedAt == DateTimeOffset.MaxValue;
+                if (session.ApprovalBlocked || hasApprovalSentinel)
+                {
+                    session.ApprovalBlocked = true;
+                    if (session.Status == SessionStatus.Failed)
+                        session.Status = SessionStatus.WaitingForApproval;
+                    session.ApprovalBlockedAt ??= DateTimeOffset.UtcNow;
+                    session.UpdatedAt = session.ApprovalBlockedAt.Value;
+                }
+            }
+
+            return state;
         }
         catch (Exception ex)
         {
@@ -108,6 +125,73 @@ public sealed class StateStore
         var json = JsonSerializer.Serialize(state, CopilotdJsonContext.Default.DaemonState);
         AtomicWrite(_statePath, json);
         _logger.LogDebug("State saved to {Path}", _statePath);
+    }
+
+    public string WriteApprovedIssueSnapshot(DispatchSession session)
+    {
+        if (session.ApprovedIssueTitle is null
+            || session.ApprovedIssueBody is null
+            || session.ApprovedIssueContentHash is null)
+        {
+            throw new InvalidOperationException($"Session {session.SubjectKey} has no approved issue snapshot.");
+        }
+
+        var snapshotPath = GetApprovedIssueSnapshotPath(session.SubjectKey);
+        var triggerDescription = session.DispatchTriggerDescription ?? "current issue content observed";
+        var triggerActor = string.IsNullOrWhiteSpace(session.DispatchTriggeredBy)
+            ? ""
+            : $" by @{session.DispatchTriggeredBy}";
+        var triggerTime = session.DispatchTriggeredAt?.ToUniversalTime().ToString("O") ?? "not applicable";
+        var content = $"""
+            # Approved GitHub issue snapshot
+
+            This immutable snapshot is the authoritative title and body for the dispatched work.
+            Later edits to the live GitHub issue are not approved task input.
+
+            - Issue: {session.SubjectKey}
+            - Approval: {triggerDescription}{triggerActor}
+            - Approved at: {triggerTime}
+            - Content SHA-256: {session.ApprovedIssueContentHash}
+
+            ## Title
+
+            {session.ApprovedIssueTitle}
+
+            ## Body
+
+            {session.ApprovedIssueBody}
+            """;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(snapshotPath)!);
+        AtomicWrite(snapshotPath, content);
+        return snapshotPath;
+    }
+
+    public void DeleteApprovedIssueSnapshot(string subjectKey)
+    {
+        var snapshotPath = GetApprovedIssueSnapshotPath(subjectKey);
+        try
+        {
+            if (File.Exists(snapshotPath))
+                File.Delete(snapshotPath);
+
+            var snapshotDirectory = Path.GetDirectoryName(snapshotPath);
+            if (snapshotDirectory is not null && Directory.Exists(snapshotDirectory))
+                Directory.Delete(snapshotDirectory);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to delete approved issue snapshot at {Path}", snapshotPath);
+        }
+    }
+
+    private string GetApprovedIssueSnapshotPath(string subjectKey)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(subjectKey.ToLowerInvariant()));
+        var snapshotDirectory = Path.Combine(
+            ApprovedIssueSnapshotsDirectory,
+            Convert.ToHexString(hash).ToLowerInvariant());
+        return Path.Combine(snapshotDirectory, "approved-issue.md");
     }
 
     public string? GetMachineIdentifier()
