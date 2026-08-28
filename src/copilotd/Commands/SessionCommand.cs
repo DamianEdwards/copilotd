@@ -440,6 +440,8 @@ public static class SessionCommand
                         HasStarted = session.HasStarted,
                         ProcessId = session.ProcessId,
                         ProcessStartTime = session.ProcessStartTime,
+                        RootProcessId = session.RootProcessId,
+                        RootProcessStartTime = session.RootProcessStartTime,
                         Status = session.Status,
                         WorktreePath = session.WorktreePath,
                     };
@@ -920,7 +922,11 @@ public static class SessionCommand
                     oldReactionAnchor = session.GetReactionAnchor();
                     reactionRuleName = session.RuleName;
 
-                    processManager.TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+                    if (!processManager.TerminateProcess(session))
+                    {
+                        errorMessage = $"Failed to terminate the active process tree for '{issueKey}'. The session was not reset.";
+                        return;
+                    }
                     processManager.CleanupWorktree(session, config, state);
 
                     session.Status = SessionStatus.Pending;
@@ -1201,6 +1207,8 @@ public static class SessionCommand
         }
         table.AddRow("Process ID", Markup.Escape(session.ProcessId?.ToString() ?? "-"));
         table.AddRow("Process start", Markup.Escape(FormatOptionalTime(session.ProcessStartTime)));
+        table.AddRow("Root process ID", Markup.Escape(session.RootProcessId?.ToString() ?? "-"));
+        table.AddRow("Root process start", Markup.Escape(FormatOptionalTime(session.RootProcessStartTime)));
         table.AddRow("Process liveness", Markup.Escape(FormatOptionalLiveness(liveness)));
         table.AddRow("Resume target", Markup.Escape(GetResumeTargetDisplay(session)));
         table.AddRow("Session name", Markup.Escape(session.CopilotSessionName ?? "-"));
@@ -1258,7 +1266,13 @@ public static class SessionCommand
             return;
 
         var shutdownDelay = TimeSpan.FromSeconds(Math.Max(0, config.SessionShutdownDelaySeconds));
-        processManager.ScheduleTerminateProcess(trackedProcess.Label, trackedProcess.ProcessId, trackedProcess.ProcessStartTime, shutdownDelay);
+        processManager.ScheduleTerminateCopilotProcess(
+            trackedProcess.Label,
+            trackedProcess.ProcessId,
+            trackedProcess.ProcessStartTime,
+            trackedProcess.RootProcessId,
+            trackedProcess.RootProcessStartTime,
+            shutdownDelay);
 
         if (shutdownDelay > TimeSpan.Zero)
             ConsoleOutput.Info($"The current copilot session will shut down in {FormatDuration(shutdownDelay)}.");
@@ -1271,7 +1285,12 @@ public static class SessionCommand
     }
 
     private static TrackedProcessRef CaptureTrackedProcess(DispatchSession session)
-        => new(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+        => new(
+            session.IssueKey,
+            session.ProcessId,
+            session.ProcessStartTime,
+            session.RootProcessId,
+            session.RootProcessStartTime);
 
     private static DispatchSession CreateSessionSnapshot(DispatchSession session)
         => new()
@@ -1299,6 +1318,8 @@ public static class SessionCommand
             HasStarted = session.HasStarted,
             ProcessId = session.ProcessId,
             ProcessStartTime = session.ProcessStartTime,
+            RootProcessId = session.RootProcessId,
+            RootProcessStartTime = session.RootProcessStartTime,
             Status = session.Status,
             CreatedAt = session.CreatedAt,
             UpdatedAt = session.UpdatedAt,
@@ -1337,9 +1358,16 @@ public static class SessionCommand
     {
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
     }
 
-    private readonly record struct TrackedProcessRef(string Label, int? ProcessId, DateTimeOffset? ProcessStartTime)
+    private readonly record struct TrackedProcessRef(
+        string Label,
+        int? ProcessId,
+        DateTimeOffset? ProcessStartTime,
+        int? RootProcessId,
+        DateTimeOffset? RootProcessStartTime)
     {
         public bool HasProcess => ProcessId is not null;
     }

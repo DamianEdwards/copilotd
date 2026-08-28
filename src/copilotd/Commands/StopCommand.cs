@@ -244,6 +244,8 @@ public static class StopCommand
                         state.ControlSession.Status = Models.ControlSessionStatus.Stopped;
                         state.ControlSession.ProcessId = null;
                         state.ControlSession.ProcessStartTime = null;
+                        state.ControlSession.RootProcessId = null;
+                        state.ControlSession.RootProcessStartTime = null;
                         state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                     }
                 }
@@ -256,6 +258,8 @@ public static class StopCommand
                         session.Status = Models.SessionStatus.Completed;
                         session.ProcessId = null;
                         session.ProcessStartTime = null;
+                        session.RootProcessId = null;
+                        session.RootProcessStartTime = null;
                         session.UpdatedAt = DateTimeOffset.UtcNow;
                     }
                 }

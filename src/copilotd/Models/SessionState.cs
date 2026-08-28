@@ -242,6 +242,15 @@ public sealed class DispatchSession
     /// <summary>Process start time, used alongside PID to detect PID reuse.</summary>
     public DateTimeOffset? ProcessStartTime { get; set; }
 
+    /// <summary>
+    /// Windows bootstrap process created directly by copilotd. Liveness prefers this stable
+    /// root while it is running and only promotes a surviving child after the root exits.
+    /// </summary>
+    public int? RootProcessId { get; set; }
+
+    /// <summary>Start time for <see cref="RootProcessId"/>, used to detect PID reuse.</summary>
+    public DateTimeOffset? RootProcessStartTime { get; set; }
+
     /// <summary>Current lifecycle status.</summary>
     public SessionStatus Status { get; set; } = SessionStatus.Pending;
 
@@ -445,6 +454,12 @@ public sealed class ControlSessionInfo
 
     /// <summary>Process start time, used alongside PID to detect PID reuse.</summary>
     public DateTimeOffset? ProcessStartTime { get; set; }
+
+    /// <summary>Windows bootstrap process created directly by copilotd.</summary>
+    public int? RootProcessId { get; set; }
+
+    /// <summary>Start time for <see cref="RootProcessId"/>, used to detect PID reuse.</summary>
+    public DateTimeOffset? RootProcessStartTime { get; set; }
 
     /// <summary>Current lifecycle status.</summary>
     public ControlSessionStatus Status { get; set; } = ControlSessionStatus.Stopped;

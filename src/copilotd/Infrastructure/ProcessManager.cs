@@ -21,7 +21,8 @@ public sealed partial class ProcessManager
     private static readonly TimeSpan SignalDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan WindowsCopilotChildDiscoveryTimeout = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan WindowsCopilotChildDiscoveryPollInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan WindowsCopilotChildStabilityInterval = TimeSpan.FromMilliseconds(250);
+    private const int WindowsCopilotChildStabilitySamples = 3;
     private static readonly NuGetVersion MinimumNamedSessionVersion = new(1, 0, 35);
     private const string HookConfigRelativePath = ".github/hooks/copilotd.hooks.json";
     private static readonly string BrowserLaunchSuppressionCommand =
@@ -151,14 +152,41 @@ public sealed partial class ProcessManager
                         return null;
                     }
 
-                    session.ProcessId = pi.dwProcessId;
-                    CloseHandle(pi.hProcess);
-                    CloseHandle(pi.hThread);
-                    AssignTrackedWindowsCopilotProcess(session.IssueKey, pi.dwProcessId, tracked =>
+                    try
                     {
-                        session.ProcessId = tracked.ProcessId;
-                        session.ProcessStartTime = tracked.ProcessStartTime;
-                    });
+                        var rootStartTime = GetProcessStartTime(pi.hProcess);
+                        if (rootStartTime is null)
+                        {
+                            _logger.LogError(
+                                "Could not capture the Windows bootstrap process identity for {IssueKey}; terminating PID {Pid}",
+                                session.IssueKey,
+                                pi.dwProcessId);
+                            TerminateProcessHandle(pi.hProcess, 1);
+                            return null;
+                        }
+
+                        var root = new TrackedProcessIdentity(
+                            pi.dwProcessId,
+                            rootStartTime.Value);
+                        InitializeTrackedWindowsCopilotProcess(
+                            session.IssueKey,
+                            root,
+                            trackedRoot =>
+                            {
+                                session.RootProcessId = trackedRoot.ProcessId;
+                                session.RootProcessStartTime = trackedRoot.ProcessStartTime;
+                            },
+                            active =>
+                            {
+                                session.ProcessId = active.ProcessId;
+                                session.ProcessStartTime = active.ProcessStartTime;
+                            });
+                    }
+                    finally
+                    {
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                    }
                 }
                 finally
                 {
@@ -214,42 +242,17 @@ public sealed partial class ProcessManager
     /// Checks if a tracked process is still alive and matches the recorded start time.
     /// </summary>
     public ProcessLivenessResult CheckProcess(DispatchSession session)
-    {
-        if (session.ProcessId is not { } pid)
-            return ProcessLivenessResult.Dead;
-
-        try
-        {
-            var process = Process.GetProcessById(pid);
-
-            // Verify start time to detect PID reuse
-            if (session.ProcessStartTime is { } expectedStart)
+        => CheckCopilotProcessTree(
+            session.IssueKey,
+            session.ProcessId,
+            session.ProcessStartTime,
+            session.RootProcessId,
+            session.RootProcessStartTime,
+            active =>
             {
-                var actualStart = GetProcessStartTime(process);
-                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
-                {
-                    _logger.LogDebug("PID {Pid} start time mismatch: expected {Expected}, got {Actual}",
-                        pid, expectedStart, actualStart);
-                    process.Dispose();
-                    return ProcessLivenessResult.PidReused;
-                }
-            }
-
-            var alive = !process.HasExited;
-            process.Dispose();
-            return alive ? ProcessLivenessResult.Alive : ProcessLivenessResult.Dead;
-        }
-        catch (ArgumentException)
-        {
-            // Process not found
-            return ProcessLivenessResult.Dead;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Error checking process {Pid}", pid);
-            return ProcessLivenessResult.Dead;
-        }
-    }
+                session.ProcessId = active.ProcessId;
+                session.ProcessStartTime = active.ProcessStartTime;
+            });
 
     /// <summary>
     /// Gracefully terminates the process associated with a dispatch session.
@@ -261,7 +264,20 @@ public sealed partial class ProcessManager
     /// Returns true if the process was successfully terminated or was already dead.
     /// </summary>
     public bool TerminateProcess(DispatchSession session)
-        => TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+    {
+        if (OperatingSystem.IsWindows() && session.RootProcessId is { } rootPid)
+        {
+            var fallbackPid = session.ProcessId != rootPid ? session.ProcessId : null;
+            return TerminateViaShutdownInstance(
+                session.IssueKey,
+                rootPid,
+                session.RootProcessStartTime,
+                fallbackPid,
+                fallbackPid.HasValue ? session.ProcessStartTime : null);
+        }
+
+        return TerminateProcess(session.IssueKey, session.ProcessId, session.ProcessStartTime);
+    }
 
     /// <summary>
     /// Gracefully terminates a tracked copilot process using the saved PID and start time.
@@ -292,7 +308,7 @@ public sealed partial class ProcessManager
             if (processStartTime is { } expectedStart)
             {
                 var actualStart = GetProcessStartTime(process);
-                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
+                if (!ProcessStartTimesMatch(actualStart, expectedStart))
                 {
                     _logger.LogWarning("PID {Pid} for {ProcessLabel} was reused by another process, skipping termination",
                         pid, processLabel);
@@ -310,7 +326,12 @@ public sealed partial class ProcessManager
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                return TerminateViaShutdownInstance(process, pid, processStartTime);
+                return TerminateViaShutdownInstance(
+                    processLabel,
+                    pid,
+                    processStartTime,
+                    fallbackProcessId: null,
+                    fallbackProcessStartTime: null);
             }
             else
             {
@@ -334,6 +355,21 @@ public sealed partial class ProcessManager
     /// Falls back to synchronous termination if the helper cannot be started.
     /// </summary>
     public bool ScheduleTerminateProcess(string processLabel, int? processId, DateTimeOffset? processStartTime, TimeSpan shutdownDelay)
+        => ScheduleTerminateProcess(
+            processLabel,
+            processId,
+            processStartTime,
+            fallbackProcessId: null,
+            fallbackProcessStartTime: null,
+            shutdownDelay);
+
+    private bool ScheduleTerminateProcess(
+        string processLabel,
+        int? processId,
+        DateTimeOffset? processStartTime,
+        int? fallbackProcessId,
+        DateTimeOffset? fallbackProcessStartTime,
+        TimeSpan shutdownDelay)
     {
         if (processId is not { } pid)
         {
@@ -341,11 +377,21 @@ public sealed partial class ProcessManager
             return true;
         }
 
-        var invocation = GetShutdownInstanceInvocation(pid, processStartTime, shutdownDelay);
+        var invocation = GetShutdownInstanceInvocation(
+            pid,
+            processStartTime,
+            fallbackProcessId,
+            fallbackProcessStartTime,
+            shutdownDelay);
         if (invocation is null)
         {
             _logger.LogWarning("Cannot determine copilotd executable path, falling back to synchronous termination");
-            return TerminateProcess(processLabel, processId, processStartTime);
+            return TerminateScheduledCopilotProcess(
+                processLabel,
+                processId,
+                processStartTime,
+                fallbackProcessId,
+                fallbackProcessStartTime);
         }
 
         var psi = new ProcessStartInfo
@@ -362,7 +408,12 @@ public sealed partial class ProcessManager
             if (helper is null)
             {
                 _logger.LogWarning("Failed to start shutdown-instance helper for PID {Pid}, falling back to synchronous termination", pid);
-                return TerminateProcess(processLabel, processId, processStartTime);
+                return TerminateScheduledCopilotProcess(
+                    processLabel,
+                    processId,
+                    processStartTime,
+                    fallbackProcessId,
+                    fallbackProcessStartTime);
             }
 
             _logger.LogInformation("Scheduled shutdown-instance for {ProcessLabel} (PID {Pid}) with delay {Delay}", processLabel, pid, shutdownDelay);
@@ -371,8 +422,57 @@ public sealed partial class ProcessManager
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to schedule shutdown-instance for {ProcessLabel} (PID {Pid}), falling back to synchronous termination", processLabel, pid);
-            return TerminateProcess(processLabel, processId, processStartTime);
+            return TerminateScheduledCopilotProcess(
+                processLabel,
+                processId,
+                processStartTime,
+                fallbackProcessId,
+                fallbackProcessStartTime);
         }
+    }
+
+    /// <summary>
+    /// Schedules shutdown for a Copilot process tree, preferring the live Windows bootstrap
+    /// process and falling back to a previously promoted child.
+    /// </summary>
+    public bool ScheduleTerminateCopilotProcess(
+        string processLabel,
+        int? processId,
+        DateTimeOffset? processStartTime,
+        int? rootProcessId,
+        DateTimeOffset? rootProcessStartTime,
+        TimeSpan shutdownDelay)
+    {
+        if (!OperatingSystem.IsWindows() || rootProcessId is not { } rootPid)
+            return ScheduleTerminateProcess(processLabel, processId, processStartTime, shutdownDelay);
+
+        var fallbackPid = processId != rootPid ? processId : null;
+        var fallbackStart = fallbackPid.HasValue ? processStartTime : null;
+        return ScheduleTerminateProcess(
+            processLabel,
+            rootPid,
+            rootProcessStartTime,
+            fallbackPid,
+            fallbackStart,
+            shutdownDelay);
+    }
+
+    private bool TerminateScheduledCopilotProcess(
+        string processLabel,
+        int? processId,
+        DateTimeOffset? processStartTime,
+        int? fallbackProcessId,
+        DateTimeOffset? fallbackProcessStartTime)
+    {
+        if (!OperatingSystem.IsWindows())
+            return TerminateProcess(processLabel, processId, processStartTime);
+
+        return ForceKillTrackedCopilotProcess(
+            processLabel,
+            processId,
+            processStartTime,
+            fallbackProcessId,
+            fallbackProcessStartTime);
     }
 
     /// <summary>
@@ -380,14 +480,28 @@ public sealed partial class ProcessManager
     /// which handles the full graceful shutdown lifecycle (Ctrl+C → 1s wait → Ctrl+C → Kill) from a separate process
     /// that can safely attach to the target's console.
     /// </summary>
-    private bool TerminateViaShutdownInstance(Process process, int pid, DateTimeOffset? processStartTime)
+    private bool TerminateViaShutdownInstance(
+        string processLabel,
+        int pid,
+        DateTimeOffset? processStartTime,
+        int? fallbackProcessId,
+        DateTimeOffset? fallbackProcessStartTime)
     {
-        var invocation = GetShutdownInstanceInvocation(pid, processStartTime, TimeSpan.Zero);
+        var invocation = GetShutdownInstanceInvocation(
+            pid,
+            processStartTime,
+            fallbackProcessId,
+            fallbackProcessStartTime,
+            TimeSpan.Zero);
         if (invocation is null)
         {
             _logger.LogWarning("Cannot determine copilotd executable path, falling back to kill");
-            process.Kill(entireProcessTree: true);
-            return true;
+            return ForceKillTrackedCopilotProcess(
+                processLabel,
+                pid,
+                processStartTime,
+                fallbackProcessId,
+                fallbackProcessStartTime);
         }
 
         _logger.LogDebug("Spawning shutdown-instance helper for PID {Pid}", pid);
@@ -406,8 +520,12 @@ public sealed partial class ProcessManager
             if (helper is null)
             {
                 _logger.LogWarning("Failed to start shutdown-instance helper, falling back to kill");
-                process.Kill(entireProcessTree: true);
-                return true;
+                return ForceKillTrackedCopilotProcess(
+                    processLabel,
+                    pid,
+                    processStartTime,
+                    fallbackProcessId,
+                    fallbackProcessStartTime);
             }
 
             // The shutdown-instance command handles signals + kill fallback internally,
@@ -433,30 +551,138 @@ public sealed partial class ProcessManager
                 try { helper.Kill(); } catch { }
             }
 
-            // Final fallback if shutdown-instance didn't fully clean up
-            if (!process.HasExited)
-            {
-                _logger.LogWarning("Forcing kill of PID {Pid} after shutdown-instance", pid);
-                process.Kill(entireProcessTree: true);
-            }
-
-            return true;
+            return ForceKillTrackedCopilotProcess(
+                processLabel,
+                pid,
+                processStartTime,
+                fallbackProcessId,
+                fallbackProcessStartTime);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "shutdown-instance failed for PID {Pid}, falling back to kill", pid);
-            process.Kill(entireProcessTree: true);
-            return true;
+            return ForceKillTrackedCopilotProcess(
+                processLabel,
+                pid,
+                processStartTime,
+                fallbackProcessId,
+                fallbackProcessStartTime);
         }
     }
 
-    private CommandInvocation? GetShutdownInstanceInvocation(int pid, DateTimeOffset? processStartTime, TimeSpan shutdownDelay)
+    private bool ForceKillTrackedCopilotProcess(
+        string processLabel,
+        int? processId,
+        DateTimeOffset? processStartTime,
+        int? fallbackProcessId,
+        DateTimeOffset? fallbackProcessStartTime)
+    {
+        if (!TryOpenValidatedProcess(
+                processLabel,
+                processId,
+                processStartTime,
+                out var process,
+                out var targetPid)
+            && !TryOpenValidatedProcess(
+                processLabel,
+                fallbackProcessId,
+                fallbackProcessStartTime,
+                out process,
+                out targetPid))
+        {
+            return true;
+        }
+
+        using (process)
+        {
+            try
+            {
+                _logger.LogWarning("Forcing kill of PID {Pid} for {ProcessLabel}", targetPid, processLabel);
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(TimeSpan.FromSeconds(5));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to force kill PID {Pid} for {ProcessLabel}", targetPid, processLabel);
+                return false;
+            }
+        }
+    }
+
+    private bool TryOpenValidatedProcess(
+        string processLabel,
+        int? processId,
+        DateTimeOffset? expectedStart,
+        out Process process,
+        out int pid)
+    {
+        process = null!;
+        pid = 0;
+        if (processId is not { } candidatePid)
+            return false;
+
+        try
+        {
+            process = Process.GetProcessById(candidatePid);
+            if (expectedStart is { } expected)
+            {
+                var actualStart = GetProcessStartTime(process);
+                if (!ProcessStartTimesMatch(actualStart, expected))
+                {
+                    _logger.LogWarning(
+                        "PID {Pid} for {ProcessLabel} no longer matches the tracked start time; skipping force kill",
+                        candidatePid,
+                        processLabel);
+                    process.Dispose();
+                    process = null!;
+                    return false;
+                }
+            }
+
+            if (process.HasExited)
+            {
+                process.Dispose();
+                process = null!;
+                return false;
+            }
+
+            pid = candidatePid;
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            process = null!;
+            return false;
+        }
+        catch (Exception ex)
+        {
+            process?.Dispose();
+            process = null!;
+            _logger.LogWarning(ex, "Failed to validate PID {Pid} for {ProcessLabel}", candidatePid, processLabel);
+            return false;
+        }
+    }
+
+    private CommandInvocation? GetShutdownInstanceInvocation(
+        int pid,
+        DateTimeOffset? processStartTime,
+        int? fallbackProcessId,
+        DateTimeOffset? fallbackProcessStartTime,
+        TimeSpan shutdownDelay)
     {
         var effectiveDelay = shutdownDelay < TimeSpan.Zero ? TimeSpan.Zero : shutdownDelay;
 
         var arguments = $"shutdown-instance --pid {pid} --signal-profile copilot";
         if (processStartTime is { } expectedStart)
             arguments += $" --expected-start {expectedStart:O}";
+
+        if (fallbackProcessId is { } fallbackPid)
+        {
+            arguments += $" --fallback-pid {fallbackPid}";
+            if (fallbackProcessStartTime is { } fallbackExpectedStart)
+                arguments += $" --fallback-expected-start {fallbackExpectedStart:O}";
+        }
 
         if (effectiveDelay > TimeSpan.Zero)
             arguments += $" --delay-seconds {(int)Math.Ceiling(effectiveDelay.TotalSeconds)}";
@@ -514,39 +740,17 @@ public sealed partial class ProcessManager
     /// Checks if the control session process is still alive.
     /// </summary>
     public ProcessLivenessResult CheckControlSession(ControlSessionInfo session)
-    {
-        if (session.ProcessId is not { } pid)
-            return ProcessLivenessResult.Dead;
-
-        try
-        {
-            var process = Process.GetProcessById(pid);
-
-            if (session.ProcessStartTime is { } expectedStart)
+        => CheckCopilotProcessTree(
+            "control session",
+            session.ProcessId,
+            session.ProcessStartTime,
+            session.RootProcessId,
+            session.RootProcessStartTime,
+            active =>
             {
-                var actualStart = GetProcessStartTime(process);
-                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
-                {
-                    _logger.LogDebug("Control session PID {Pid} start time mismatch", pid);
-                    process.Dispose();
-                    return ProcessLivenessResult.PidReused;
-                }
-            }
-
-            var alive = !process.HasExited;
-            process.Dispose();
-            return alive ? ProcessLivenessResult.Alive : ProcessLivenessResult.Dead;
-        }
-        catch (ArgumentException)
-        {
-            return ProcessLivenessResult.Dead;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Error checking control session process {Pid}", pid);
-            return ProcessLivenessResult.Dead;
-        }
-    }
+                session.ProcessId = active.ProcessId;
+                session.ProcessStartTime = active.ProcessStartTime;
+            });
 
     /// <summary>
     /// Launches the control remote session — a special <c>copilot --remote</c> session that
@@ -595,14 +799,40 @@ public sealed partial class ProcessManager
                     return null;
                 }
 
-                session.ProcessId = pi.dwProcessId;
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                AssignTrackedWindowsCopilotProcess("control session", pi.dwProcessId, tracked =>
+                try
                 {
-                    session.ProcessId = tracked.ProcessId;
-                    session.ProcessStartTime = tracked.ProcessStartTime;
-                });
+                    var rootStartTime = GetProcessStartTime(pi.hProcess);
+                    if (rootStartTime is null)
+                    {
+                        _logger.LogError(
+                            "Could not capture the Windows bootstrap process identity for the control session; terminating PID {Pid}",
+                            pi.dwProcessId);
+                        TerminateProcessHandle(pi.hProcess, 1);
+                        return null;
+                    }
+
+                    var root = new TrackedProcessIdentity(
+                        pi.dwProcessId,
+                        rootStartTime.Value);
+                    InitializeTrackedWindowsCopilotProcess(
+                        "control session",
+                        root,
+                        trackedRoot =>
+                        {
+                            session.RootProcessId = trackedRoot.ProcessId;
+                            session.RootProcessStartTime = trackedRoot.ProcessStartTime;
+                        },
+                        active =>
+                        {
+                            session.ProcessId = active.ProcessId;
+                            session.ProcessStartTime = active.ProcessStartTime;
+                        });
+                }
+                finally
+                {
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                }
             }
             else
             {
@@ -646,7 +876,20 @@ public sealed partial class ProcessManager
     /// Gracefully terminates the control session process.
     /// </summary>
     public bool TerminateControlSession(ControlSessionInfo session)
-        => TerminateProcess("control session", session.ProcessId, session.ProcessStartTime);
+    {
+        if (OperatingSystem.IsWindows() && session.RootProcessId is { } rootPid)
+        {
+            var fallbackPid = session.ProcessId != rootPid ? session.ProcessId : null;
+            return TerminateViaShutdownInstance(
+                "control session",
+                rootPid,
+                session.RootProcessStartTime,
+                fallbackPid,
+                fallbackPid.HasValue ? session.ProcessStartTime : null);
+        }
+
+        return TerminateProcess("control session", session.ProcessId, session.ProcessStartTime);
+    }
 
     private static string BuildControlSessionArguments(ControlSessionInfo session, string prompt, string? defaultModel, RuntimeContext runtimeContext)
     {
@@ -1119,6 +1362,9 @@ public sealed partial class ProcessManager
     {
         try
         {
+            if (OperatingSystem.IsWindows())
+                return GetProcessStartTime(process.SafeHandle.DangerousGetHandle());
+
             return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
         }
         catch
@@ -1127,72 +1373,232 @@ public sealed partial class ProcessManager
         }
     }
 
-    private void AssignTrackedWindowsCopilotProcess(
-        string processLabel,
-        int rootPid,
-        Action<(int ProcessId, DateTimeOffset ProcessStartTime)> assign)
+    private static DateTimeOffset? GetProcessStartTime(IntPtr processHandle)
     {
-        var tracked = TryResolveTrackedWindowsCopilotProcess(rootPid);
-        if (tracked is { } trackedProcess)
-        {
-            assign(trackedProcess);
+        if (!GetProcessTimes(processHandle, out var creationTime, out _, out _, out _))
+            return null;
 
-            if (trackedProcess.ProcessId != rootPid)
+        var fileTime = ((long)creationTime.dwHighDateTime << 32) | creationTime.dwLowDateTime;
+        return DateTimeOffset.FromFileTime(fileTime).ToUniversalTime();
+    }
+
+    private static bool ProcessStartTimesMatch(DateTimeOffset? actual, DateTimeOffset expected)
+        => actual is { } actualStart
+           && (OperatingSystem.IsWindows()
+               ? actualStart == expected
+               : Math.Abs((actualStart - expected).TotalSeconds) <= 5);
+
+    private void InitializeTrackedWindowsCopilotProcess(
+        string processLabel,
+        TrackedProcessIdentity root,
+        Action<TrackedProcessIdentity> assignRoot,
+        Action<TrackedProcessIdentity> assignActive)
+    {
+        assignRoot(root);
+
+        if (CheckProcessIdentity(processLabel, root.ProcessId, root.ProcessStartTime) == ProcessLivenessResult.Alive)
+        {
+            var stableChild = TryResolveStableWindowsCopilotDescendant(
+                root.ProcessId,
+                root.ProcessStartTime,
+                waitForAppearance: true);
+            assignActive(stableChild ?? root);
+            if (stableChild is { } childToTrack)
             {
                 _logger.LogDebug(
-                    "Tracking Windows child copilot PID {TrackedPid} instead of bootstrap PID {RootPid} for {ProcessLabel}",
-                    trackedProcess.ProcessId,
-                    rootPid,
+                    "Tracking stable Windows child PID {ChildPid} with bootstrap PID {RootPid} for {ProcessLabel}",
+                    childToTrack.ProcessId,
+                    root.ProcessId,
                     processLabel);
             }
-
             return;
         }
 
+        // The PID came directly from CreateProcessW, so it is safe to capture an immediate
+        // handoff child even if the bootstrap exited before initialization completed.
+        var handoffChild = TryResolveStableWindowsCopilotDescendant(
+            root.ProcessId,
+            root.ProcessStartTime,
+            waitForAppearance: true);
+        assignActive(handoffChild ?? root);
+        if (handoffChild is not null)
+        {
+            _logger.LogDebug(
+                "Windows bootstrap PID {RootPid} exited during launch; tracking stable child PID {ChildPid} for {ProcessLabel}",
+                root.ProcessId,
+                handoffChild.Value.ProcessId,
+                processLabel);
+        }
+    }
+
+    private ProcessLivenessResult CheckCopilotProcessTree(
+        string processLabel,
+        int? processId,
+        DateTimeOffset? processStartTime,
+        int? rootProcessId,
+        DateTimeOffset? rootProcessStartTime,
+        Action<TrackedProcessIdentity> assignActive)
+    {
+        if (!OperatingSystem.IsWindows() || rootProcessId is not { } rootPid)
+            return CheckProcessIdentity(processLabel, processId, processStartTime);
+
+        var rootResult = CheckProcessIdentity(processLabel, rootPid, rootProcessStartTime);
+        if (rootResult == ProcessLivenessResult.Alive)
+        {
+            if (processId is { } activePid && activePid != rootPid)
+            {
+                if (CheckProcessIdentity(processLabel, activePid, processStartTime) == ProcessLivenessResult.Alive)
+                    return ProcessLivenessResult.Alive;
+            }
+
+            var stableChild = TryResolveStableWindowsCopilotDescendant(
+                rootPid,
+                rootProcessStartTime,
+                waitForAppearance: false);
+            assignActive(stableChild
+                         ?? new TrackedProcessIdentity(
+                             rootPid,
+                             rootProcessStartTime ?? DateTimeOffset.UtcNow));
+            return ProcessLivenessResult.Alive;
+        }
+
+        var activeResult = ProcessLivenessResult.Dead;
+        if (processId is { } promotedPid && promotedPid != rootPid)
+        {
+            activeResult = CheckProcessIdentity(processLabel, promotedPid, processStartTime);
+            if (activeResult == ProcessLivenessResult.Alive)
+                return ProcessLivenessResult.Alive;
+        }
+
+        return rootResult == ProcessLivenessResult.PidReused
+               || activeResult == ProcessLivenessResult.PidReused
+            ? ProcessLivenessResult.PidReused
+            : ProcessLivenessResult.Dead;
+    }
+
+    private ProcessLivenessResult CheckProcessIdentity(
+        string processLabel,
+        int? processId,
+        DateTimeOffset? expectedStart)
+    {
+        if (processId is not { } pid)
+            return ProcessLivenessResult.Dead;
+
         try
         {
-            using var proc = Process.GetProcessById(rootPid);
-            assign((rootPid, GetProcessStartTime(proc) ?? DateTimeOffset.UtcNow));
+            using var process = Process.GetProcessById(pid);
+            if (expectedStart is { } expected)
+            {
+                var actualStart = GetProcessStartTime(process);
+                if (!ProcessStartTimesMatch(actualStart, expected))
+                {
+                    _logger.LogDebug(
+                        "PID {Pid} start time mismatch for {ProcessLabel}: expected {Expected}, got {Actual}",
+                        pid,
+                        processLabel,
+                        expected,
+                        actualStart);
+                    return ProcessLivenessResult.PidReused;
+                }
+            }
+
+            return process.HasExited ? ProcessLivenessResult.Dead : ProcessLivenessResult.Alive;
+        }
+        catch (ArgumentException)
+        {
+            return ProcessLivenessResult.Dead;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error checking process {Pid} for {ProcessLabel}", pid, processLabel);
+            return ProcessLivenessResult.Dead;
+        }
+    }
+
+    private static TrackedProcessIdentity? TryResolveStableWindowsCopilotDescendant(
+        int rootPid,
+        DateTimeOffset? rootProcessStartTime,
+        bool waitForAppearance)
+    {
+        var deadline = DateTime.UtcNow + WindowsCopilotChildDiscoveryTimeout;
+        TrackedProcessIdentity? candidate = null;
+        var consecutiveSamples = 0;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            var currentCandidates = GetLiveWindowsCopilotDescendants(rootPid, rootProcessStartTime);
+            TrackedProcessIdentity? currentCandidate = currentCandidates.Count == 0
+                ? null
+                : currentCandidates.Values
+                    .OrderBy(process => process.ProcessStartTime)
+                    .ThenBy(process => process.ProcessId)
+                    .First();
+
+            if (!waitForAppearance && currentCandidate is null)
+                return null;
+
+            if (currentCandidate is not null && currentCandidate == candidate)
+            {
+                consecutiveSamples++;
+            }
+            else
+            {
+                candidate = currentCandidate;
+                consecutiveSamples = currentCandidate is null ? 0 : 1;
+            }
+
+            if (candidate is not null && consecutiveSamples >= WindowsCopilotChildStabilitySamples)
+                return candidate;
+
+            Thread.Sleep(WindowsCopilotChildStabilityInterval);
+        }
+
+        return null;
+    }
+
+    private static Dictionary<int, TrackedProcessIdentity> GetLiveWindowsCopilotDescendants(
+        int rootPid,
+        DateTimeOffset? rootProcessStartTime)
+    {
+        var candidates = new Dictionary<int, TrackedProcessIdentity>();
+        foreach (var descendant in NativeInterop.FindWindowsDescendantProcesses(rootPid, "copilot.exe"))
+        {
+            var identity = TryGetProcessIdentity(descendant.ProcessId);
+            if (identity is null)
+                continue;
+
+            if (rootProcessStartTime is { } rootStart
+                && identity.Value.ProcessStartTime < rootStart)
+            {
+                continue;
+            }
+
+            candidates[identity.Value.ProcessId] = identity.Value;
+        }
+
+        return candidates;
+    }
+
+    private static TrackedProcessIdentity? TryGetProcessIdentity(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            if (process.HasExited)
+                return null;
+
+            var processStartTime = GetProcessStartTime(process);
+            return processStartTime is { } startTime
+                ? new TrackedProcessIdentity(pid, startTime)
+                : null;
         }
         catch
         {
-            assign((rootPid, DateTimeOffset.UtcNow));
-        }
-    }
-
-    private static (int ProcessId, DateTimeOffset ProcessStartTime)? TryResolveTrackedWindowsCopilotProcess(int rootPid)
-    {
-        if (!OperatingSystem.IsWindows())
             return null;
-
-        var deadline = DateTime.UtcNow + WindowsCopilotChildDiscoveryTimeout;
-
-        while (true)
-        {
-            var trackedPid = FindDeepestWindowsCopilotDescendant(rootPid) ?? rootPid;
-
-            try
-            {
-                using var process = Process.GetProcessById(trackedPid);
-                var startTime = GetProcessStartTime(process) ?? DateTimeOffset.UtcNow;
-                if (trackedPid != rootPid || DateTime.UtcNow >= deadline)
-                    return (trackedPid, startTime);
-            }
-            catch
-            {
-                if (DateTime.UtcNow >= deadline)
-                    return null;
-            }
-
-            if (DateTime.UtcNow >= deadline)
-                return null;
-
-            Thread.Sleep(WindowsCopilotChildDiscoveryPollInterval);
         }
     }
 
-    private static int? FindDeepestWindowsCopilotDescendant(int rootPid)
-        => NativeInterop.FindDeepestWindowsDescendantProcessId(rootPid, "copilot.exe");
+    private readonly record struct TrackedProcessIdentity(int ProcessId, DateTimeOffset ProcessStartTime);
 
     // ---- Worktree lifecycle ----
 

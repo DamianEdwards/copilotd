@@ -152,6 +152,8 @@ public sealed class ReconciliationEngine
                     session.FailureDetail = null;
                     session.ProcessId = null;
                     session.ProcessStartTime = null;
+                    session.RootProcessId = null;
+                    session.RootProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                 }
                 continue;
@@ -179,6 +181,8 @@ public sealed class ReconciliationEngine
                     session.FailureDetail = null;
                     session.ProcessId = null;
                     session.ProcessStartTime = null;
+                    session.RootProcessId = null;
+                    session.RootProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                     break;
             }
@@ -487,6 +491,8 @@ public sealed class ReconciliationEngine
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
+                                existing.RootProcessId = null;
+                                existing.RootProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
                                 if (commentInfo.IssueCommentId.HasValue)
                                     TransitionReactionToIssueComment(existing, config, commentInfo.IssueCommentId.Value, GhCliService.ReactionEyes);
@@ -515,6 +521,8 @@ public sealed class ReconciliationEngine
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
+                                existing.RootProcessId = null;
+                                existing.RootProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
                                 TransitionReactionOnCurrentAnchor(existing, config, GhCliService.ReactionThumbsUp);
                                 _processManager.CleanupWorktree(existing, config, state);
@@ -566,6 +574,8 @@ public sealed class ReconciliationEngine
                                     existing.WaitingSince = null;
                                     existing.ProcessId = null;
                                     existing.ProcessStartTime = null;
+                                    existing.RootProcessId = null;
+                                    existing.RootProcessStartTime = null;
                                     existing.UpdatedAt = DateTimeOffset.UtcNow;
                                     continue;
                                 }
@@ -616,6 +626,8 @@ public sealed class ReconciliationEngine
                                 existing.WaitingSince = null;
                                 existing.ProcessId = null;
                                 existing.ProcessStartTime = null;
+                                existing.RootProcessId = null;
+                                existing.RootProcessStartTime = null;
                                 existing.UpdatedAt = DateTimeOffset.UtcNow;
                                 if (issueCommentInfo.IssueCommentId.HasValue)
                                     TransitionReactionToIssueComment(existing, config, issueCommentInfo.IssueCommentId.Value, GhCliService.ReactionEyes);
@@ -644,6 +656,8 @@ public sealed class ReconciliationEngine
                         existing.HasStarted = false;
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.RootProcessId = null;
+                        existing.RootProcessStartTime = null;
                         existing.LastVerifiedAt = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         existing.LastFailureAt = DateTimeOffset.UtcNow;
@@ -684,6 +698,8 @@ public sealed class ReconciliationEngine
                         existing.HasStarted = false;
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
+                        existing.RootProcessId = null;
+                        existing.RootProcessStartTime = null;
                         existing.LastVerifiedAt = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
                         TransitionReactionToIssue(existing, config, GhCliService.ReactionEyes);
@@ -897,6 +913,8 @@ public sealed class ReconciliationEngine
         session.WaitingSince = null;
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
         session.UpdatedAt = DateTimeOffset.UtcNow;
 
         if (isIssueComment && commentInfo.IssueCommentId.HasValue)
@@ -1080,6 +1098,8 @@ public sealed class ReconciliationEngine
         session.HasStarted = false;
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
         session.LastVerifiedAt = null;
         session.WaitingSince = null;
         session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -1319,6 +1339,8 @@ public sealed class ReconciliationEngine
         session.UpdatedAt = DateTimeOffset.UtcNow;
         session.ProcessId = null;
         session.ProcessStartTime = null;
+        session.RootProcessId = null;
+        session.RootProcessStartTime = null;
     }
 
     private string BuildTrustFailureDetail(DispatchSession session, CopilotTrustCheckResult trustCheck)

@@ -507,7 +507,8 @@ File logs are written under `~/.copilotd/logs/` by default (or `COPILOTD_HOME\lo
 - **System.CommandLine** for CLI parsing
 - **Spectre.Console** for interactive prompts and formatted output
 - **Native AOT** compatible (source-generated JSON serialization)
-- Dispatched `copilot` processes are fully independent (not child processes)
+- Dispatched `copilot` processes run in independent console/process groups
+- On Windows, liveness tracks both the bootstrap process and any surviving Copilot child; the live bootstrap is preferred and a child is promoted only after the bootstrap exits and the child is stable across multiple samples
 - Each session gets its own **git worktree** for isolation — multiple sessions on the same repo work in parallel without conflicts
 - State reconciliation uses three truth sources: persisted state → live process status → current GitHub issue matches
 - Graceful process shutdown via platform-specific signals (Ctrl+Break/Ctrl+C on Windows via helper process, SIGINT/SIGKILL on Unix)
