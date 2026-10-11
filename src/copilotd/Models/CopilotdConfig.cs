@@ -379,6 +379,12 @@ public abstract class DispatchRuleOptions
     /// <summary>Whether to pass --allow-all-urls to copilot. Defaults to false. Implied by Yolo.</summary>
     public bool AllowAllUrls { get; set; }
 
+    /// <summary>Whether to pass --autopilot to copilot, enabling fully autonomous mode. Defaults to false.</summary>
+    public bool Autopilot { get; set; }
+
+    /// <summary>Whether to pass --plan to copilot, enabling plan-only mode. Defaults to false.</summary>
+    public bool Plan { get; set; }
+
     /// <summary>
     /// Model to use for sessions triggered by this rule. Overrides the global
     /// <see cref="CopilotdConfig.DefaultModel"/> when set.
