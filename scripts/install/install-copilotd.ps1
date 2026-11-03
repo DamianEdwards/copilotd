@@ -93,7 +93,7 @@ function Assert-GitHubCliAvailable
         Write-Host 'Error: GitHub CLI (gh) is required but was not found on PATH.' -ForegroundColor Red
         Write-Host ''
         Write-Host 'Install it from: https://cli.github.com/' -ForegroundColor Yellow
-        Write-Host 'Then authenticate:  gh auth login' -ForegroundColor Yellow
+        Write-Host 'Then authenticate:  gh auth login --hostname github.com' -ForegroundColor Yellow
         Write-Host ''
         exit 1
     }
@@ -102,7 +102,7 @@ function Assert-GitHubCliAvailable
     try
     {
         $ErrorActionPreference = 'Continue'
-        $null = & gh auth status 2>&1
+        $authOutput = @(& gh auth status --active --hostname github.com 2>&1)
         $authExitCode = $LASTEXITCODE
     }
     finally
@@ -113,9 +113,14 @@ function Assert-GitHubCliAvailable
     if ($authExitCode -ne 0)
     {
         Write-Host ''
-        Write-Host 'Error: GitHub CLI (gh) is not authenticated.' -ForegroundColor Red
+        Write-Host 'Error: GitHub CLI (gh) authentication check failed for the active account on github.com.' -ForegroundColor Red
+        foreach ($line in $authOutput)
+        {
+            Write-Host $line.ToString()
+        }
         Write-Host ''
-        Write-Host 'Run the following to authenticate:  gh auth login' -ForegroundColor Yellow
+        Write-Host 'Check the diagnostics above and your network connection.' -ForegroundColor Yellow
+        Write-Host 'If authentication is required, run:  gh auth login --hostname github.com' -ForegroundColor Yellow
         Write-Host ''
         exit 1
     }

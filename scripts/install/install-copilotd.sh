@@ -114,16 +114,19 @@ assert_gh_cli_available() {
         echo 'Error: GitHub CLI (gh) is required but was not found on PATH.' >&2
         echo ''
         echo 'Install it from: https://cli.github.com/' >&2
-        echo 'Then authenticate:  gh auth login' >&2
+        echo 'Then authenticate:  gh auth login --hostname github.com' >&2
         echo ''
         exit 1
     fi
 
-    if ! gh auth status &>/dev/null; then
+    local auth_output
+    if ! auth_output=$(gh auth status --active --hostname github.com 2>&1); then
         echo ''
-        echo 'Error: GitHub CLI (gh) is not authenticated.' >&2
+        echo 'Error: GitHub CLI (gh) authentication check failed for the active account on github.com.' >&2
+        printf '%s\n' "$auth_output" >&2
         echo ''
-        echo 'Run the following to authenticate:  gh auth login' >&2
+        echo 'Check the diagnostics above and your network connection.' >&2
+        echo 'If authentication is required, run:  gh auth login --hostname github.com' >&2
         echo ''
         exit 1
     fi

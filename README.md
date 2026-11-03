@@ -34,6 +34,8 @@ Available for Windows, macOS, and Linux.
 - [GitHub CLI (`gh`)](https://cli.github.com/) — authenticated via `gh auth login`
 - [Copilot CLI (`copilot`)](https://docs.github.com/copilot/how-tos/copilot-cli) — authenticated via `copilot login`
 
+The installers check only the active GitHub CLI account on `github.com` (including authentication through `GH_TOKEN` or `GITHUB_TOKEN`), not inactive accounts or other hosts. Use a current GitHub CLI that supports `gh auth status --active --hostname github.com`. If needed, authenticate with `gh auth login --hostname github.com`; failed checks retain the CLI diagnostics to help distinguish credential and network problems.
+
 ### Install on Windows
 
 In a PowerShell terminal:
