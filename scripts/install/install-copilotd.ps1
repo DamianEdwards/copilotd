@@ -728,7 +728,8 @@ function Get-WindowsBinaryTrustEvidence
         throw "Expected a timestamped signature for '$resolvedBinaryPath', but no timestamp certificate was present."
     }
 
-    $timestampChain = Get-ValidatedCertificateChain -Certificate $signature.TimeStamperCertificate -Description 'Timestamp'
+    # Windows has validated the signature's timestamp; do not reject its chain for expiring since signing.
+    $timestampChain = Get-ValidatedCertificateChain -Certificate $signature.TimeStamperCertificate -Description 'Timestamp' -IgnoreTimeValidity
 
     return [pscustomobject]@{
         BinaryPath = $resolvedBinaryPath

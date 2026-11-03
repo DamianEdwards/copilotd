@@ -87,6 +87,23 @@ jobs:
         shell: pwsh
         run: ./scripts/Verify-PowerShellSyntax.ps1
 
+  validate-windows-installer-provenance:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Validate PowerShell script syntax
+        shell: pwsh
+        run: ./scripts/Verify-PowerShellSyntax.ps1
+
+      - name: Validate Windows installer provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: ./scripts/Test-WindowsInstallerProvenance.ps1
+
   validate-shell-scripts:
     runs-on: ubuntu-latest
 
@@ -99,7 +116,7 @@ jobs:
         run: ./scripts/verify-shell-syntax.sh
 
   publish-dev:
-    needs: [version, validate-powershell-scripts, validate-shell-scripts]
+    needs: [version, validate-powershell-scripts, validate-windows-installer-provenance, validate-shell-scripts]
     strategy:
       fail-fast: false
       matrix:
