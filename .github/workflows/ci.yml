@@ -95,18 +95,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: |
-          $fixtureDirectory = Join-Path $env:RUNNER_TEMP 'installer-provenance'
-          # v0.0.16 has a valid signature whose timestamp certificate expired in October 2026.
-          gh release download v0.0.16 --repo DamianEdwards/copilotd --pattern copilotd-win-x64.zip --dir $fixtureDirectory
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to download the installer provenance fixture.' }
-          Expand-Archive -LiteralPath (Join-Path $fixtureDirectory 'copilotd-win-x64.zip') -DestinationPath $fixtureDirectory
-          $binaryPath = Join-Path $fixtureDirectory 'copilotd.exe'
-          foreach ($scenario in @('ExpiredTimestamp', 'GoodBinary', 'TamperedBinary', 'WrongSubject', 'WrongIssuer'))
-          {
-              ./scripts/Test-InstallerProvenance.ps1 -Scenario $scenario -BinaryPath $binaryPath
-          }
-          ./scripts/Test-InstallerProvenance.ps1 -Scenario UnsignedBinary -BinaryPath ./scripts/Test-InstallerProvenance.ps1
+        run: ./scripts/Test-WindowsInstallerProvenance.ps1
 
   validate-shell-scripts:
     runs-on: ubuntu-latest
