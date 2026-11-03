@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('InstallerDefaults', 'GoodBinary', 'UnsignedBinary', 'TamperedBinary', 'WrongSubject', 'WrongIssuer', 'ChecksumMismatch', 'MetadataMismatch')]
+    [ValidateSet('InstallerDefaults', 'GoodBinary', 'ExpiredTimestamp', 'UnsignedBinary', 'TamperedBinary', 'WrongSubject', 'WrongIssuer', 'ChecksumMismatch', 'MetadataMismatch')]
     [string]$Scenario,
 
     [string]$BinaryPath,
@@ -213,6 +213,24 @@ try
             $evidence = Get-WindowsBinaryTrustEvidence -BinaryPath $binaryPath
             $null = Assert-WindowsBinaryTrust -BinaryPath $binaryPath -ExpectedSubject $evidence.SignerSubject -ExpectedIssuerSha512Thumbprints @($evidence.SignerIssuerSha512Thumbprint)
             Write-Host "Scenario 'GoodBinary' succeeded for '$binaryPath': '$($evidence.SignerSubject)' issued by '$($evidence.SignerIssuerCertificate.Subject)'."
+        }
+
+        'ExpiredTimestamp'
+        {
+            $binaryPath = Get-RequiredFullPath -Path $BinaryPath -Description 'Signed binary with an expired timestamp certificate'
+            $signature = Get-AuthenticodeSignature -FilePath $binaryPath
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid)
+            {
+                throw "Scenario '$Scenario' requires a valid Authenticode signature, got '$($signature.Status)'."
+            }
+
+            if ($null -eq $signature.TimeStamperCertificate -or $signature.TimeStamperCertificate.NotAfter.ToUniversalTime() -ge [DateTime]::UtcNow)
+            {
+                throw "Scenario '$Scenario' requires an expired timestamp certificate."
+            }
+
+            $null = Assert-WindowsBinaryTrust -BinaryPath $binaryPath -ExpectedSubject $config.ExpectedSignerSubject -ExpectedIssuerSha512Thumbprints $config.ExpectedSignerIssuerSha512Thumbprints -ExpectedParentIssuerSha512Thumbprints $config.ExpectedSignerParentIssuerSha512Thumbprints
+            Write-Host "Scenario 'ExpiredTimestamp' succeeded for '$binaryPath' with timestamp certificate expiry '$($signature.TimeStamperCertificate.NotAfter.ToString('o'))'."
         }
 
         'UnsignedBinary'
