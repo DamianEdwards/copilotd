@@ -42,8 +42,6 @@ In a PowerShell terminal:
 irm https://copilotd.damianedwards.dev/install.ps1 | iex
 ```
 
-The Windows installer requires a valid, timestamped Authenticode signature and checks the expected signer identity and trusted issuer. Windows validates the timestamp, so a correctly timestamped release remains verifiable after its signing or timestamp certificate expires.
-
 ### Install on macOS & Linux
 
 In a terminal:
