@@ -77,12 +77,33 @@ function New-TamperedBinaryCopy
     Copy-Item -Path $SourcePath -Destination $tamperedPath -Force
 
     $bytes = [System.IO.File]::ReadAllBytes($tamperedPath)
-    if ($bytes.Length -eq 0)
+    if ($bytes.Length -lt 64)
     {
-        throw "Cannot tamper with empty file '$tamperedPath'."
+        throw "Cannot tamper with invalid PE file '$tamperedPath'."
     }
 
-    $bytes[$bytes.Length - 1] = ($bytes[$bytes.Length - 1] + 1) % 256
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+    if ($peOffset -lt 64 -or $peOffset -gt ($bytes.Length - 24) -or [BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550)
+    {
+        throw "Cannot locate the PE header in '$tamperedPath'."
+    }
+
+    $optionalHeaderSize = [BitConverter]::ToUInt16($bytes, ($peOffset + 20))
+    $sectionOffset = $peOffset + 24 + $optionalHeaderSize
+    if ([BitConverter]::ToUInt16($bytes, ($peOffset + 6)) -eq 0 -or $sectionOffset -gt ($bytes.Length - 40))
+    {
+        throw "Cannot locate a PE section in '$tamperedPath'."
+    }
+
+    $rawSize = [BitConverter]::ToUInt32($bytes, ($sectionOffset + 16))
+    $rawOffset = [BitConverter]::ToUInt32($bytes, ($sectionOffset + 20))
+    if ($rawSize -eq 0 -or $rawOffset -lt ($sectionOffset + 40) -or ([long]$rawOffset + $rawSize) -gt $bytes.Length)
+    {
+        throw "Cannot locate PE section content in '$tamperedPath'."
+    }
+
+    # Certificate-table padding is not Authenticode-hashed; mutate section content instead.
+    $bytes[$rawOffset] = $bytes[$rawOffset] -bxor 1
     [System.IO.File]::WriteAllBytes($tamperedPath, $bytes)
     Write-Verbose "Created tampered binary '$tamperedPath'."
 
@@ -245,7 +266,7 @@ try
         {
             $binaryPath = Get-RequiredFullPath -Path $BinaryPath -Description 'Signed binary'
             $tamperedPath = New-TamperedBinaryCopy -SourcePath $binaryPath -DestinationDirectory $tempRoot
-            Invoke-ExpectedFailure -ScenarioName $Scenario -ExpectedMessageFragment 'Authenticode signature validation failed' -Action {
+            Invoke-ExpectedFailure -ScenarioName $Scenario -ExpectedMessageFragment 'HashMismatch' -Action {
                 $null = Get-WindowsBinaryTrustEvidence -BinaryPath $tamperedPath
             }
         }
