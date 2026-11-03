@@ -109,3 +109,6 @@ foreach ($case in $cases)
 
     Write-Host "Scenario '$($case.Name)' passed."
 }
+
+# Actions propagates LASTEXITCODE, but the child-process failures above are expected.
+$global:LASTEXITCODE = 0
