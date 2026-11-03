@@ -43,6 +43,14 @@ jobs:
         shell: pwsh
         run: ./scripts/Test-WindowsInstallerProvenance.ps1
 
+      - name: Validate installer authentication preflight
+        shell: pwsh
+        run: ./scripts/Test-InstallerAuthentication.ps1
+
+      - name: Validate installer authentication preflight in Windows PowerShell
+        shell: powershell
+        run: ./scripts/Test-InstallerAuthentication.ps1
+
   validate-shell-scripts:
     runs-on: ubuntu-latest
 
@@ -53,6 +61,10 @@ jobs:
       - name: Validate shell script syntax
         shell: bash
         run: ./scripts/verify-shell-syntax.sh
+
+      - name: Validate installer authentication preflight
+        shell: bash
+        run: bash ./scripts/test-installer-authentication.sh
 
   publish-aot:
     needs: [validate-powershell-scripts, validate-windows-installer-provenance, validate-shell-scripts]
